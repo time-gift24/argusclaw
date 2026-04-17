@@ -58,7 +58,7 @@ export function McpCard({
 
       <div className="flex items-center justify-between text-[11px] text-muted-foreground">
         <span>{server.enabled ? "已启用" : "已禁用"}</span>
-        <span>{server.discovered_tool_count} tools</span>
+        <span>{server.discovered_tool_count} 个工具</span>
       </div>
 
       {server.last_error && (
@@ -78,7 +78,7 @@ export function McpCard({
             <span className="text-[10px] text-muted-foreground">{latestResult.latency_ms} ms</span>
           </div>
           <p className="text-[10px] text-muted-foreground">
-            最近测试发现 {latestResult.discovered_tools.length} 个 tools
+            最近测试发现 {latestResult.discovered_tools.length} 个工具
           </p>
         </button>
       )}

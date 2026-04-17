@@ -96,12 +96,12 @@ export default function McpSettingsPage() {
             <h1 className="text-lg font-bold tracking-tight">MCP 配置</h1>
           </div>
           <p className="text-muted-foreground text-sm">
-            管理 MCP server 配置、连接测试结果和工具发现快照。
+            管理 MCP 服务配置、连接测试结果和工具发现快照。
           </p>
         </div>
         <Button size="sm" onClick={() => navigate("/settings/mcp/new")} className="shadow-sm">
           <Plus className="h-4 w-4 mr-1.5" />
-          添加 MCP Server
+          添加 MCP 服务
         </Button>
       </div>
 
@@ -111,7 +111,7 @@ export default function McpSettingsPage() {
             <Server className="h-7 w-7 text-muted-foreground/50" />
           </div>
           <div className="text-center space-y-1">
-            <p className="font-medium text-muted-foreground">暂无 MCP Server</p>
+            <p className="font-medium text-muted-foreground">暂无 MCP 服务</p>
             <p className="text-xs text-muted-foreground/60">添加一个 stdio、http 或 sse MCP 端点来供智能体使用</p>
           </div>
           <Button size="sm" onClick={() => navigate("/settings/mcp/new")} className="px-4">
@@ -146,8 +146,8 @@ export default function McpSettingsPage() {
       <DeleteConfirmDialog
         open={deleteId !== null}
         onOpenChange={(open) => !open && setDeleteId(null)}
-        title="确认删除 MCP Server"
-        description="此操作将删除该 MCP server 配置及其最近工具快照，且无法撤销。"
+        title="确认删除 MCP 服务"
+        description="此操作将删除该 MCP 服务配置及其最近工具快照，且无法撤销。"
         onConfirm={handleDelete}
         loading={deleteLoading}
       />

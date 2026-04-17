@@ -454,7 +454,7 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
                 <div className="bg-primary/10 p-1.5 rounded-lg text-primary">
                   <Bot className="h-3.5 w-3.5" />
                 </div>
-                Basic Information
+                基础信息
               </div>
               <div className="flex-1 flex flex-col justify-between gap-6 bg-muted/20 p-6 rounded-[24px] border border-muted/60 shadow-sm">
                 <div className="space-y-2">
@@ -560,7 +560,7 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
                 <div className="bg-primary/10 p-1.5 rounded-lg text-primary">
                   <Cpu className="h-3.5 w-3.5" />
                 </div>
-                Model Parameters
+                模型参数
               </div>
               <div className="flex-1 flex flex-col justify-between gap-6 bg-muted/20 p-6 rounded-[24px] border border-muted/60 shadow-sm">
                 <div className="space-y-2">
@@ -844,7 +844,7 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
               <div className="bg-primary/10 p-1.5 rounded-lg text-primary">
                 <Server className="h-4 w-4" />
               </div>
-              MCP Servers
+              MCP 服务
             </div>
             <div
               onClick={() => setMcpDialogOpen(true)}
@@ -867,8 +867,8 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
                 </p>
                 <p className="text-[10px] text-muted-foreground">
                   {mcpEnabledCount > 0
-                    ? `${mcpEnabledCount} 个 server · ${selectedMcpToolCount} 个 tools`
-                    : "为智能体绑定可动态注入的 MCP servers"}
+                    ? `${mcpEnabledCount} 个服务 · ${selectedMcpToolCount} 个工具`
+                    : "为智能体绑定可动态注入的 MCP 服务"}
                 </p>
               </div>
             </div>
@@ -882,14 +882,14 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
                   MCP 配置
                 </DialogTitle>
                 <DialogDescription>
-                  绑定设置页中已配置的 MCP server，并按 tool 配置白名单。只有后台处于 ready 状态的 server 会在实际对话中注入。
+                  绑定设置页中已配置的 MCP 服务，并按工具配置白名单。只有后台处于就绪状态的服务会在实际对话中注入。
                 </DialogDescription>
               </DialogHeader>
 
               <div className="flex-1 overflow-y-auto space-y-5 py-2 custom-scrollbar">
                 {mcpServerList.length === 0 ? (
                   <div className="rounded-2xl border border-dashed border-muted/60 bg-muted/20 p-6 text-center space-y-3">
-                    <p className="text-sm font-semibold">还没有 MCP Server</p>
+                    <p className="text-sm font-semibold">还没有 MCP 服务</p>
                     <p className="text-xs text-muted-foreground">
                       先去设置页新增并测试连接，再回来为当前智能体绑定。
                     </p>

@@ -66,13 +66,13 @@ export function ThreadMonitorScreen() {
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div className="space-y-1">
               <div className="flex items-center gap-2">
-                <h2 className="text-xl font-semibold tracking-tight">Thread Monitor</h2>
+                <h2 className="text-xl font-semibold tracking-tight">线程监控</h2>
                 <Badge variant="outline" className="rounded-full">
                   监控优先
                 </Badge>
               </div>
               <p className="max-w-2xl text-sm text-muted-foreground">
-                监控线程池总览和统一 runtime 状态，并为运行中的 job 提供轻量停止入口。线程列表与池级指标仍以后端权威状态为准。
+                监控线程池总览和统一运行时状态，并为运行中的任务提供轻量停止入口。线程列表与池级指标仍以后端权威状态为准。
               </p>
               <div className="flex flex-wrap gap-2 pt-1 text-xs">
                 <Badge variant="outline" className="rounded-full border-sky-500/30 bg-sky-500/10 text-sky-700 dark:text-sky-300">
@@ -102,8 +102,8 @@ export function ThreadMonitorScreen() {
           <div className="flex flex-wrap gap-2 text-xs">
             {[
               ["all", "全部类型"],
-              ["chat", "Chat"],
-              ["job", "Job"],
+              ["chat", "聊天线程"],
+              ["job", "任务线程"],
             ].map(([value, label]) => (
               <button
                 key={value}

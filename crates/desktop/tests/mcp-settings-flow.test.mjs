@@ -56,6 +56,15 @@ test("settings exposes dedicated MCP routes and editor components", () => {
   assert.match(mcpEditorSource, /Header 名称/)
   assert.match(mcpEditorSource, /Header 值/)
   assert.match(mcpEditorSource, /addHeaderRow/)
+  assert.match(mcpPageSource, /MCP 配置/)
+  assert.match(mcpPageSource, /管理 MCP 服务配置、连接测试结果和工具发现快照。/)
+  assert.match(mcpPageSource, /添加 MCP 服务/)
+  assert.match(mcpPageSource, /暂无 MCP 服务/)
+  assert.doesNotMatch(mcpPageSource, /MCP Server/)
+  assert.match(mcpEditorSource, /编辑 MCP 服务|新建 MCP 服务/)
+  assert.match(mcpEditorSource, /服务信息/)
+  assert.match(mcpEditorSource, /传输参数/)
+  assert.doesNotMatch(mcpEditorSource, /MCP Configuration \/|New Server|Server Details|Transport Parameters/)
 })
 
 test("settings navigation and breadcrumbs surface the MCP configuration section", () => {

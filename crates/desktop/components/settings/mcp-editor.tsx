@@ -376,9 +376,9 @@ export function McpEditor({ serverId }: McpEditorProps) {
             <ArrowLeft className="h-4 w-4" />
           </Button>
           <div className="space-y-0.5">
-            <h1 className="text-lg font-bold tracking-tight">{isEditing ? "编辑 MCP Server" : "新建 MCP Server"}</h1>
+            <h1 className="text-lg font-bold tracking-tight">{isEditing ? "编辑 MCP 服务" : "新建 MCP 服务"}</h1>
             <p className="text-[11px] text-muted-foreground uppercase tracking-wider font-semibold opacity-70">
-              MCP Configuration / {isEditing ? formData.display_name : "New Server"}
+              MCP 服务配置 / {isEditing ? formData.display_name : "新服务"}
             </p>
           </div>
         </div>
@@ -405,7 +405,7 @@ export function McpEditor({ serverId }: McpEditorProps) {
                 <div className="bg-primary/10 p-1.5 rounded-lg text-primary">
                   <Server className="h-3.5 w-3.5" />
                 </div>
-                Server Details
+                服务信息
               </div>
               <div className="flex-1 flex flex-col justify-between gap-6 bg-muted/20 p-6 rounded-[24px] border border-muted/60 shadow-sm">
                 <div className="space-y-2">
@@ -419,7 +419,7 @@ export function McpEditor({ serverId }: McpEditorProps) {
                 </div>
 
                 <div className="space-y-2">
-                  <Label className="text-[11px] font-bold text-muted-foreground uppercase tracking-wider ml-1">Transport</Label>
+                  <Label className="text-[11px] font-bold text-muted-foreground uppercase tracking-wider ml-1">传输方式</Label>
                   <select
                     value={formData.transport.kind}
                     onChange={(event) => handleTransportKindChange(event.target.value as McpTransportConfig["kind"])}
@@ -448,7 +448,7 @@ export function McpEditor({ serverId }: McpEditorProps) {
                     onCheckedChange={(checked) => setFormData((prev) => ({ ...prev, enabled: !!checked }))}
                   />
                   <Label htmlFor="mcp-enabled" className="text-sm cursor-pointer font-bold">
-                    启用该 MCP Server
+                    启用该 MCP 服务
                   </Label>
                 </div>
               </div>
@@ -459,7 +459,7 @@ export function McpEditor({ serverId }: McpEditorProps) {
                 <div className="bg-primary/10 p-1.5 rounded-lg text-primary">
                   {formData.transport.kind === "stdio" ? <TerminalSquare className="h-3.5 w-3.5" /> : <Globe className="h-3.5 w-3.5" />}
                 </div>
-                Transport Parameters
+                传输参数
               </div>
               <div className="flex-1 flex flex-col justify-between gap-6 bg-muted/20 p-6 rounded-[24px] border border-muted/60 shadow-sm">
                 {formData.transport.kind === "stdio" ? (
@@ -486,7 +486,7 @@ export function McpEditor({ serverId }: McpEditorProps) {
 
                     <div className="space-y-2">
                       <div className="flex items-center justify-between gap-3">
-                        <Label className="text-[11px] font-bold text-muted-foreground uppercase tracking-wider ml-1">Args</Label>
+                        <Label className="text-[11px] font-bold text-muted-foreground uppercase tracking-wider ml-1">参数</Label>
                         <Button
                           type="button"
                           size="icon"
@@ -526,7 +526,7 @@ export function McpEditor({ serverId }: McpEditorProps) {
 
                     <div className="space-y-2">
                       <div className="flex items-center justify-between gap-3">
-                        <Label className="text-[11px] font-bold text-muted-foreground uppercase tracking-wider ml-1">Environment</Label>
+                        <Label className="text-[11px] font-bold text-muted-foreground uppercase tracking-wider ml-1">环境变量</Label>
                         <Button
                           type="button"
                           size="icon"
@@ -693,16 +693,16 @@ export function McpEditor({ serverId }: McpEditorProps) {
                 </div>
               ) : (
                 <div className="rounded-2xl border border-dashed border-muted/60 px-4 py-3 text-sm text-muted-foreground">
-                  点击“测试连接”后会显示连接结果，并拉取当前 server 暴露的 MCP tools。
+                  点击“测试连接”后会显示连接结果，并拉取当前服务暴露的 MCP 工具。
                 </div>
               )}
 
               <div className="space-y-3">
                 <div className="flex items-center justify-between gap-3">
                   <div>
-                    <p className="text-sm font-semibold">Discovered Tools</p>
+                    <p className="text-sm font-semibold">已发现工具</p>
                     <p className="text-[11px] text-muted-foreground">
-                      当前缓存 {discoveredTools.length} 个 tools
+                      当前缓存 {discoveredTools.length} 个工具
                     </p>
                   </div>
                 </div>
@@ -720,7 +720,7 @@ export function McpEditor({ serverId }: McpEditorProps) {
                       >
                         <p className="text-sm font-semibold truncate">{tool.tool_name_original}</p>
                         <p className="text-[11px] text-muted-foreground line-clamp-3">
-                          {tool.description || "No description"}
+                          {tool.description || "暂无描述"}
                         </p>
                       </div>
                     ))}

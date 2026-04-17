@@ -201,13 +201,13 @@ const Navbar = ({
                 <DropdownMenuItem>
                   <Link to='/settings/agents' className='flex items-center gap-2 w-full'>
                     <Bot className='h-4 w-4' />
-                    <span>Agent 配置</span>
+                    <span>智能体配置</span>
                   </Link>
                 </DropdownMenuItem>
                 <DropdownMenuItem>
                   <Link to='/settings/providers' className='flex items-center gap-2 w-full'>
                     <Cloud className='h-4 w-4' />
-                    <span>LLMProvider 配置</span>
+                    <span>模型提供者配置</span>
                   </Link>
                 </DropdownMenuItem>
                 <DropdownMenuItem>

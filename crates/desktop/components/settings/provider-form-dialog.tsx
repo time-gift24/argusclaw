@@ -190,14 +190,14 @@ export function ProviderFormDialog({
   ) : (
     <Button size="sm">
       <Plus className="h-4 w-4 mr-1" />
-      Add Provider
+      新增提供者
     </Button>
   );
   const dialogTrigger = trigger === undefined ? defaultTrigger : trigger;
   const draftProvider = {
     id: formData.id,
     kind: formData.kind,
-    display_name: formData.display_name || "未命名 Provider",
+    display_name: formData.display_name || "未命名提供者",
     base_url: formData.base_url,
     models: formData.models,
     model_config: formData.model_config,
@@ -214,12 +214,12 @@ export function ProviderFormDialog({
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
           <DialogTitle>
-            {isEditing ? "Edit Provider" : "Add Provider"}
+            {isEditing ? "编辑提供者" : "新增提供者"}
           </DialogTitle>
           <DialogDescription>
             {isEditing
-              ? "Update the LLM provider configuration."
-              : "Configure a new LLM provider."}
+              ? "更新模型提供者配置。"
+              : "配置一个新的模型提供者。"}
           </DialogDescription>
         </DialogHeader>
         <form onSubmit={handleSubmit} className="space-y-4">
@@ -229,19 +229,19 @@ export function ProviderFormDialog({
             </div>
           )}
           <div className="space-y-2">
-            <Label htmlFor="display_name">Display Name</Label>
+            <Label htmlFor="display_name">显示名称</Label>
             <Input
               id="display_name"
               value={formData.display_name}
               onChange={(e) =>
                 setFormData({ ...formData, display_name: e.target.value })
               }
-              placeholder="My LLM Provider"
+              placeholder="我的模型提供者"
               required
             />
           </div>
           <div className="space-y-2">
-            <Label htmlFor="base_url">Base URL</Label>
+            <Label htmlFor="base_url">基础地址</Label>
             <Input
               id="base_url"
               value={formData.base_url}
@@ -253,7 +253,7 @@ export function ProviderFormDialog({
             />
           </div>
           <div className="space-y-2">
-            <Label htmlFor="api_key">API Key <span className="text-muted-foreground text-xs">(可选)</span></Label>
+            <Label htmlFor="api_key">API 密钥 <span className="text-muted-foreground text-xs">(可选)</span></Label>
             <Input
               id="api_key"
               type="password"

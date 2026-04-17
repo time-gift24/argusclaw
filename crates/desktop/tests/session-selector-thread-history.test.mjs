@@ -57,8 +57,10 @@ test("history dialog uses a left-right session and thread layout", () => {
 
 test("history dialog exposes right-click rename affordances", () => {
   assert.match(sessionSelectorSource, /onContextMenu/);
-  assert.match(sessionSelectorSource, /重命名 Session/);
-  assert.match(sessionSelectorSource, /重命名 Thread/);
+  assert.match(sessionSelectorSource, /重命名会话/);
+  assert.match(sessionSelectorSource, /重命名对话/);
+  assert.doesNotMatch(sessionSelectorSource, /重命名 Session/);
+  assert.doesNotMatch(sessionSelectorSource, /重命名 Thread/);
   assert.match(sessionSelectorSource, /sessions\.renameSession/);
   assert.match(sessionSelectorSource, /sessions\.renameThread/);
 });
