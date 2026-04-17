@@ -22,9 +22,9 @@ use argus_protocol::llm::{
 };
 use argus_protocol::{
     AgentId, LlmProvider, MailboxMessage, MailboxMessageType, McpToolResolver, ProviderId,
-    ProviderResolver, SessionId, ThreadControlEvent, ThreadEvent, ThreadId, ThreadJobResult,
-    ThreadPoolEventReason, ThreadPoolRuntimeKind, ThreadPoolRuntimeRef, ThreadPoolRuntimeSummary,
-    ThreadPoolSnapshot, ThreadPoolState, ThreadRuntimeStatus,
+    ProviderResolver, SessionId, ThreadControlMessage, ThreadEvent, ThreadId, ThreadJobResult,
+    ThreadMessage, ThreadPoolEventReason, ThreadPoolRuntimeKind, ThreadPoolRuntimeRef,
+    ThreadPoolRuntimeSummary, ThreadPoolSnapshot, ThreadPoolState, ThreadRuntimeStatus,
 };
 use argus_repository::traits::{JobRepository, LlmProviderRepository, ThreadRepository};
 use argus_repository::types::{
@@ -34,7 +34,7 @@ use argus_template::TemplateManager;
 use argus_tool::ToolManager;
 use chrono::Utc;
 use rust_decimal::Decimal;
-use tokio::sync::{Mutex as AsyncMutex, OwnedSemaphorePermit, RwLock, Semaphore, broadcast, mpsc};
+use tokio::sync::{Mutex as AsyncMutex, OwnedSemaphorePermit, RwLock, Semaphore, broadcast};
 use tokio::task::AbortHandle;
 use uuid::Uuid;
 
@@ -102,7 +102,7 @@ struct RuntimeEntry {
     summary: ThreadPoolRuntimeSummary,
     sender: broadcast::Sender<ThreadEvent>,
     thread: Option<Arc<RwLock<argus_agent::Thread>>>,
-    control_tx: Option<mpsc::UnboundedSender<ThreadControlEvent>>,
+    inbox: Vec<MailboxMessage>,
     forwarder_abort: Option<AbortHandle>,
     slot_permit: Option<OwnedSemaphorePermit>,
     load_mutex: Arc<AsyncMutex<()>>,
@@ -121,7 +121,6 @@ struct ThreadPoolStore {
 #[derive(Debug, Default)]
 struct RuntimeShutdown {
     thread: Option<Arc<RwLock<argus_agent::Thread>>>,
-    control_tx: Option<mpsc::UnboundedSender<ThreadControlEvent>>,
     forwarder_abort: Option<AbortHandle>,
 }
 
@@ -130,10 +129,13 @@ impl RuntimeShutdown {
         if let Some(forwarder_abort) = self.forwarder_abort {
             forwarder_abort.abort();
         }
-        if let Some(control_tx) = self.control_tx {
-            let _ = control_tx.send(ThreadControlEvent::ShutdownRuntime);
+        if let Some(thread) = self.thread {
+            tokio::spawn(async move {
+                let _ = thread.read().await.send_message(ThreadMessage::Control(
+                    ThreadControlMessage::ShutdownRuntime,
+                ));
+            });
         }
-        drop(self.thread);
     }
 }
 
@@ -295,7 +297,6 @@ impl ThreadPool {
         if let Some(entry) = removed_entry {
             RuntimeShutdown {
                 thread: entry.thread,
-                control_tx: entry.control_tx,
                 forwarder_abort: entry.forwarder_abort,
             }
             .run();
@@ -445,20 +446,29 @@ impl ThreadPool {
             .map(|entry| entry.summary.clone())
     }
 
+    fn route_mailbox_message(message: MailboxMessage) -> ThreadMessage {
+        if matches!(message.message_type, MailboxMessageType::JobResult { .. }) {
+            ThreadMessage::JobResult { message }
+        } else {
+            ThreadMessage::PeerMessage { message }
+        }
+    }
+
     /// Return unread queued mailbox messages for a loaded runtime.
     pub async fn unread_mailbox_messages(
         &self,
         thread_id: ThreadId,
     ) -> Result<Vec<MailboxMessage>, JobError> {
-        let thread = self.loaded_thread(&thread_id).ok_or_else(|| {
+        let store = self.store.lock().expect("thread-pool mutex poisoned");
+        let entry = store.runtimes.get(&thread_id.to_string()).ok_or_else(|| {
             JobError::ExecutionFailed(format!("thread {} is not loaded", thread_id))
         })?;
-        let mailbox = {
-            let guard = thread.read().await;
-            guard.mailbox()
-        };
-
-        Ok(mailbox.lock().await.unread_mailbox_messages())
+        Ok(entry
+            .inbox
+            .iter()
+            .filter(|message| !message.read)
+            .cloned()
+            .collect())
     }
 
     /// Mark a queued mailbox message as read for a loaded runtime.
@@ -467,15 +477,37 @@ impl ThreadPool {
         thread_id: ThreadId,
         message_id: &str,
     ) -> Result<bool, JobError> {
-        let thread = self.loaded_thread(&thread_id).ok_or_else(|| {
-            JobError::ExecutionFailed(format!("thread {} is not loaded", thread_id))
-        })?;
-        let mailbox = {
-            let guard = thread.read().await;
-            guard.mailbox()
+        let mut store = self.store.lock().expect("thread-pool mutex poisoned");
+        let entry = store
+            .runtimes
+            .get_mut(&thread_id.to_string())
+            .ok_or_else(|| {
+                JobError::ExecutionFailed(format!("thread {} is not loaded", thread_id))
+            })?;
+        let Some(message) = entry
+            .inbox
+            .iter_mut()
+            .find(|message| message.id == message_id)
+        else {
+            return Ok(false);
         };
+        message.mark_read();
+        Ok(true)
+    }
 
-        Ok(mailbox.lock().await.mark_mailbox_message_read(message_id))
+    /// Remove a queued job-result mailbox item after the persisted result is consumed.
+    pub fn claim_queued_job_result(
+        &self,
+        thread_id: ThreadId,
+        job_id: &str,
+    ) -> Option<MailboxMessage> {
+        let mut store = self.store.lock().expect("thread-pool mutex poisoned");
+        let entry = store.runtimes.get_mut(&thread_id.to_string())?;
+        let index = entry
+            .inbox
+            .iter()
+            .position(|message| message.job_id() == Some(job_id))?;
+        Some(entry.inbox.remove(index))
     }
 
     /// Deliver a mailbox message to a runtime thread.
@@ -505,17 +537,20 @@ impl ThreadPool {
             }
         };
 
-        let mailbox = {
-            let guard = thread.read().await;
-            guard.mailbox()
-        };
-        mailbox
-            .lock()
+        let routed_message = Self::route_mailbox_message(message.clone());
+        thread
+            .read()
             .await
-            .enqueue_mailbox_message(message.clone());
+            .send_message(routed_message)
+            .map_err(|error| JobError::ExecutionFailed(error.to_string()))?;
+        if let Some(entry) = self
+            .store
+            .lock()
+            .expect("thread-pool mutex poisoned")
+            .runtimes
+            .get_mut(&thread_id.to_string())
         {
-            let guard = thread.read().await;
-            let _ = guard.control_tx().send(ThreadControlEvent::MailboxUpdated);
+            entry.inbox.push(message.clone());
         }
 
         if let Some(sender) = self
@@ -657,15 +692,14 @@ impl ThreadPool {
             snapshot: self.collect_metrics(),
         });
 
-        let mailbox = {
-            let guard = thread.read().await;
-            guard.mailbox()
-        };
-        mailbox.lock().await.enqueue_user_message(message, None);
-        {
-            let guard = thread.read().await;
-            let _ = guard.control_tx().send(ThreadControlEvent::MailboxUpdated);
-        }
+        thread
+            .read()
+            .await
+            .send_message(ThreadMessage::UserInput {
+                content: message,
+                msg_override: None,
+            })
+            .map_err(|error| JobError::ExecutionFailed(error.to_string()))?;
 
         Ok(())
     }
@@ -849,13 +883,10 @@ impl ThreadPool {
                         let cancellation_signal = cancellation.clone();
                         let cancellation_forwarder = tokio::spawn(async move {
                             cancellation_signal.cancelled().await;
-                            let mailbox = {
-                                let guard = cancellation_thread.read().await;
-                                guard.mailbox()
-                            };
-                            mailbox.lock().await.interrupt_stop();
-                            let guard = cancellation_thread.read().await;
-                            let _ = guard.control_tx().send(ThreadControlEvent::MailboxUpdated);
+                            let _ = cancellation_thread
+                                .read()
+                                .await
+                                .send_message(ThreadMessage::Interrupt);
                         });
 
                         let result = self
@@ -1023,7 +1054,7 @@ impl ThreadPool {
         let (
             sender,
             existing_thread,
-            existing_control_tx,
+            existing_inbox,
             existing_forwarder_abort,
             existing_slot_permit,
             load_mutex,
@@ -1031,7 +1062,7 @@ impl ThreadPool {
             (
                 entry.sender.clone(),
                 entry.thread.clone(),
-                entry.control_tx.clone(),
+                entry.inbox.clone(),
                 entry.forwarder_abort.take(),
                 entry.slot_permit.take(),
                 Arc::clone(&entry.load_mutex),
@@ -1041,7 +1072,7 @@ impl ThreadPool {
             (
                 sender,
                 None,
-                None,
+                Vec::new(),
                 None,
                 None,
                 Arc::new(AsyncMutex::new(())),
@@ -1060,7 +1091,7 @@ impl ThreadPool {
                 },
                 sender: sender.clone(),
                 thread: thread.or(existing_thread),
-                control_tx: existing_control_tx,
+                inbox: existing_inbox,
                 forwarder_abort: existing_forwarder_abort,
                 slot_permit: existing_slot_permit,
                 load_mutex,
@@ -1094,7 +1125,6 @@ impl ThreadPool {
     fn take_runtime_shutdown(entry: &mut RuntimeEntry) -> RuntimeShutdown {
         RuntimeShutdown {
             thread: entry.thread.take(),
-            control_tx: entry.control_tx.take(),
             forwarder_abort: entry.forwarder_abort.take(),
         }
     }
@@ -1238,10 +1268,6 @@ impl ThreadPool {
         cool_on_idle: bool,
     ) -> Result<(), JobError> {
         let estimated_memory_bytes = Self::estimate_thread_memory(&thread).await;
-        let control_tx = {
-            let guard = thread.read().await;
-            guard.control_tx()
-        };
         let (sender, replaced_runtime) = {
             let mut store = self.store.lock().expect("thread-pool mutex poisoned");
             let (sender, replaced_runtime) = {
@@ -1265,7 +1291,6 @@ impl ThreadPool {
                 entry.summary.last_active_at = Some(Utc::now().to_rfc3339());
                 entry.summary.last_reason = None;
                 entry.thread = Some(Arc::clone(&thread));
-                entry.control_tx = Some(control_tx.clone());
                 entry.forwarder_abort = None;
                 (entry.sender.clone(), replaced_runtime)
             };
