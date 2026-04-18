@@ -454,47 +454,6 @@ impl ThreadPool {
         }
     }
 
-    /// Return unread queued mailbox messages for a loaded runtime.
-    pub async fn unread_mailbox_messages(
-        &self,
-        thread_id: ThreadId,
-    ) -> Result<Vec<MailboxMessage>, JobError> {
-        let store = self.store.lock().expect("thread-pool mutex poisoned");
-        let entry = store.runtimes.get(&thread_id.to_string()).ok_or_else(|| {
-            JobError::ExecutionFailed(format!("thread {} is not loaded", thread_id))
-        })?;
-        Ok(entry
-            .inbox
-            .iter()
-            .filter(|message| !message.read)
-            .cloned()
-            .collect())
-    }
-
-    /// Mark a queued mailbox message as read for a loaded runtime.
-    pub async fn mark_mailbox_message_read(
-        &self,
-        thread_id: ThreadId,
-        message_id: &str,
-    ) -> Result<bool, JobError> {
-        let mut store = self.store.lock().expect("thread-pool mutex poisoned");
-        let entry = store
-            .runtimes
-            .get_mut(&thread_id.to_string())
-            .ok_or_else(|| {
-                JobError::ExecutionFailed(format!("thread {} is not loaded", thread_id))
-            })?;
-        let Some(message) = entry
-            .inbox
-            .iter_mut()
-            .find(|message| message.id == message_id)
-        else {
-            return Ok(false);
-        };
-        message.mark_read();
-        Ok(true)
-    }
-
     /// Remove a queued job-result mailbox item after the persisted result is consumed.
     pub fn claim_queued_job_result(
         &self,

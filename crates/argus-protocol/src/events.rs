@@ -192,10 +192,6 @@ impl MailboxMessage {
             msg_override: None,
         }
     }
-
-    pub fn mark_read(&mut self) {
-        self.read = true;
-    }
 }
 
 /// A queued user message retained by the mailbox.

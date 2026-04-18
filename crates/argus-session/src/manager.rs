@@ -1945,7 +1945,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn deliver_mailbox_message_tracks_unread_inbox_until_marked_read() {
+    async fn deliver_mailbox_message_keeps_thread_runtime_registered() {
         let (manager, _temp_dir, session_id, thread_id) =
             test_session_manager_with_provider(Arc::new(HangingStreamingProvider {
                 model_name: "routing-hanging".to_string(),
@@ -1990,62 +1990,15 @@ mod tests {
             .await
             .expect("thread pool should deliver mailbox messages through thread routing");
 
-        let unread = manager
-            .thread_pool
-            .unread_mailbox_messages(thread_id)
-            .await
-            .expect("thread pool should expose unread mailbox messages");
-        assert_eq!(unread.len(), 1);
-        assert_eq!(unread[0].id, message.id);
-        assert_eq!(unread[0].text, message.text);
-    }
-
-    #[tokio::test]
-    async fn mark_read_removes_message_from_unread_listing_only_after_explicit_request() {
-        let (manager, _temp_dir, session_id, thread_id) = test_session_manager().await;
-        let _session = manager.load(session_id).await.expect("session should load");
-        let message = MailboxMessage {
-            id: Uuid::new_v4().to_string(),
-            from_thread_id: ThreadId::new(),
-            to_thread_id: thread_id,
-            from_label: "sender".to_string(),
-            message_type: MailboxMessageType::Plain,
-            text: "mark me read".to_string(),
-            timestamp: chrono::Utc::now().to_rfc3339(),
-            read: false,
-            summary: None,
-        };
-
-        manager
-            .thread_pool
-            .deliver_mailbox_message(thread_id, message.clone())
-            .await
-            .expect("thread pool should enqueue the mailbox message");
-        let unread = manager
-            .thread_pool
-            .unread_mailbox_messages(thread_id)
-            .await
-            .expect("thread pool should return unread messages");
-        assert_eq!(unread.len(), 1);
-        assert_eq!(unread[0].id, message.id);
-
-        assert!(
+        assert_eq!(
             manager
                 .thread_pool
-                .mark_mailbox_message_read(thread_id, &message.id)
-                .await
-                .expect("mark_mailbox_message_read should succeed"),
-            "queued mailbox message should be markable as read"
-        );
-
-        let unread = manager
-            .thread_pool
-            .unread_mailbox_messages(thread_id)
-            .await
-            .expect("thread pool should return unread messages after marking read");
-        assert!(
-            unread.is_empty(),
-            "mailbox message should stay unread until mark_read is called"
+                .runtime_summary(&thread_id)
+                .expect("thread summary should exist")
+                .runtime
+                .thread_id,
+            thread_id,
+            "mailbox delivery should keep the thread runtime registered"
         );
     }
 
@@ -2086,19 +2039,6 @@ mod tests {
             .deliver_mailbox_message(harness.thread_id, message)
             .await
             .expect("thread pool should enqueue the job-result mailbox message");
-
-        let unread = harness
-            .manager
-            .thread_pool
-            .unread_mailbox_messages(harness.thread_id)
-            .await
-            .expect("thread pool should expose unread job-result messages");
-        assert!(
-            unread
-                .iter()
-                .any(|queued| queued.job_id() == Some(job_id.as_str())),
-            "job-result mailbox copy should be present before consume"
-        );
 
         wait_until_runtime_status(
             &harness.manager,
