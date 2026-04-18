@@ -22,8 +22,7 @@ pub use error::{ArgusError, Result};
 pub use events::{
     MailboxMessage, MailboxMessageType, QueuedUserMessage, ThreadControlMessage, ThreadEvent,
     ThreadJobResult, ThreadMessage, ThreadPoolEventReason, ThreadPoolRuntimeKind,
-    ThreadPoolRuntimeSummary, ThreadPoolSnapshot, ThreadPoolState, ThreadRuntimeSnapshot,
-    ThreadRuntimeStatus,
+    ThreadPoolRuntimeSummary, ThreadPoolSnapshot, ThreadPoolState, ThreadRuntimeStatus,
 };
 pub use hooks::{HookAction, HookEvent, HookHandler, HookRegistry, ToolHookContext};
 pub use ids::{AgentId, ProviderId, SessionId, ThreadId};

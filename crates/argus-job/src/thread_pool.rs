@@ -110,7 +110,7 @@ struct RuntimeEntry {
 
 #[derive(Debug, Default)]
 struct ThreadPoolStore {
-    runtimes: HashMap<String, RuntimeEntry>,
+    runtimes: HashMap<ThreadId, RuntimeEntry>,
     job_bindings: HashMap<String, ThreadId>,
     parent_thread_by_child: HashMap<ThreadId, ThreadId>,
     child_threads_by_parent: HashMap<ThreadId, Vec<ThreadId>>,
@@ -266,14 +266,14 @@ impl ThreadPool {
             .lock()
             .expect("thread-pool mutex poisoned")
             .runtimes
-            .get(&thread_id.to_string())
+            .get(thread_id)
             .map(|entry| entry.sender.subscribe())
     }
 
     /// Remove a runtime from the pool registry.
     pub fn remove_runtime(&self, thread_id: &ThreadId) -> bool {
         let mut store = self.store.lock().expect("thread-pool mutex poisoned");
-        let removed_entry = store.runtimes.remove(&thread_id.to_string());
+        let removed_entry = store.runtimes.remove(thread_id);
         let removed = removed_entry.is_some();
         if removed {
             store
@@ -311,7 +311,7 @@ impl ThreadPool {
             .lock()
             .expect("thread-pool mutex poisoned")
             .runtimes
-            .get(&thread_id.to_string())
+            .get(thread_id)
             .and_then(|entry| {
                 (entry.summary.kind == ThreadPoolRuntimeKind::Chat)
                     .then(|| entry.thread.clone())
@@ -325,7 +325,7 @@ impl ThreadPool {
             .lock()
             .expect("thread-pool mutex poisoned")
             .runtimes
-            .get(&thread_id.to_string())
+            .get(thread_id)
             .and_then(|entry| entry.thread.clone())
     }
 
@@ -439,7 +439,7 @@ impl ThreadPool {
             .lock()
             .expect("thread-pool mutex poisoned")
             .runtimes
-            .get(&thread_id.to_string())
+            .get(thread_id)
             .map(|entry| entry.summary.clone())
     }
 
@@ -458,7 +458,7 @@ impl ThreadPool {
         job_id: &str,
     ) -> Option<MailboxMessage> {
         let mut store = self.store.lock().expect("thread-pool mutex poisoned");
-        let entry = store.runtimes.get_mut(&thread_id.to_string())?;
+        let entry = store.runtimes.get_mut(&thread_id)?;
         let index = entry
             .queued_job_results
             .iter()
@@ -531,7 +531,7 @@ impl ThreadPool {
                 .lock()
                 .expect("thread-pool mutex poisoned")
                 .runtimes
-                .get_mut(&thread_id.to_string())
+                .get_mut(&thread_id)
         {
             entry.queued_job_results.push(message.clone());
         }
@@ -541,7 +541,7 @@ impl ThreadPool {
             .lock()
             .expect("thread-pool mutex poisoned")
             .runtimes
-            .get(&thread_id.to_string())
+            .get(&thread_id)
             .map(|entry| entry.sender.clone())
         {
             let _ = sender.send(ThreadEvent::MailboxMessageQueued { thread_id, message });
@@ -900,7 +900,7 @@ impl ThreadPool {
         started_at: String,
     ) -> Option<broadcast::Sender<ThreadEvent>> {
         let mut store = self.store.lock().expect("thread-pool mutex poisoned");
-        let entry = store.runtimes.get_mut(&thread_id.to_string())?;
+        let entry = store.runtimes.get_mut(thread_id)?;
         entry.summary.status = ThreadRuntimeStatus::Running;
         entry.summary.estimated_memory_bytes = estimated_memory_bytes;
         entry.summary.last_active_at = Some(started_at);
@@ -990,7 +990,6 @@ impl ThreadPool {
         thread: Option<Arc<RwLock<argus_agent::Thread>>>,
     ) -> broadcast::Sender<ThreadEvent> {
         let mut store = self.store.lock().expect("thread-pool mutex poisoned");
-        let runtime_key = thread_id.to_string();
         let (
             sender,
             existing_thread,
@@ -998,7 +997,7 @@ impl ThreadPool {
             existing_forwarder_abort,
             existing_slot_permit,
             load_mutex,
-        ) = if let Some(entry) = store.runtimes.get_mut(&runtime_key) {
+        ) = if let Some(entry) = store.runtimes.get_mut(&thread_id) {
             (
                 entry.sender.clone(),
                 entry.thread.clone(),
@@ -1019,7 +1018,7 @@ impl ThreadPool {
             )
         };
         store.runtimes.insert(
-            runtime_key,
+            thread_id,
             RuntimeEntry {
                 summary: ThreadPoolRuntimeSummary {
                     thread_id,
@@ -1049,7 +1048,7 @@ impl ThreadPool {
             .lock()
             .expect("thread-pool mutex poisoned")
             .runtimes
-            .get(&thread_id.to_string())
+            .get(thread_id)
             .and_then(|entry| entry.thread.clone())
     }
 
@@ -1058,7 +1057,7 @@ impl ThreadPool {
             .lock()
             .expect("thread-pool mutex poisoned")
             .runtimes
-            .get(&thread_id.to_string())
+            .get(thread_id)
             .map(|entry| Arc::clone(&entry.load_mutex))
             .ok_or_else(|| {
                 JobError::ExecutionFailed(format!("thread {} is not registered", thread_id))
@@ -1077,7 +1076,7 @@ impl ThreadPool {
             let store = self.store.lock().expect("thread-pool mutex poisoned");
             if store
                 .runtimes
-                .get(&thread_id.to_string())
+                .get(thread_id)
                 .and_then(|entry| entry.slot_permit.as_ref())
                 .is_some()
             {
@@ -1087,12 +1086,9 @@ impl ThreadPool {
 
         let permit = self.acquire_runtime_slot().await?;
         let mut store = self.store.lock().expect("thread-pool mutex poisoned");
-        let entry = store
-            .runtimes
-            .get_mut(&thread_id.to_string())
-            .ok_or_else(|| {
-                JobError::ExecutionFailed(format!("thread {} is not registered", thread_id))
-            })?;
+        let entry = store.runtimes.get_mut(thread_id).ok_or_else(|| {
+            JobError::ExecutionFailed(format!("thread {} is not registered", thread_id))
+        })?;
         if entry.slot_permit.is_none() {
             entry.slot_permit = Some(permit);
             Self::refresh_peaks(&mut store);
@@ -1141,7 +1137,7 @@ impl ThreadPool {
         ThreadPoolSnapshot,
     )> {
         let mut store = self.store.lock().expect("thread-pool mutex poisoned");
-        let entry = store.runtimes.get_mut(&thread_id.to_string())?;
+        let entry = store.runtimes.get_mut(thread_id)?;
         entry.summary.status = ThreadRuntimeStatus::Cooling;
         if let Some(estimated_memory_bytes) = estimated_memory_bytes {
             entry.summary.estimated_memory_bytes = estimated_memory_bytes;
@@ -1162,7 +1158,7 @@ impl ThreadPool {
     ) {
         let mut store = self.store.lock().expect("thread-pool mutex poisoned");
         let mut shutdown = RuntimeShutdown::default();
-        if let Some(entry) = store.runtimes.get_mut(&thread_id.to_string()) {
+        if let Some(entry) = store.runtimes.get_mut(thread_id) {
             entry.summary.status = ThreadRuntimeStatus::Inactive;
             entry.summary.estimated_memory_bytes = 0;
             entry.summary.last_active_at = Some(Utc::now().to_rfc3339());
@@ -1214,7 +1210,7 @@ impl ThreadPool {
         let (sender, replaced_runtime) = {
             let mut store = self.store.lock().expect("thread-pool mutex poisoned");
             let (sender, replaced_runtime) = {
-                let Some(entry) = store.runtimes.get_mut(&thread_id.to_string()) else {
+                let Some(entry) = store.runtimes.get_mut(&thread_id) else {
                     return Err(JobError::ExecutionFailed(format!(
                         "thread {} was removed while loading",
                         thread_id
@@ -1272,8 +1268,7 @@ impl ThreadPool {
 
                             let (runtime, snapshot) = {
                                 let mut store = store.lock().expect("thread-pool mutex poisoned");
-                                let Some(entry) = store.runtimes.get_mut(&thread_id.to_string())
-                                else {
+                                let Some(entry) = store.runtimes.get_mut(&thread_id) else {
                                     break;
                                 };
                                 entry.summary.status = ThreadRuntimeStatus::Cooling;
@@ -1307,7 +1302,7 @@ impl ThreadPool {
         });
         let forwarder_abort = forwarder.abort_handle();
         let mut store = self.store.lock().expect("thread-pool mutex poisoned");
-        let Some(entry) = store.runtimes.get_mut(&thread_id.to_string()) else {
+        let Some(entry) = store.runtimes.get_mut(&thread_id) else {
             forwarder_abort.abort();
             return Err(JobError::ExecutionFailed(format!(
                 "thread {} was removed while attaching",
@@ -1336,7 +1331,7 @@ impl ThreadPool {
         self.ensure_runtime_slot(&thread_id).await?;
         {
             let mut store = self.store.lock().expect("thread-pool mutex poisoned");
-            let Some(entry) = store.runtimes.get_mut(&thread_id.to_string()) else {
+            let Some(entry) = store.runtimes.get_mut(&thread_id) else {
                 return Err(JobError::ExecutionFailed(format!(
                     "thread {} is not registered",
                     thread_id
@@ -1402,7 +1397,7 @@ impl ThreadPool {
             .lock()
             .expect("thread-pool mutex poisoned")
             .runtimes
-            .get(&thread_id.to_string())
+            .get(thread_id)
             .map(|entry| entry.sender.clone())?;
         let _ = sender.send(ThreadEvent::ThreadPoolEvicted {
             thread_id: runtime.thread_id,
@@ -1463,7 +1458,7 @@ impl ThreadPool {
         RuntimeShutdown,
     )> {
         let mut store = store.lock().expect("thread-pool mutex poisoned");
-        let entry = store.runtimes.get_mut(&thread_id.to_string())?;
+        let entry = store.runtimes.get_mut(thread_id)?;
         if entry.summary.status != ThreadRuntimeStatus::Cooling {
             return None;
         }
@@ -3134,7 +3129,7 @@ mod tests {
                 .lock()
                 .expect("thread-pool mutex poisoned")
                 .runtimes
-                .get(&thread_id.to_string())
+                .get(&thread_id)
                 .expect("runtime entry should exist")
                 .queued_job_results
                 .is_empty(),

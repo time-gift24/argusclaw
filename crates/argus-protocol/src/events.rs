@@ -254,9 +254,6 @@ pub struct ThreadPoolRuntimeSummary {
     pub last_reason: Option<ThreadPoolEventReason>,
 }
 
-/// Backward-compatible alias for older thread-pool consumers.
-pub type ThreadRuntimeSnapshot = ThreadPoolRuntimeSummary;
-
 /// Aggregated thread-pool telemetry snapshot.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ThreadPoolSnapshot {
