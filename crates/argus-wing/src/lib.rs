@@ -1298,7 +1298,7 @@ mod tests {
             .thread_pool_state()
             .runtimes
             .iter()
-            .any(|runtime| runtime.runtime.thread_id == thread_id));
+            .any(|runtime| runtime.thread_id == thread_id));
 
         wing.delete_thread(session_id, thread_id)
             .await
@@ -1308,7 +1308,7 @@ mod tests {
             .thread_pool_state()
             .runtimes
             .iter()
-            .any(|runtime| runtime.runtime.thread_id == thread_id));
+            .any(|runtime| runtime.thread_id == thread_id));
     }
 
     #[tokio::test]
@@ -1355,11 +1355,11 @@ mod tests {
         assert!(before_delete
             .runtimes
             .iter()
-            .any(|runtime| runtime.runtime.thread_id == first_thread_id));
+            .any(|runtime| runtime.thread_id == first_thread_id));
         assert!(before_delete
             .runtimes
             .iter()
-            .any(|runtime| runtime.runtime.thread_id == second_thread_id));
+            .any(|runtime| runtime.thread_id == second_thread_id));
 
         wing.delete_session(session_id)
             .await
@@ -1369,11 +1369,11 @@ mod tests {
         assert!(!after_delete
             .runtimes
             .iter()
-            .any(|runtime| runtime.runtime.thread_id == first_thread_id));
+            .any(|runtime| runtime.thread_id == first_thread_id));
         assert!(!after_delete
             .runtimes
             .iter()
-            .any(|runtime| runtime.runtime.thread_id == second_thread_id));
+            .any(|runtime| runtime.thread_id == second_thread_id));
     }
 
     #[tokio::test]
@@ -1574,9 +1574,9 @@ mod tests {
             .thread_pool_state()
             .runtimes
             .into_iter()
-            .find(|runtime| runtime.runtime.thread_id == thread_id)
+            .find(|runtime| runtime.thread_id == thread_id)
             .expect("thread should be registered");
-        assert_eq!(runtime_before.runtime.session_id, Some(owning_session_id));
+        assert_eq!(runtime_before.session_id, Some(owning_session_id));
 
         let error = wing
             .send_message(foreign_session_id, thread_id, "should fail".to_string())
@@ -1591,9 +1591,9 @@ mod tests {
             .thread_pool_state()
             .runtimes
             .into_iter()
-            .find(|runtime| runtime.runtime.thread_id == thread_id)
+            .find(|runtime| runtime.thread_id == thread_id)
             .expect("thread should remain registered");
-        assert_eq!(runtime_after.runtime.session_id, Some(owning_session_id));
+        assert_eq!(runtime_after.session_id, Some(owning_session_id));
     }
 
     #[tokio::test]
@@ -1646,9 +1646,9 @@ mod tests {
             .thread_pool_state()
             .runtimes
             .into_iter()
-            .find(|runtime| runtime.runtime.thread_id == thread_id)
+            .find(|runtime| runtime.thread_id == thread_id)
             .expect("thread should remain registered");
-        assert_eq!(runtime_after.runtime.session_id, Some(owning_session_id));
+        assert_eq!(runtime_after.session_id, Some(owning_session_id));
     }
 
     #[tokio::test]
@@ -1717,9 +1717,9 @@ mod tests {
             .thread_pool_state()
             .runtimes
             .into_iter()
-            .find(|runtime| runtime.runtime.thread_id == bound_thread_id)
+            .find(|runtime| runtime.thread_id == bound_thread_id)
             .expect("bound runtime should be tracked");
-        assert_eq!(runtime.runtime.job_id.as_deref(), Some(job_id.as_str()));
+        assert_eq!(runtime.job_id.as_deref(), Some(job_id.as_str()));
         assert!(matches!(
             runtime.status,
             argus_protocol::ThreadRuntimeStatus::Queued

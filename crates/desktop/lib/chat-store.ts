@@ -364,10 +364,10 @@ function mapRuntimeSummaryToThreadState(
   existing?: ThreadPoolThreadState,
 ): ThreadPoolThreadState {
   return {
-    threadId: runtime.runtime.thread_id,
-    kind: runtime.runtime.kind,
-    sessionId: runtime.runtime.session_id,
-    jobId: runtime.runtime.job_id,
+    threadId: runtime.thread_id,
+    kind: runtime.kind,
+    sessionId: runtime.session_id,
+    jobId: runtime.job_id,
     status: runtime.status,
     estimatedMemoryBytes: runtime.estimated_memory_bytes,
     lastActiveAt: runtime.last_active_at,
@@ -451,7 +451,7 @@ function findSessionKeyForEnvelope(
           envelope.payload.type === "thread_pool_started" ||
           envelope.payload.type === "thread_pool_cooling" ||
           envelope.payload.type === "thread_pool_evicted"
-        ? envelope.payload.runtime.job_id
+        ? envelope.payload.job_id
         : null;
 
   if (!jobId) return null;
@@ -972,7 +972,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
                   mapRuntimeSummaryToThreadState(
                     runtime,
                     state.threadPoolThreads.find(
-                      (thread) => thread.threadId === runtime.runtime.thread_id,
+                      (thread) => thread.threadId === runtime.thread_id,
                     ),
                   ),
                 ),
@@ -1150,7 +1150,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             const nextSessionsByKey = updateSessionJobDetailTimeline(
               state.sessionsByKey,
               sessionKey,
-              payload.runtime.job_id,
+              payload.job_id,
               buildJobDetailTimelineEntry("queued", now, "排队中", "running"),
             );
             return {
@@ -1158,9 +1158,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
                 state.threadPoolThreads,
                 {
                   threadId: envelope.thread_id,
-                  kind: payload.runtime.kind,
-                  sessionId: payload.runtime.session_id,
-                  jobId: payload.runtime.job_id,
+                  kind: payload.kind,
+                  sessionId: payload.session_id,
+                  jobId: payload.job_id,
                   status: "queued",
                   reason: null,
                   lastActiveAt: now,
@@ -1176,7 +1176,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             const nextSessionsByKey = updateSessionJobDetailTimeline(
               state.sessionsByKey,
               sessionKey,
-              payload.runtime.job_id,
+              payload.job_id,
               buildJobDetailTimelineEntry("started", now, "运行中", "running"),
             );
             return {
@@ -1184,9 +1184,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
                 state.threadPoolThreads,
                 {
                   threadId: envelope.thread_id,
-                  kind: payload.runtime.kind,
-                  sessionId: payload.runtime.session_id,
-                  jobId: payload.runtime.job_id,
+                  kind: payload.kind,
+                  sessionId: payload.session_id,
+                  jobId: payload.job_id,
                   status: "running",
                   reason: null,
                   lastActiveAt: now,
@@ -1202,7 +1202,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             const nextSessionsByKey = updateSessionJobDetailTimeline(
               state.sessionsByKey,
               sessionKey,
-              payload.runtime.job_id,
+              payload.job_id,
               buildJobDetailTimelineEntry("cooling", now, "冷却中", "running"),
             );
             return {
@@ -1210,9 +1210,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
                 state.threadPoolThreads,
                 {
                   threadId: envelope.thread_id,
-                  kind: payload.runtime.kind,
-                  sessionId: payload.runtime.session_id,
-                  jobId: payload.runtime.job_id,
+                  kind: payload.kind,
+                  sessionId: payload.session_id,
+                  jobId: payload.job_id,
                   status: "cooling",
                   reason: null,
                   lastActiveAt: now,
@@ -1228,7 +1228,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             const nextSessionsByKey = updateSessionJobDetailTimeline(
               state.sessionsByKey,
               sessionKey,
-              payload.runtime.job_id,
+              payload.job_id,
               buildJobDetailTimelineEntry(
                 "evicted",
                 now,
@@ -1242,9 +1242,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
                 state.threadPoolThreads,
                 {
                   threadId: envelope.thread_id,
-                  kind: payload.runtime.kind,
-                  sessionId: payload.runtime.session_id,
-                  jobId: payload.runtime.job_id,
+                  kind: payload.kind,
+                  sessionId: payload.session_id,
+                  jobId: payload.job_id,
                   status: "evicted",
                   reason: payload.reason,
                   lastActiveAt: now,

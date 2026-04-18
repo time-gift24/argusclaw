@@ -17,8 +17,8 @@ use argus_agent::TurnRecord;
 use argus_protocol::llm::{ChatMessage, Role};
 use argus_protocol::{
     AgentId, MailboxMessage, MailboxMessageType, McpToolResolver, ProviderResolver, ThreadEvent,
-    ThreadId, ThreadJobResult, ThreadPoolRuntimeKind, ThreadPoolRuntimeRef, ThreadPoolSnapshot,
-    ThreadPoolState, ThreadRuntimeStatus,
+    ThreadId, ThreadJobResult, ThreadPoolRuntimeKind, ThreadPoolSnapshot, ThreadPoolState,
+    ThreadRuntimeStatus,
 };
 use argus_repository::traits::{JobRepository, LlmProviderRepository, ThreadRepository};
 use argus_repository::types::{JobId, JobStatus};
@@ -390,12 +390,10 @@ impl JobManager {
             thread_id: execution_thread_id,
         });
         let _ = pipe_tx.send(ThreadEvent::ThreadPoolQueued {
-            runtime: ThreadPoolRuntimeRef {
-                thread_id: execution_thread_id,
-                kind: ThreadPoolRuntimeKind::Job,
-                session_id: None,
-                job_id: Some(job_id.clone()),
-            },
+            thread_id: execution_thread_id,
+            kind: ThreadPoolRuntimeKind::Job,
+            session_id: None,
+            job_id: Some(job_id.clone()),
         });
         let _ = pipe_tx.send(ThreadEvent::ThreadPoolMetricsUpdated {
             snapshot: self.thread_pool.collect_metrics(),
@@ -562,7 +560,7 @@ impl JobManager {
             .collect_state()
             .runtimes
             .into_iter()
-            .find(|runtime| runtime.runtime.thread_id == thread_id)
+            .find(|runtime| runtime.thread_id == thread_id)
             .is_some_and(|runtime| {
                 matches!(
                     runtime.status,
@@ -1105,9 +1103,9 @@ mod tests {
             .thread_pool_state()
             .runtimes
             .into_iter()
-            .find(|runtime| runtime.runtime.thread_id == bound_thread_id)
+            .find(|runtime| runtime.thread_id == bound_thread_id)
             .expect("bound runtime should be tracked in thread pool state");
-        assert_eq!(runtime.runtime.job_id.as_deref(), Some(job_id.as_str()));
+        assert_eq!(runtime.job_id.as_deref(), Some(job_id.as_str()));
         assert!(matches!(
             runtime.status,
             argus_protocol::ThreadRuntimeStatus::Queued
@@ -1150,12 +1148,16 @@ mod tests {
                         assert_ne!(execution_thread_id, originating_thread_id);
                         bound_thread_id = Some(execution_thread_id);
                     }
-                    Ok(ThreadEvent::ThreadPoolQueued { runtime })
-                        if runtime.job_id.as_deref() == Some(job_id.as_str()) =>
+                    Ok(ThreadEvent::ThreadPoolQueued {
+                        thread_id,
+                        kind,
+                        job_id: Some(event_job_id),
+                        ..
+                    }) if event_job_id == job_id =>
                     {
-                        assert_eq!(runtime.kind, ThreadPoolRuntimeKind::Job);
+                        assert_eq!(kind, ThreadPoolRuntimeKind::Job);
                         if let Some(execution_thread_id) = bound_thread_id {
-                            assert_eq!(runtime.thread_id, execution_thread_id);
+                            assert_eq!(thread_id, execution_thread_id);
                         }
                         saw_queued = true;
                     }
@@ -1291,7 +1293,7 @@ mod tests {
                     .thread_pool_state()
                     .runtimes
                     .into_iter()
-                    .find(|runtime| runtime.runtime.job_id.as_deref() == Some(job_id.as_str()))
+                    .find(|runtime| runtime.job_id.as_deref() == Some(job_id.as_str()))
                     .map(|runtime| runtime.status);
                 if matches!(
                     status,

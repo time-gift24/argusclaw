@@ -306,15 +306,11 @@ export type ThreadRuntimeStatus =
 
 export type ThreadPoolRuntimeKind = "chat" | "job";
 
-export interface ThreadPoolRuntimeRef {
+export interface ThreadPoolRuntimeSummary {
   thread_id: string;
   kind: ThreadPoolRuntimeKind;
   session_id: string | null;
   job_id: string | null;
-}
-
-export interface ThreadPoolRuntimeSummary {
-  runtime: ThreadPoolRuntimeRef;
   status: ThreadRuntimeStatus;
   estimated_memory_bytes: number;
   last_active_at: string | null;

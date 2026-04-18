@@ -23,9 +23,9 @@ test("chat store keeps sessions keyed by template and provider preference", () =
   assert.match(storeSource, /threadPool\.getState\(/);
   assert.match(storeSource, /threadPool\.getState\(\)[\s\S]*threadPoolThreads:/);
   assert.match(storeSource, /mapRuntimeSummaryToThreadState/);
-  assert.match(storeSource, /kind:\s*runtime\.runtime\.kind/);
-  assert.match(storeSource, /sessionId:\s*runtime\.runtime\.session_id/);
-  assert.match(storeSource, /jobId:\s*runtime\.runtime\.job_id/);
+  assert.match(storeSource, /kind:\s*runtime\.kind/);
+  assert.match(storeSource, /sessionId:\s*runtime\.session_id/);
+  assert.match(storeSource, /jobId:\s*runtime\.job_id/);
   assert.match(storeSource, /refreshSnapshot:\s*\([\s\S]*sessionKey:\s*string/);
   assert.match(storeSource, /listen[\s\S]*"thread:event"/);
   assert.match(storeSource, /thread_id|threadId/);
@@ -44,9 +44,11 @@ test("chat store keeps sessions keyed by template and provider preference", () =
   assert.match(storeSource, /case "thread_pool_cooling"/);
   assert.match(storeSource, /case "thread_pool_evicted"/);
   assert.match(storeSource, /case "thread_pool_metrics_updated"/);
-  assert.match(storeSource, /payload\.runtime\.kind/);
-  assert.match(storeSource, /payload\.runtime\.session_id/);
-  assert.match(storeSource, /payload\.runtime\.job_id/);
+  assert.match(storeSource, /payload\.kind/);
+  assert.match(storeSource, /payload\.session_id/);
+  assert.match(storeSource, /payload\.job_id/);
+  assert.doesNotMatch(storeSource, /runtime\.runtime|payload\.runtime/);
+  assert.doesNotMatch(typesSource, /interface ThreadPoolRuntimeRef/);
   assert.match(storeSource, /threadPoolThreads:\s*state\.threadPoolThreads\.map\(/);
   assert.match(storeSource, /void get\(\)\.refreshThreadPoolSnapshot\(\);/);
   assert.match(storeSource, /await get\(\)\.activateSession\(/);

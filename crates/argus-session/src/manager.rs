@@ -2,23 +2,23 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use argus_agent::thread_trace_store::{
-    ThreadTraceKind, ThreadTraceMetadata, chat_thread_base_dir, persist_thread_metadata,
+    chat_thread_base_dir, persist_thread_metadata, ThreadTraceKind, ThreadTraceMetadata,
 };
 use argus_agent::tool_context::current_agent_id;
-use argus_agent::turn_log_store::{RecoveredThreadLogState, recover_thread_log_state};
+use argus_agent::turn_log_store::{recover_thread_log_state, RecoveredThreadLogState};
 use argus_job::{JobLookup, JobManager, ThreadPool};
 use argus_protocol::{
+    llm::{ChatMessage, CompletionRequest, CompletionResponse, LlmError, LlmEventStream},
     AgentId, ArgusError, LlmProviderId, MailboxMessage, MailboxMessageType, McpToolResolver,
     ProviderId, Result, SessionId, ThreadEvent, ThreadId, ThreadMessage, ThreadPoolRuntimeKind,
     ToolError,
-    llm::{ChatMessage, CompletionRequest, CompletionResponse, LlmError, LlmEventStream},
 };
 use argus_repository::traits::{LlmProviderRepository, SessionRepository, ThreadRepository};
 use argus_template::TemplateManager;
 use argus_tool::{
-    MAX_DISPATCH_DEPTH, SchedulerBackend, SchedulerDispatchRequest, SchedulerJobLookup,
-    SchedulerJobResult, SchedulerLookupRequest, SchedulerSubagent, SchedulerTool,
-    SendMessageRequest, SendMessageResponse, ToolManager,
+    SchedulerBackend, SchedulerDispatchRequest, SchedulerJobLookup, SchedulerJobResult,
+    SchedulerLookupRequest, SchedulerSubagent, SchedulerTool, SendMessageRequest,
+    SendMessageResponse, ToolManager, MAX_DISPATCH_DEPTH,
 };
 use async_trait::async_trait;
 use chrono::Utc;
@@ -293,7 +293,7 @@ impl SessionSchedulerBackend {
             )));
         };
 
-        if summary.runtime.kind == ThreadPoolRuntimeKind::Job
+        if summary.kind == ThreadPoolRuntimeKind::Job
             && thread_pool.loaded_thread(&target_thread_id).is_none()
         {
             return Err(Self::scheduler_error(format!(
@@ -528,8 +528,8 @@ impl SchedulerBackend for SessionSchedulerBackend {
             };
 
             match thread_pool.runtime_summary(target) {
-                Some(summary) if summary.runtime.kind == ThreadPoolRuntimeKind::Chat => {
-                    let session_id = summary.runtime.session_id.ok_or_else(|| {
+                Some(summary) if summary.kind == ThreadPoolRuntimeKind::Chat => {
+                    let session_id = summary.session_id.ok_or_else(|| {
                         Self::scheduler_error(format!(
                             "chat thread {} is missing a session binding",
                             target
@@ -618,10 +618,10 @@ impl SessionManager {
                     let Some(summary) = thread_pool.runtime_summary(&thread_id) else {
                         return false;
                     };
-                    if summary.runtime.kind != ThreadPoolRuntimeKind::Chat {
+                    if summary.kind != ThreadPoolRuntimeKind::Chat {
                         return false;
                     }
-                    let Some(session_id) = summary.runtime.session_id else {
+                    let Some(session_id) = summary.session_id else {
                         return false;
                     };
                     let Some(session) =
@@ -1409,16 +1409,16 @@ mod tests {
     }
 
     use super::{
-        SessionManager, SessionSchedulerBackend, recover_messages_from_trace,
-        recover_thread_state_from_trace,
+        recover_messages_from_trace, recover_thread_state_from_trace, SessionManager,
+        SessionSchedulerBackend,
     };
     use argus_agent::history::{TurnRecord, TurnRecordKind};
     use argus_agent::thread_trace_store::{
-        ThreadTraceKind, ThreadTraceMetadata, chat_thread_base_dir, persist_thread_metadata,
+        chat_thread_base_dir, persist_thread_metadata, ThreadTraceKind, ThreadTraceMetadata,
     };
     use argus_agent::tool_context::{clear_current_agent_id, set_current_agent_id};
-    use argus_agent::turn_log_store::RecoveredThreadLogState;
     use argus_agent::turn_log_store::append_turn_record;
+    use argus_agent::turn_log_store::RecoveredThreadLogState;
     use argus_protocol::llm::ChatMessage;
     use argus_protocol::llm::{
         CompletionRequest, CompletionResponse, LlmError, LlmProvider, LlmProviderRepository,
@@ -1427,13 +1427,13 @@ mod tests {
         AgentId, AgentRecord, MailboxMessage, MailboxMessageType, McpToolResolver, ProviderId,
         ResolvedMcpTools, SessionId, ThinkingConfig, ThreadId, TokenUsage,
     };
-    use argus_repository::ArgusSqlite;
     use argus_repository::migrate;
     use argus_repository::traits::JobRepository;
     use argus_repository::traits::{AgentRepository, SessionRepository, ThreadRepository};
     use argus_repository::types::{
         AgentId as RepoAgentId, JobRecord, JobResult, JobStatus, JobType,
     };
+    use argus_repository::ArgusSqlite;
     use argus_template::TemplateManager;
     use argus_tool::{SchedulerBackend, SchedulerDispatchRequest, SchedulerLookupRequest};
     use async_trait::async_trait;
@@ -1444,7 +1444,7 @@ mod tests {
     use std::path::PathBuf;
     use tempfile::TempDir;
     use tokio::sync::broadcast;
-    use tokio::time::{Duration, sleep, timeout};
+    use tokio::time::{sleep, timeout, Duration};
     use uuid::Uuid;
 
     #[derive(Debug)]

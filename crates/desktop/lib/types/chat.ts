@@ -44,15 +44,11 @@ export type ThreadRuntimeStatus =
 
 export type ThreadPoolRuntimeKind = "chat" | "job";
 
-export interface ThreadPoolRuntimeRef {
+export interface ThreadPoolRuntimeSummary {
   thread_id: string;
   kind: ThreadPoolRuntimeKind;
   session_id: string | null;
   job_id: string | null;
-}
-
-export interface ThreadPoolRuntimeSummary {
-  runtime: ThreadPoolRuntimeRef;
   status: ThreadRuntimeStatus;
   estimated_memory_bytes: number;
   last_active_at: string | null;
@@ -230,12 +226,29 @@ export type ThreadEventPayload =
   | { type: "compaction_finished" }
   | { type: "compaction_failed"; error: string }
   | { type: "thread_bound_to_job"; job_id: string }
-  | { type: "thread_pool_queued"; runtime: ThreadPoolRuntimeRef }
-  | { type: "thread_pool_started"; runtime: ThreadPoolRuntimeRef }
-  | { type: "thread_pool_cooling"; runtime: ThreadPoolRuntimeRef }
+  | {
+      type: "thread_pool_queued";
+      kind: ThreadPoolRuntimeKind;
+      session_id: string | null;
+      job_id: string | null;
+    }
+  | {
+      type: "thread_pool_started";
+      kind: ThreadPoolRuntimeKind;
+      session_id: string | null;
+      job_id: string | null;
+    }
+  | {
+      type: "thread_pool_cooling";
+      kind: ThreadPoolRuntimeKind;
+      session_id: string | null;
+      job_id: string | null;
+    }
   | {
       type: "thread_pool_evicted";
-      runtime: ThreadPoolRuntimeRef;
+      kind: ThreadPoolRuntimeKind;
+      session_id: string | null;
+      job_id: string | null;
       reason: ThreadPoolEventReason;
     }
   | {

@@ -9,9 +9,11 @@ test("desktop tauri bindings expose chat session and thread snapshot wrappers", 
   assert.match(tauriSource, /export interface ChatSessionPayload/);
   assert.match(tauriSource, /export interface ThreadSnapshotPayload/);
   assert.match(tauriSource, /export interface ThreadPoolSnapshot/);
-  assert.match(tauriSource, /export interface ThreadPoolRuntimeRef/);
   assert.match(tauriSource, /export interface ThreadPoolRuntimeSummary/);
   assert.match(tauriSource, /export interface ThreadPoolState/);
+  assert.match(tauriSource, /export interface ThreadPoolRuntimeSummary[\s\S]*thread_id:\s*string/);
+  assert.doesNotMatch(tauriSource, /export interface ThreadPoolRuntimeRef/);
+  assert.doesNotMatch(tauriSource, /runtime:\s*ThreadPoolRuntimeRef/);
   assert.match(tauriSource, /plan_item_count:\s*number/);
   assert.match(
     tauriSource,

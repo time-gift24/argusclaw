@@ -195,12 +195,9 @@ test("thread-pool events append the runtime timeline to the matching parent sess
     turn_number: null,
     payload: {
       type: "thread_pool_started",
-      runtime: {
-        thread_id: "runtime-thread-1",
-        kind: "job",
-        session_id: "session-parent",
-        job_id: "job-1",
-      },
+      kind: "job",
+      session_id: "session-parent",
+      job_id: "job-1",
     },
   };
 

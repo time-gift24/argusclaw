@@ -23,8 +23,8 @@ use argus_protocol::llm::{
 use argus_protocol::{
     AgentId, LlmProvider, MailboxMessage, MailboxMessageType, McpToolResolver, ProviderId,
     ProviderResolver, SessionId, ThreadControlMessage, ThreadEvent, ThreadId, ThreadJobResult,
-    ThreadMessage, ThreadPoolEventReason, ThreadPoolRuntimeKind, ThreadPoolRuntimeRef,
-    ThreadPoolRuntimeSummary, ThreadPoolSnapshot, ThreadPoolState, ThreadRuntimeStatus,
+    ThreadMessage, ThreadPoolEventReason, ThreadPoolRuntimeKind, ThreadPoolRuntimeSummary,
+    ThreadPoolSnapshot, ThreadPoolState, ThreadRuntimeStatus,
 };
 use argus_repository::traits::{JobRepository, LlmProviderRepository, ThreadRepository};
 use argus_repository::types::{
@@ -102,7 +102,7 @@ struct RuntimeEntry {
     summary: ThreadPoolRuntimeSummary,
     sender: broadcast::Sender<ThreadEvent>,
     thread: Option<Arc<RwLock<argus_agent::Thread>>>,
-    inbox: Vec<MailboxMessage>,
+    queued_job_results: Vec<MailboxMessage>,
     forwarder_abort: Option<AbortHandle>,
     slot_permit: Option<OwnedSemaphorePermit>,
     load_mutex: Arc<AsyncMutex<()>>,
@@ -245,14 +245,11 @@ impl ThreadPool {
         session_id: SessionId,
         thread_id: ThreadId,
     ) -> broadcast::Receiver<ThreadEvent> {
-        let runtime = ThreadPoolRuntimeRef {
-            thread_id,
-            kind: ThreadPoolRuntimeKind::Chat,
-            session_id: Some(session_id),
-            job_id: None,
-        };
         self.upsert_runtime_summary(
-            runtime,
+            thread_id,
+            ThreadPoolRuntimeKind::Chat,
+            Some(session_id),
+            None,
             ThreadRuntimeStatus::Inactive,
             0,
             None,
@@ -316,7 +313,7 @@ impl ThreadPool {
             .runtimes
             .get(&thread_id.to_string())
             .and_then(|entry| {
-                (entry.summary.runtime.kind == ThreadPoolRuntimeKind::Chat)
+                (entry.summary.kind == ThreadPoolRuntimeKind::Chat)
                     .then(|| entry.thread.clone())
                     .flatten()
             })
@@ -463,10 +460,10 @@ impl ThreadPool {
         let mut store = self.store.lock().expect("thread-pool mutex poisoned");
         let entry = store.runtimes.get_mut(&thread_id.to_string())?;
         let index = entry
-            .inbox
+            .queued_job_results
             .iter()
             .position(|message| message.job_id() == Some(job_id))?;
-        Some(entry.inbox.remove(index))
+        Some(entry.queued_job_results.remove(index))
     }
 
     /// Deliver a mailbox message to a runtime thread.
@@ -475,19 +472,25 @@ impl ThreadPool {
         thread_id: ThreadId,
         message: MailboxMessage,
     ) -> Result<(), JobError> {
-        let thread = match self.runtime_summary(&thread_id) {
-            Some(summary) if summary.runtime.kind == ThreadPoolRuntimeKind::Chat => {
-                let session_id = summary.runtime.session_id.ok_or_else(|| {
+        let (thread, session_id) = match self.runtime_summary(&thread_id) {
+            Some(summary) if summary.kind == ThreadPoolRuntimeKind::Chat => {
+                let session_id = summary.session_id.ok_or_else(|| {
                     JobError::ExecutionFailed(format!(
                         "chat thread {} is missing a session binding",
                         thread_id
                     ))
                 })?;
-                self.ensure_chat_runtime(session_id, thread_id).await?
+                (
+                    self.ensure_chat_runtime(session_id, thread_id).await?,
+                    Some(session_id),
+                )
             }
-            Some(_) => self.loaded_thread(&thread_id).ok_or_else(|| {
-                JobError::ExecutionFailed(format!("thread {} is not loaded", thread_id))
-            })?,
+            Some(_) => (
+                self.loaded_thread(&thread_id).ok_or_else(|| {
+                    JobError::ExecutionFailed(format!("thread {} is not loaded", thread_id))
+                })?,
+                None,
+            ),
             None => {
                 return Err(JobError::ExecutionFailed(format!(
                     "thread {} is not registered",
@@ -496,20 +499,41 @@ impl ThreadPool {
             }
         };
 
+        if let Some(session_id) = session_id {
+            let estimated_memory_bytes =
+                Self::estimate_thread_memory(&thread).await + message.text.len() as u64;
+            let started_at = Utc::now().to_rfc3339();
+            let sender = self
+                .mark_runtime_running(&thread_id, estimated_memory_bytes, started_at)
+                .ok_or_else(|| {
+                    JobError::ExecutionFailed(format!("thread {} is not registered", thread_id))
+                })?;
+            let _ = sender.send(ThreadEvent::ThreadPoolStarted {
+                thread_id,
+                kind: ThreadPoolRuntimeKind::Chat,
+                session_id: Some(session_id),
+                job_id: None,
+            });
+            let _ = sender.send(ThreadEvent::ThreadPoolMetricsUpdated {
+                snapshot: self.collect_metrics(),
+            });
+        }
+
         let routed_message = Self::route_mailbox_message(message.clone());
         thread
             .read()
             .await
             .send_message(routed_message)
             .map_err(|error| JobError::ExecutionFailed(error.to_string()))?;
-        if let Some(entry) = self
-            .store
-            .lock()
-            .expect("thread-pool mutex poisoned")
-            .runtimes
-            .get_mut(&thread_id.to_string())
+        if matches!(message.message_type, MailboxMessageType::JobResult { .. })
+            && let Some(entry) = self
+                .store
+                .lock()
+                .expect("thread-pool mutex poisoned")
+                .runtimes
+                .get_mut(&thread_id.to_string())
         {
-            entry.inbox.push(message.clone());
+            entry.queued_job_results.push(message.clone());
         }
 
         if let Some(sender) = self
@@ -545,14 +569,11 @@ impl ThreadPool {
         let thread_id = self.persist_binding(&request, &now).await?;
         self.persist_job_status(&request.job_id, JobStatus::Queued, None, None)
             .await?;
-        let runtime = ThreadPoolRuntimeRef {
-            thread_id,
-            kind: ThreadPoolRuntimeKind::Job,
-            session_id: None,
-            job_id: Some(request.job_id.clone()),
-        };
         self.upsert_runtime_summary(
-            runtime,
+            thread_id,
+            ThreadPoolRuntimeKind::Job,
+            None,
+            Some(request.job_id.clone()),
             ThreadRuntimeStatus::Queued,
             request.prompt.len() as u64,
             Some(now),
@@ -592,7 +613,7 @@ impl ThreadPool {
     }
 
     /// Evict a chat runtime that is currently cooling.
-    pub fn evict_chat_if_idle(&self, thread_id: &ThreadId) -> Option<ThreadPoolRuntimeRef> {
+    pub fn evict_chat_if_idle(&self, thread_id: &ThreadId) -> Option<ThreadPoolRuntimeSummary> {
         self.evict_runtime(thread_id, ThreadPoolEventReason::CoolingExpired)
     }
 
@@ -621,12 +642,10 @@ impl ThreadPool {
             })?;
 
         let _ = sender.send(ThreadEvent::ThreadPoolStarted {
-            runtime: ThreadPoolRuntimeRef {
-                thread_id,
-                kind: ThreadPoolRuntimeKind::Chat,
-                session_id: Some(session_id),
-                job_id: None,
-            },
+            thread_id,
+            kind: ThreadPoolRuntimeKind::Chat,
+            session_id: Some(session_id),
+            job_id: None,
         });
         let _ = sender.send(ThreadEvent::ThreadPoolMetricsUpdated {
             snapshot: self.collect_metrics(),
@@ -655,12 +674,10 @@ impl ThreadPool {
         }
 
         self.upsert_runtime_summary(
-            ThreadPoolRuntimeRef {
-                thread_id,
-                kind: ThreadPoolRuntimeKind::Chat,
-                session_id: Some(session_id),
-                job_id: None,
-            },
+            thread_id,
+            ThreadPoolRuntimeKind::Chat,
+            Some(session_id),
+            None,
             ThreadRuntimeStatus::Loading,
             0,
             Some(Utc::now().to_rfc3339()),
@@ -765,12 +782,10 @@ impl ThreadPool {
             );
         }
         let _ = pipe_tx.send(ThreadEvent::ThreadPoolStarted {
-            runtime: ThreadPoolRuntimeRef {
-                thread_id: execution_thread_id,
-                kind: ThreadPoolRuntimeKind::Job,
-                session_id: None,
-                job_id: Some(request.job_id.clone()),
-            },
+            thread_id: execution_thread_id,
+            kind: ThreadPoolRuntimeKind::Job,
+            session_id: None,
+            job_id: Some(request.job_id.clone()),
         });
         let _ = pipe_tx.send(ThreadEvent::ThreadPoolMetricsUpdated {
             snapshot: self.collect_metrics(),
@@ -963,7 +978,10 @@ impl ThreadPool {
     #[allow(clippy::too_many_arguments)]
     fn upsert_runtime_summary(
         &self,
-        runtime: ThreadPoolRuntimeRef,
+        thread_id: ThreadId,
+        kind: ThreadPoolRuntimeKind,
+        session_id: Option<SessionId>,
+        job_id: Option<String>,
         status: ThreadRuntimeStatus,
         estimated_memory_bytes: u64,
         last_active_at: Option<String>,
@@ -972,11 +990,11 @@ impl ThreadPool {
         thread: Option<Arc<RwLock<argus_agent::Thread>>>,
     ) -> broadcast::Sender<ThreadEvent> {
         let mut store = self.store.lock().expect("thread-pool mutex poisoned");
-        let runtime_key = runtime.thread_id.to_string();
+        let runtime_key = thread_id.to_string();
         let (
             sender,
             existing_thread,
-            existing_inbox,
+            existing_queued_job_results,
             existing_forwarder_abort,
             existing_slot_permit,
             load_mutex,
@@ -984,7 +1002,7 @@ impl ThreadPool {
             (
                 entry.sender.clone(),
                 entry.thread.clone(),
-                entry.inbox.clone(),
+                entry.queued_job_results.clone(),
                 entry.forwarder_abort.take(),
                 entry.slot_permit.take(),
                 Arc::clone(&entry.load_mutex),
@@ -1004,7 +1022,10 @@ impl ThreadPool {
             runtime_key,
             RuntimeEntry {
                 summary: ThreadPoolRuntimeSummary {
-                    runtime,
+                    thread_id,
+                    kind,
+                    session_id,
+                    job_id,
                     status,
                     estimated_memory_bytes,
                     last_active_at,
@@ -1013,7 +1034,7 @@ impl ThreadPool {
                 },
                 sender: sender.clone(),
                 thread: thread.or(existing_thread),
-                inbox: existing_inbox,
+                queued_job_results: existing_queued_job_results,
                 forwarder_abort: existing_forwarder_abort,
                 slot_permit: existing_slot_permit,
                 load_mutex,
@@ -1115,7 +1136,7 @@ impl ThreadPool {
         thread_id: &ThreadId,
         estimated_memory_bytes: Option<u64>,
     ) -> Option<(
-        ThreadPoolRuntimeRef,
+        ThreadPoolRuntimeSummary,
         broadcast::Sender<ThreadEvent>,
         ThreadPoolSnapshot,
     )> {
@@ -1127,7 +1148,7 @@ impl ThreadPool {
         }
         entry.summary.last_active_at = Some(Utc::now().to_rfc3339());
         entry.summary.last_reason = None;
-        let runtime = entry.summary.runtime.clone();
+        let runtime = entry.summary.clone();
         let sender = entry.sender.clone();
         Self::refresh_peaks(&mut store);
         let snapshot = Self::collect_metrics_from_store(self.max_threads, &store);
@@ -1157,7 +1178,7 @@ impl ThreadPool {
     fn evict_oldest_cooling_runtime(
         &self,
         reason: ThreadPoolEventReason,
-    ) -> Option<ThreadPoolRuntimeRef> {
+    ) -> Option<ThreadPoolRuntimeSummary> {
         let candidate = {
             let store = self.store.lock().expect("thread-pool mutex poisoned");
             store
@@ -1165,7 +1186,7 @@ impl ThreadPool {
                 .values()
                 .filter(|entry| entry.summary.status == ThreadRuntimeStatus::Cooling)
                 .min_by_key(|entry| entry.summary.last_active_at.clone())
-                .map(|entry| entry.summary.runtime.thread_id)
+                .map(|entry| entry.summary.thread_id)
         }?;
         self.evict_runtime(&candidate, reason)
     }
@@ -1259,7 +1280,7 @@ impl ThreadPool {
                                 entry.summary.estimated_memory_bytes = estimated_memory_bytes;
                                 entry.summary.last_active_at = Some(Utc::now().to_rfc3339());
                                 entry.summary.last_reason = None;
-                                let runtime = entry.summary.runtime.clone();
+                                let runtime = entry.summary.clone();
                                 ThreadPool::refresh_peaks(&mut store);
                                 let snapshot =
                                     ThreadPool::collect_metrics_from_store(max_threads, &store);
@@ -1368,7 +1389,7 @@ impl ThreadPool {
         &self,
         thread_id: &ThreadId,
         reason: ThreadPoolEventReason,
-    ) -> Option<ThreadPoolRuntimeRef> {
+    ) -> Option<ThreadPoolRuntimeSummary> {
         let (runtime, snapshot, shutdown) = Self::evict_runtime_from_shared_store(
             &self.store,
             self.max_threads,
@@ -1384,7 +1405,10 @@ impl ThreadPool {
             .get(&thread_id.to_string())
             .map(|entry| entry.sender.clone())?;
         let _ = sender.send(ThreadEvent::ThreadPoolEvicted {
-            runtime: runtime.clone(),
+            thread_id: runtime.thread_id,
+            kind: runtime.kind,
+            session_id: runtime.session_id,
+            job_id: runtime.job_id.clone(),
             reason,
         });
         let _ = sender.send(ThreadEvent::ThreadPoolMetricsUpdated { snapshot });
@@ -1397,7 +1421,7 @@ impl ThreadPool {
         admission_waiters: &AtomicUsize,
         thread_id: &ThreadId,
         sender: &broadcast::Sender<ThreadEvent>,
-        runtime: ThreadPoolRuntimeRef,
+        runtime: ThreadPoolRuntimeSummary,
         snapshot: ThreadPoolSnapshot,
     ) -> Option<RuntimeShutdown> {
         if admission_waiters.load(Ordering::SeqCst) > 0
@@ -1409,13 +1433,21 @@ impl ThreadPool {
             )
         {
             let _ = sender.send(ThreadEvent::ThreadPoolEvicted {
-                runtime,
+                thread_id: runtime.thread_id,
+                kind: runtime.kind,
+                session_id: runtime.session_id,
+                job_id: runtime.job_id.clone(),
                 reason: ThreadPoolEventReason::MemoryPressure,
             });
             let _ = sender.send(ThreadEvent::ThreadPoolMetricsUpdated { snapshot });
             return Some(shutdown);
         }
-        let _ = sender.send(ThreadEvent::ThreadPoolCooling { runtime });
+        let _ = sender.send(ThreadEvent::ThreadPoolCooling {
+            thread_id: runtime.thread_id,
+            kind: runtime.kind,
+            session_id: runtime.session_id,
+            job_id: runtime.job_id.clone(),
+        });
         let _ = sender.send(ThreadEvent::ThreadPoolMetricsUpdated { snapshot });
         None
     }
@@ -1425,7 +1457,11 @@ impl ThreadPool {
         max_threads: u32,
         thread_id: &ThreadId,
         reason: ThreadPoolEventReason,
-    ) -> Option<(ThreadPoolRuntimeRef, ThreadPoolSnapshot, RuntimeShutdown)> {
+    ) -> Option<(
+        ThreadPoolRuntimeSummary,
+        ThreadPoolSnapshot,
+        RuntimeShutdown,
+    )> {
         let mut store = store.lock().expect("thread-pool mutex poisoned");
         let entry = store.runtimes.get_mut(&thread_id.to_string())?;
         if entry.summary.status != ThreadRuntimeStatus::Cooling {
@@ -1436,7 +1472,7 @@ impl ThreadPool {
         entry.summary.last_reason = Some(reason);
         entry.summary.estimated_memory_bytes = 0;
         entry.slot_permit = None;
-        let runtime = entry.summary.runtime.clone();
+        let runtime = entry.summary.clone();
         Self::refresh_peaks(&mut store);
         let snapshot = Self::collect_metrics_from_store(max_threads, &store);
         Some((runtime, snapshot, shutdown))
@@ -2427,6 +2463,7 @@ mod tests {
     use async_trait::async_trait;
     use rust_decimal::Decimal;
     use sqlx::SqlitePool;
+    use tokio::time::{Duration, sleep, timeout};
 
     struct NoopCompactor;
 
@@ -2476,6 +2513,37 @@ mod tests {
                 provider: "job-test".to_string(),
                 capability: "stream_complete".to_string(),
             })
+        }
+    }
+
+    #[derive(Debug)]
+    struct PendingStreamProvider;
+
+    #[async_trait]
+    impl argus_protocol::LlmProvider for PendingStreamProvider {
+        fn model_name(&self) -> &str {
+            "pending-job-test"
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> std::result::Result<CompletionResponse, LlmError> {
+            Err(LlmError::UnsupportedCapability {
+                provider: "pending-job-test".to_string(),
+                capability: "complete".to_string(),
+            })
+        }
+
+        async fn stream_complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> std::result::Result<LlmEventStream, LlmError> {
+            Ok(Box::pin(futures_util::stream::pending()))
         }
     }
 
@@ -2611,6 +2679,145 @@ mod tests {
                 Vec::new(),
             ))
         }
+    }
+
+    fn routing_test_agent_record(agent_id: AgentId) -> AgentRecord {
+        AgentRecord {
+            id: agent_id,
+            display_name: "Routing Test Agent".to_string(),
+            description: "Used to verify mailbox delivery routing".to_string(),
+            version: "1.0.0".to_string(),
+            provider_id: Some(ProviderId::new(1)),
+            model_id: Some("job-test".to_string()),
+            system_prompt: "You route thread messages.".to_string(),
+            tool_names: vec![],
+            subagent_names: vec![],
+            max_tokens: None,
+            temperature: None,
+            thinking_config: Some(ThinkingConfig::disabled()),
+        }
+    }
+
+    async fn setup_persisted_chat_runtime(
+        provider: Arc<dyn argus_protocol::LlmProvider>,
+    ) -> (PathBuf, ThreadPool, SessionId, ThreadId, AgentId) {
+        let trace_dir =
+            std::env::temp_dir().join(format!("argus-thread-pool-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&trace_dir).expect("trace dir should exist");
+        let pool = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("sqlite memory pool should connect");
+        migrate(&pool).await.expect("migration should succeed");
+        let sqlite = Arc::new(ArgusSqlite::new(pool));
+
+        let template_manager = Arc::new(TemplateManager::new(
+            sqlite.clone() as Arc<dyn AgentRepository>,
+            sqlite.clone(),
+        ));
+        let agent_id = AgentId::new(17);
+        let agent_record = routing_test_agent_record(agent_id);
+        template_manager
+            .upsert(agent_record.clone())
+            .await
+            .expect("template upsert should succeed");
+
+        let thread_pool = ThreadPool::with_persistence(
+            template_manager,
+            Arc::new(FixedProviderResolver { provider }),
+            Arc::new(ToolManager::new()),
+            trace_dir.clone(),
+            Some(ThreadPoolPersistence::new(
+                sqlite.clone() as Arc<dyn JobRepository>,
+                sqlite.clone() as Arc<dyn ThreadRepository>,
+                sqlite.clone() as Arc<dyn LlmProviderRepository>,
+            )),
+        );
+
+        let session_id = SessionId::new();
+        let thread_id = ThreadId::new();
+        SessionRepository::create(sqlite.as_ref(), &session_id, "routing-session")
+            .await
+            .expect("session should persist");
+        sqlite
+            .upsert_thread(&ThreadRecord {
+                id: thread_id,
+                provider_id: argus_protocol::LlmProviderId::new(1),
+                title: Some("routing-thread".to_string()),
+                token_count: 0,
+                turn_count: 0,
+                session_id: Some(session_id),
+                template_id: Some(RepoAgentId::new(agent_id.inner())),
+                model_override: Some("job-test".to_string()),
+                created_at: Utc::now().to_rfc3339(),
+                updated_at: Utc::now().to_rfc3339(),
+            })
+            .await
+            .expect("thread record should persist");
+
+        let base_dir = chat_thread_base_dir(&trace_dir, session_id, thread_id);
+        persist_thread_metadata(
+            &base_dir,
+            &ThreadTraceMetadata {
+                thread_id,
+                kind: ThreadTraceKind::ChatRoot,
+                root_session_id: Some(session_id),
+                parent_thread_id: None,
+                job_id: None,
+                agent_snapshot: agent_record,
+            },
+        )
+        .await
+        .expect("chat metadata should persist");
+
+        (trace_dir, thread_pool, session_id, thread_id, agent_id)
+    }
+
+    fn plain_mailbox_message(to_thread_id: ThreadId) -> MailboxMessage {
+        MailboxMessage {
+            id: Uuid::new_v4().to_string(),
+            from_thread_id: ThreadId::new(),
+            to_thread_id,
+            from_label: "planner".to_string(),
+            message_type: MailboxMessageType::Plain,
+            text: "hello from planner".to_string(),
+            timestamp: Utc::now().to_rfc3339(),
+            read: false,
+            summary: Some("routing".to_string()),
+        }
+    }
+
+    fn job_result_mailbox_message(to_thread_id: ThreadId, agent_id: AgentId) -> MailboxMessage {
+        MailboxMessage {
+            id: Uuid::new_v4().to_string(),
+            from_thread_id: ThreadId::new(),
+            to_thread_id,
+            from_label: "worker".to_string(),
+            message_type: MailboxMessageType::JobResult {
+                job_id: "job-routing".to_string(),
+                success: true,
+                token_usage: None,
+                agent_id,
+                agent_display_name: "Routing Worker".to_string(),
+                agent_description: "Produces a routed result".to_string(),
+            },
+            text: "finished routed work".to_string(),
+            timestamp: Utc::now().to_rfc3339(),
+            read: false,
+            summary: Some("job done".to_string()),
+        }
+    }
+
+    async fn wait_until_thread_running(thread: &Arc<RwLock<argus_agent::Thread>>) {
+        timeout(Duration::from_secs(5), async {
+            loop {
+                if thread.read().await.is_turn_running() {
+                    break;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("thread should start running");
     }
 
     struct FailingUpsertThreadRepository {
@@ -2881,6 +3088,118 @@ mod tests {
                 thread_id,
                 job_id: "job-snapshot".to_string(),
             }]
+        );
+    }
+
+    #[tokio::test]
+    async fn deliver_mailbox_message_marks_chat_runtime_running_and_skips_plain_shadow_copy() {
+        let (_temp_dir, thread_pool, session_id, thread_id, _agent_id) =
+            setup_persisted_chat_runtime(Arc::new(PendingStreamProvider)).await;
+        let thread = thread_pool
+            .ensure_chat_runtime(session_id, thread_id)
+            .await
+            .expect("chat runtime should load");
+        let estimated_memory_bytes = ThreadPool::estimate_thread_memory(&thread).await;
+        assert!(
+            thread_pool
+                .transition_runtime_to_cooling(&thread_id, Some(estimated_memory_bytes))
+                .is_some(),
+            "loaded runtime should be movable to cooling"
+        );
+        assert_eq!(
+            thread_pool
+                .runtime_summary(&thread_id)
+                .expect("runtime summary should exist")
+                .status,
+            ThreadRuntimeStatus::Cooling
+        );
+
+        thread_pool
+            .deliver_mailbox_message(thread_id, plain_mailbox_message(thread_id))
+            .await
+            .expect("plain mailbox message should route through thread");
+        wait_until_thread_running(&thread).await;
+
+        assert_eq!(
+            thread_pool
+                .runtime_summary(&thread_id)
+                .expect("runtime summary should exist")
+                .status,
+            ThreadRuntimeStatus::Running,
+            "mailbox-routed chat turns should mark the runtime running before they execute"
+        );
+        assert!(
+            thread_pool
+                .store
+                .lock()
+                .expect("thread-pool mutex poisoned")
+                .runtimes
+                .get(&thread_id.to_string())
+                .expect("runtime entry should exist")
+                .queued_job_results
+                .is_empty(),
+            "plain scheduler messages should not leave behind a shared inbox shadow"
+        );
+
+        assert!(
+            thread_pool.remove_runtime(&thread_id),
+            "test cleanup should unload the pending runtime"
+        );
+    }
+
+    #[tokio::test]
+    async fn deliver_mailbox_job_result_rehydrates_evicted_chat_runtime_and_keeps_claimable_shadow()
+    {
+        let (_temp_dir, thread_pool, session_id, thread_id, agent_id) =
+            setup_persisted_chat_runtime(Arc::new(PendingStreamProvider)).await;
+        let thread = thread_pool
+            .ensure_chat_runtime(session_id, thread_id)
+            .await
+            .expect("chat runtime should load");
+        let estimated_memory_bytes = ThreadPool::estimate_thread_memory(&thread).await;
+        assert!(
+            thread_pool
+                .transition_runtime_to_cooling(&thread_id, Some(estimated_memory_bytes))
+                .is_some(),
+            "loaded runtime should be movable to cooling"
+        );
+        assert!(
+            thread_pool.evict_chat_if_idle(&thread_id).is_some(),
+            "cooling runtime should evict"
+        );
+        assert!(
+            thread_pool.loaded_thread(&thread_id).is_none(),
+            "runtime should no longer be resident after eviction"
+        );
+
+        let message = job_result_mailbox_message(thread_id, agent_id);
+        thread_pool
+            .deliver_mailbox_message(thread_id, message.clone())
+            .await
+            .expect("job-result delivery should rehydrate and route the runtime");
+        let thread = thread_pool
+            .loaded_thread(&thread_id)
+            .expect("delivery should rehydrate the evicted runtime");
+        wait_until_thread_running(&thread).await;
+
+        assert_eq!(
+            thread_pool
+                .runtime_summary(&thread_id)
+                .expect("runtime summary should exist")
+                .status,
+            ThreadRuntimeStatus::Running,
+            "rehydrated chat runtimes should become running before consuming mailbox-routed turns"
+        );
+        assert!(
+            thread_pool
+                .claim_queued_job_result(thread_id, "job-routing")
+                .is_some(),
+            "job-result routing should keep the consume-only shadow copy"
+        );
+
+        assert!(
+            thread_pool.remove_runtime(&thread_id),
+            "test cleanup should unload the rehydrated runtime"
         );
     }
 

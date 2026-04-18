@@ -222,7 +222,7 @@ pub enum ThreadRuntimeStatus {
 }
 
 /// Runtime source classification inside the unified thread pool.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ThreadPoolRuntimeKind {
     /// User-facing conversational runtime.
@@ -231,9 +231,9 @@ pub enum ThreadPoolRuntimeKind {
     Job,
 }
 
-/// Stable identifier for a runtime tracked by the unified thread pool.
+/// Snapshot of a single thread tracked by the thread pool.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ThreadPoolRuntimeRef {
+pub struct ThreadPoolRuntimeSummary {
     /// Thread ID.
     pub thread_id: ThreadId,
     /// Runtime category.
@@ -242,13 +242,6 @@ pub struct ThreadPoolRuntimeRef {
     pub session_id: Option<SessionId>,
     /// Bound job ID if this runtime is associated with a dispatched job.
     pub job_id: Option<String>,
-}
-
-/// Snapshot of a single thread tracked by the thread pool.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ThreadPoolRuntimeSummary {
-    /// Stable runtime identity.
-    pub runtime: ThreadPoolRuntimeRef,
     /// Runtime status.
     pub status: ThreadRuntimeStatus,
     /// Estimated memory usage for this runtime.
@@ -468,23 +461,47 @@ pub enum ThreadEvent {
     },
     /// Job/thread has entered queued state inside the thread pool.
     ThreadPoolQueued {
-        /// Runtime reference.
-        runtime: ThreadPoolRuntimeRef,
+        /// Thread ID.
+        thread_id: ThreadId,
+        /// Runtime category.
+        kind: ThreadPoolRuntimeKind,
+        /// Bound session ID when the runtime belongs to a user chat thread.
+        session_id: Option<SessionId>,
+        /// Bound job ID if this runtime is associated with a dispatched job.
+        job_id: Option<String>,
     },
     /// Job/thread has started running inside the thread pool.
     ThreadPoolStarted {
-        /// Runtime reference.
-        runtime: ThreadPoolRuntimeRef,
+        /// Thread ID.
+        thread_id: ThreadId,
+        /// Runtime category.
+        kind: ThreadPoolRuntimeKind,
+        /// Bound session ID when the runtime belongs to a user chat thread.
+        session_id: Option<SessionId>,
+        /// Bound job ID if this runtime is associated with a dispatched job.
+        job_id: Option<String>,
     },
     /// Job/thread has entered cooling state inside the thread pool.
     ThreadPoolCooling {
-        /// Runtime reference.
-        runtime: ThreadPoolRuntimeRef,
+        /// Thread ID.
+        thread_id: ThreadId,
+        /// Runtime category.
+        kind: ThreadPoolRuntimeKind,
+        /// Bound session ID when the runtime belongs to a user chat thread.
+        session_id: Option<SessionId>,
+        /// Bound job ID if this runtime is associated with a dispatched job.
+        job_id: Option<String>,
     },
     /// Job/thread runtime has been evicted from memory.
     ThreadPoolEvicted {
-        /// Runtime reference.
-        runtime: ThreadPoolRuntimeRef,
+        /// Thread ID.
+        thread_id: ThreadId,
+        /// Runtime category.
+        kind: ThreadPoolRuntimeKind,
+        /// Bound session ID when the runtime belongs to a user chat thread.
+        session_id: Option<SessionId>,
+        /// Bound job ID if this runtime is associated with a dispatched job.
+        job_id: Option<String>,
         /// Eviction reason.
         reason: ThreadPoolEventReason,
     },
@@ -532,6 +549,44 @@ pub(crate) fn assert_thread_pool_snapshot_round_trip() {
     let restored: ThreadPoolSnapshot = serde_json::from_value(value).unwrap();
     assert_eq!(restored.max_threads, 8);
     assert_eq!(restored.queued_threads, 1);
+}
+
+#[cfg(test)]
+pub(crate) fn assert_thread_pool_state_round_trip() {
+    let state = ThreadPoolState {
+        snapshot: ThreadPoolSnapshot {
+            max_threads: 8,
+            active_threads: 2,
+            queued_threads: 1,
+            running_threads: 1,
+            cooling_threads: 1,
+            evicted_threads: 3,
+            estimated_memory_bytes: 4096,
+            peak_estimated_memory_bytes: 8192,
+            process_memory_bytes: Some(16_384),
+            peak_process_memory_bytes: Some(32_768),
+            resident_thread_count: 2,
+            avg_thread_memory_bytes: 2048,
+            captured_at: "2026-03-29T00:00:00Z".to_string(),
+        },
+        runtimes: vec![ThreadPoolRuntimeSummary {
+            thread_id: ThreadId::new(),
+            kind: ThreadPoolRuntimeKind::Job,
+            session_id: None,
+            job_id: Some("job-1".to_string()),
+            status: ThreadRuntimeStatus::Queued,
+            estimated_memory_bytes: 1024,
+            last_active_at: Some("2026-03-29T00:00:01Z".to_string()),
+            recoverable: true,
+            last_reason: None,
+        }],
+    };
+
+    let value = serde_json::to_value(&state).unwrap();
+    let restored: ThreadPoolState = serde_json::from_value(value).unwrap();
+    assert_eq!(restored.runtimes.len(), 1);
+    assert_eq!(restored.runtimes[0].kind, ThreadPoolRuntimeKind::Job);
+    assert_eq!(restored.runtimes[0].job_id.as_deref(), Some("job-1"));
 }
 
 #[cfg(test)]

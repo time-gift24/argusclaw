@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use argus_protocol::{
     LlmStreamEvent, MailboxMessage, ThreadEvent, ThreadNoticeLevel, ThreadPoolEventReason,
-    ThreadPoolRuntimeRef, ThreadPoolSnapshot,
+    ThreadPoolRuntimeKind, ThreadPoolSnapshot,
 };
 
 /// Envelope for thread events sent to the frontend.
@@ -206,29 +206,67 @@ impl ThreadEventEnvelope {
                 turn_number: None,
                 payload: ThreadEventPayload::ThreadBoundToJob { job_id },
             }),
-            ThreadEvent::ThreadPoolQueued { runtime } => Some(Self {
+            ThreadEvent::ThreadPoolQueued {
+                thread_id,
+                kind,
+                session_id: runtime_session_id,
+                job_id,
+            } => Some(Self {
                 session_id,
-                thread_id: runtime.thread_id.inner().to_string(),
+                thread_id: thread_id.inner().to_string(),
                 turn_number: None,
-                payload: ThreadEventPayload::ThreadPoolQueued { runtime },
+                payload: ThreadEventPayload::ThreadPoolQueued {
+                    kind,
+                    session_id: runtime_session_id,
+                    job_id,
+                },
             }),
-            ThreadEvent::ThreadPoolStarted { runtime } => Some(Self {
+            ThreadEvent::ThreadPoolStarted {
+                thread_id,
+                kind,
+                session_id: runtime_session_id,
+                job_id,
+            } => Some(Self {
                 session_id,
-                thread_id: runtime.thread_id.inner().to_string(),
+                thread_id: thread_id.inner().to_string(),
                 turn_number: None,
-                payload: ThreadEventPayload::ThreadPoolStarted { runtime },
+                payload: ThreadEventPayload::ThreadPoolStarted {
+                    kind,
+                    session_id: runtime_session_id,
+                    job_id,
+                },
             }),
-            ThreadEvent::ThreadPoolCooling { runtime } => Some(Self {
+            ThreadEvent::ThreadPoolCooling {
+                thread_id,
+                kind,
+                session_id: runtime_session_id,
+                job_id,
+            } => Some(Self {
                 session_id,
-                thread_id: runtime.thread_id.inner().to_string(),
+                thread_id: thread_id.inner().to_string(),
                 turn_number: None,
-                payload: ThreadEventPayload::ThreadPoolCooling { runtime },
+                payload: ThreadEventPayload::ThreadPoolCooling {
+                    kind,
+                    session_id: runtime_session_id,
+                    job_id,
+                },
             }),
-            ThreadEvent::ThreadPoolEvicted { runtime, reason } => Some(Self {
+            ThreadEvent::ThreadPoolEvicted {
+                thread_id,
+                kind,
+                session_id: runtime_session_id,
+                job_id,
+                reason,
+            } => Some(Self {
                 session_id,
-                thread_id: runtime.thread_id.inner().to_string(),
+                thread_id: thread_id.inner().to_string(),
                 turn_number: None,
-                payload: ThreadEventPayload::ThreadPoolEvicted { runtime, reason },
+                payload: ThreadEventPayload::ThreadPoolEvicted {
+                    kind,
+                    session_id: runtime_session_id,
+                    job_id,
+                    reason,
+                },
             }),
             ThreadEvent::ThreadPoolMetricsUpdated { snapshot } => Some(Self {
                 session_id,
@@ -305,16 +343,24 @@ pub enum ThreadEventPayload {
         job_id: String,
     },
     ThreadPoolQueued {
-        runtime: ThreadPoolRuntimeRef,
+        kind: ThreadPoolRuntimeKind,
+        session_id: Option<argus_protocol::SessionId>,
+        job_id: Option<String>,
     },
     ThreadPoolStarted {
-        runtime: ThreadPoolRuntimeRef,
+        kind: ThreadPoolRuntimeKind,
+        session_id: Option<argus_protocol::SessionId>,
+        job_id: Option<String>,
     },
     ThreadPoolCooling {
-        runtime: ThreadPoolRuntimeRef,
+        kind: ThreadPoolRuntimeKind,
+        session_id: Option<argus_protocol::SessionId>,
+        job_id: Option<String>,
     },
     ThreadPoolEvicted {
-        runtime: ThreadPoolRuntimeRef,
+        kind: ThreadPoolRuntimeKind,
+        session_id: Option<argus_protocol::SessionId>,
+        job_id: Option<String>,
         reason: ThreadPoolEventReason,
     },
     ThreadPoolMetricsUpdated {
