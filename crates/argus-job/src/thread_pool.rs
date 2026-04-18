@@ -591,25 +591,6 @@ impl ThreadPool {
             .copied()
     }
 
-    /// Mark a queued runtime as running.
-    pub fn mark_running(&self, job_id: &str) -> Option<ThreadId> {
-        let thread_id = self.get_thread_binding(job_id)?;
-        self.update_state(&thread_id, ThreadRuntimeStatus::Running, None)
-    }
-
-    /// Mark a runtime as cooling.
-    pub fn mark_cooling(&self, job_id: &str) -> Option<ThreadId> {
-        let thread_id = self.get_thread_binding(job_id)?;
-        self.update_state(&thread_id, ThreadRuntimeStatus::Cooling, None)
-    }
-
-    /// Evict a job runtime that is currently cooling.
-    pub fn evict_if_idle(&self, job_id: &str) -> Option<ThreadId> {
-        let thread_id = self.get_thread_binding(job_id)?;
-        self.evict_runtime(&thread_id, ThreadPoolEventReason::CoolingExpired)
-            .map(|runtime| runtime.thread_id)
-    }
-
     /// Evict a chat runtime that is currently cooling.
     pub fn evict_chat_if_idle(&self, thread_id: &ThreadId) -> Option<ThreadPoolRuntimeRef> {
         self.evict_runtime(thread_id, ThreadPoolEventReason::CoolingExpired)
@@ -912,24 +893,6 @@ impl ThreadPool {
         let sender = entry.sender.clone();
         Self::refresh_peaks(&mut store);
         Some(sender)
-    }
-
-    fn update_state(
-        &self,
-        thread_id: &ThreadId,
-        state: ThreadRuntimeStatus,
-        reason: Option<ThreadPoolEventReason>,
-    ) -> Option<ThreadId> {
-        let mut store = self.store.lock().expect("thread-pool mutex poisoned");
-        let runtime_thread_id = {
-            let entry = store.runtimes.get_mut(&thread_id.to_string())?;
-            entry.summary.status = state;
-            entry.summary.last_active_at = Some(Utc::now().to_rfc3339());
-            entry.summary.last_reason = reason;
-            entry.summary.runtime.thread_id
-        };
-        Self::refresh_peaks(&mut store);
-        Some(runtime_thread_id)
     }
 
     fn total_estimated_memory(store: &ThreadPoolStore) -> u64 {

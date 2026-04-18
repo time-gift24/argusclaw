@@ -29,7 +29,7 @@ use super::plan_tool::UpdatePlanTool;
 use super::turn_log_store::{
     RecoveredThreadLogState, append_turn_record, recover_thread_log_state,
 };
-use super::types::{ThreadInfo, ThreadState};
+use super::types::ThreadInfo;
 /// Default broadcast channel capacity.
 const DEFAULT_CHANNEL_CAPACITY: usize = 256;
 
@@ -101,10 +101,6 @@ pub struct Thread {
     /// Optional thread title.
     #[builder(default)]
     title: Option<String>,
-
-    /// Creation timestamp.
-    #[builder(default = "Utc::now()")]
-    created_at: DateTime<Utc>,
 
     /// Last update timestamp.
     #[builder(default = "Utc::now()")]
@@ -211,7 +207,6 @@ impl ThreadBuilder {
             agent_record,
             session_id,
             title: self.title.flatten(),
-            created_at: self.created_at.unwrap_or_else(Utc::now),
             updated_at: self.updated_at.unwrap_or_else(Utc::now),
             turns,
             provider: self.provider.ok_or(ThreadError::ProviderNotConfigured)?,
@@ -259,11 +254,6 @@ impl Thread {
         self.updated_at = Utc::now();
     }
 
-    /// Get creation timestamp.
-    pub fn created_at(&self) -> DateTime<Utc> {
-        self.created_at
-    }
-
     /// Get last update timestamp.
     pub fn updated_at(&self) -> DateTime<Utc> {
         self.updated_at
@@ -292,11 +282,6 @@ impl Thread {
         let _ = self.pipe_tx.send(event);
     }
 
-    /// Get a reference to the broadcast sender (for creating receivers).
-    pub fn pipe_tx(&self) -> &broadcast::Sender<ThreadEvent> {
-        &self.pipe_tx
-    }
-
     /// Send a message into the thread-owned runtime ingress.
     pub fn send_message(&self, message: ThreadMessage) -> Result<(), ThreadError> {
         self.message_tx
@@ -312,16 +297,6 @@ impl Thread {
     /// Returns true if a Turn is currently executing.
     pub fn is_turn_running(&self) -> bool {
         !matches!(self.runtime_state, ThreadRuntimeState::Idle)
-    }
-
-    /// Get current state.
-    pub fn state(&self) -> ThreadState {
-        match self.runtime_state {
-            ThreadRuntimeState::Idle => ThreadState::Idle,
-            ThreadRuntimeState::Running { .. } | ThreadRuntimeState::Stopping { .. } => {
-                ThreadState::Processing
-            }
-        }
     }
 
     fn reset_runtime_loop_state(&mut self) {

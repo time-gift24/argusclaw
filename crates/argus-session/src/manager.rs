@@ -675,13 +675,6 @@ impl SessionManager {
         Ok(thread)
     }
 
-    /// Broadcast a ThreadEvent to all active sessions.
-    pub fn broadcast_event(&self, event: ThreadEvent) {
-        for session in self.sessions.iter() {
-            session.value().broadcast(event.clone());
-        }
-    }
-
     /// List all sessions (from DB).
     pub async fn list_sessions(&self) -> Result<Vec<SessionSummary>> {
         let sessions =

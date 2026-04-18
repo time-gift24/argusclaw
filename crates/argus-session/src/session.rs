@@ -1,10 +1,7 @@
 use std::sync::{Arc, Weak};
 
 use argus_agent::Thread;
-use argus_protocol::{
-    MailboxMessage, MailboxMessageType, MessageOverride, SessionId, ThreadEvent, ThreadId,
-    ThreadMessage,
-};
+use argus_protocol::{SessionId, ThreadEvent, ThreadId, ThreadMessage};
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
@@ -77,35 +74,6 @@ impl Session {
         };
         let delivered = thread.read().await.send_message(message).is_ok();
         delivered
-    }
-
-    pub async fn enqueue_user_message(
-        &self,
-        thread_id: &ThreadId,
-        content: String,
-        msg_override: Option<MessageOverride>,
-    ) -> bool {
-        self.send_thread_message(
-            thread_id,
-            ThreadMessage::UserInput {
-                content,
-                msg_override,
-            },
-        )
-        .await
-    }
-
-    pub async fn enqueue_mailbox_message(
-        &self,
-        thread_id: &ThreadId,
-        message: MailboxMessage,
-    ) -> bool {
-        let routed = if matches!(message.message_type, MailboxMessageType::JobResult { .. }) {
-            ThreadMessage::JobResult { message }
-        } else {
-            ThreadMessage::PeerMessage { message }
-        };
-        self.send_thread_message(thread_id, routed).await
     }
 
     pub async fn interrupt_thread(&self, thread_id: &ThreadId) -> bool {
