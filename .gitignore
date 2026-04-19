@@ -8,3 +8,5 @@
 *.tsbuildinfo
 # Auto-generated files
 crates/argus-template/src/generated_agents.rs
+.codex
+.omx
