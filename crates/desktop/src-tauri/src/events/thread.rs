@@ -6,8 +6,8 @@
 use serde::{Deserialize, Serialize};
 
 use argus_protocol::{
-    LlmStreamEvent, MailboxMessage, ThreadEvent, ThreadNoticeLevel, ThreadPoolEventReason,
-    ThreadPoolRuntimeRef, ThreadPoolSnapshot,
+    JobRuntimeSnapshot, JobRuntimeSummary, LlmStreamEvent, MailboxMessage, ThreadEvent,
+    ThreadNoticeLevel, ThreadPoolEventReason, ThreadPoolSnapshot,
 };
 
 /// Envelope for thread events sent to the frontend.
@@ -174,6 +174,7 @@ impl ThreadEventEnvelope {
                 thread_id,
                 job_id,
                 success,
+                cancelled,
                 message,
                 token_usage,
                 agent_id,
@@ -186,6 +187,7 @@ impl ThreadEventEnvelope {
                 payload: ThreadEventPayload::JobResult {
                     job_id,
                     success,
+                    cancelled,
                     message,
                     input_tokens: token_usage.as_ref().map(|u| u.input_tokens),
                     output_tokens: token_usage.as_ref().map(|u| u.output_tokens),
@@ -206,35 +208,97 @@ impl ThreadEventEnvelope {
                 turn_number: None,
                 payload: ThreadEventPayload::ThreadBoundToJob { job_id },
             }),
-            ThreadEvent::ThreadPoolQueued { runtime } => Some(Self {
+            ThreadEvent::ThreadPoolQueued {
+                thread_id,
+                session_id: runtime_session_id,
+            } => Some(Self {
                 session_id,
-                thread_id: runtime.thread_id.inner().to_string(),
+                thread_id: thread_id.inner().to_string(),
                 turn_number: None,
-                payload: ThreadEventPayload::ThreadPoolQueued { runtime },
+                payload: ThreadEventPayload::ThreadPoolQueued {
+                    session_id: runtime_session_id,
+                },
             }),
-            ThreadEvent::ThreadPoolStarted { runtime } => Some(Self {
+            ThreadEvent::ThreadPoolStarted {
+                thread_id,
+                session_id: runtime_session_id,
+            } => Some(Self {
                 session_id,
-                thread_id: runtime.thread_id.inner().to_string(),
+                thread_id: thread_id.inner().to_string(),
                 turn_number: None,
-                payload: ThreadEventPayload::ThreadPoolStarted { runtime },
+                payload: ThreadEventPayload::ThreadPoolStarted {
+                    session_id: runtime_session_id,
+                },
             }),
-            ThreadEvent::ThreadPoolCooling { runtime } => Some(Self {
+            ThreadEvent::ThreadPoolCooling {
+                thread_id,
+                session_id: runtime_session_id,
+            } => Some(Self {
                 session_id,
-                thread_id: runtime.thread_id.inner().to_string(),
+                thread_id: thread_id.inner().to_string(),
                 turn_number: None,
-                payload: ThreadEventPayload::ThreadPoolCooling { runtime },
+                payload: ThreadEventPayload::ThreadPoolCooling {
+                    session_id: runtime_session_id,
+                },
             }),
-            ThreadEvent::ThreadPoolEvicted { runtime, reason } => Some(Self {
+            ThreadEvent::ThreadPoolEvicted {
+                thread_id,
+                session_id: runtime_session_id,
+                reason,
+            } => Some(Self {
                 session_id,
-                thread_id: runtime.thread_id.inner().to_string(),
+                thread_id: thread_id.inner().to_string(),
                 turn_number: None,
-                payload: ThreadEventPayload::ThreadPoolEvicted { runtime, reason },
+                payload: ThreadEventPayload::ThreadPoolEvicted {
+                    session_id: runtime_session_id,
+                    reason,
+                },
             }),
             ThreadEvent::ThreadPoolMetricsUpdated { snapshot } => Some(Self {
                 session_id,
                 thread_id: String::new(),
                 turn_number: None,
                 payload: ThreadEventPayload::ThreadPoolMetricsUpdated { snapshot },
+            }),
+            ThreadEvent::JobRuntimeQueued { thread_id, job_id } => Some(Self {
+                session_id,
+                thread_id: thread_id.inner().to_string(),
+                turn_number: None,
+                payload: ThreadEventPayload::JobRuntimeQueued { job_id },
+            }),
+            ThreadEvent::JobRuntimeStarted { thread_id, job_id } => Some(Self {
+                session_id,
+                thread_id: thread_id.inner().to_string(),
+                turn_number: None,
+                payload: ThreadEventPayload::JobRuntimeStarted { job_id },
+            }),
+            ThreadEvent::JobRuntimeCooling { thread_id, job_id } => Some(Self {
+                session_id,
+                thread_id: thread_id.inner().to_string(),
+                turn_number: None,
+                payload: ThreadEventPayload::JobRuntimeCooling { job_id },
+            }),
+            ThreadEvent::JobRuntimeEvicted {
+                thread_id,
+                job_id,
+                reason,
+            } => Some(Self {
+                session_id,
+                thread_id: thread_id.inner().to_string(),
+                turn_number: None,
+                payload: ThreadEventPayload::JobRuntimeEvicted { job_id, reason },
+            }),
+            ThreadEvent::JobRuntimeUpdated { runtime } => Some(Self {
+                session_id,
+                thread_id: runtime.thread_id.inner().to_string(),
+                turn_number: None,
+                payload: ThreadEventPayload::JobRuntimeUpdated { runtime },
+            }),
+            ThreadEvent::JobRuntimeMetricsUpdated { snapshot } => Some(Self {
+                session_id,
+                thread_id: String::new(),
+                turn_number: None,
+                payload: ThreadEventPayload::JobRuntimeMetricsUpdated { snapshot },
             }),
             ThreadEvent::UserInterrupt { .. } => None,
             ThreadEvent::UserMessage { .. } => None,
@@ -305,20 +369,39 @@ pub enum ThreadEventPayload {
         job_id: String,
     },
     ThreadPoolQueued {
-        runtime: ThreadPoolRuntimeRef,
+        session_id: Option<argus_protocol::SessionId>,
     },
     ThreadPoolStarted {
-        runtime: ThreadPoolRuntimeRef,
+        session_id: Option<argus_protocol::SessionId>,
     },
     ThreadPoolCooling {
-        runtime: ThreadPoolRuntimeRef,
+        session_id: Option<argus_protocol::SessionId>,
     },
     ThreadPoolEvicted {
-        runtime: ThreadPoolRuntimeRef,
+        session_id: Option<argus_protocol::SessionId>,
         reason: ThreadPoolEventReason,
     },
     ThreadPoolMetricsUpdated {
         snapshot: ThreadPoolSnapshot,
+    },
+    JobRuntimeQueued {
+        job_id: String,
+    },
+    JobRuntimeStarted {
+        job_id: String,
+    },
+    JobRuntimeCooling {
+        job_id: String,
+    },
+    JobRuntimeEvicted {
+        job_id: String,
+        reason: ThreadPoolEventReason,
+    },
+    JobRuntimeUpdated {
+        runtime: JobRuntimeSummary,
+    },
+    JobRuntimeMetricsUpdated {
+        snapshot: JobRuntimeSnapshot,
     },
     JobDispatched {
         job_id: String,
@@ -329,6 +412,7 @@ pub enum ThreadEventPayload {
     JobResult {
         job_id: String,
         success: bool,
+        cancelled: bool,
         message: String,
         input_tokens: Option<u32>,
         output_tokens: Option<u32>,

@@ -1,10 +1,11 @@
 //! Thread implementation.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use derive_builder::Builder;
-use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
+use tokio::sync::{RwLock, broadcast, mpsc};
 use tokio::task::{JoinError, JoinHandle};
 
 use crate::turn::{self, TurnCancellation};
@@ -12,8 +13,8 @@ use argus_protocol::llm::{ChatMessage, LlmProvider};
 use argus_protocol::tool::NamedTool;
 use argus_protocol::{
     AgentRecord, HookHandler, HookRegistry, McpToolResolver, MessageOverride, QueuedUserMessage,
-    SessionId, ThreadCommand, ThreadControlEvent, ThreadEvent, ThreadId, ThreadMailbox,
-    ThreadNoticeLevel, TokenUsage,
+    SessionId, ThreadControlMessage, ThreadEvent, ThreadId, ThreadMessage, ThreadNoticeLevel,
+    TokenUsage,
 };
 use argus_tool::ToolManager;
 
@@ -28,7 +29,7 @@ use super::plan_tool::UpdatePlanTool;
 use super::turn_log_store::{
     RecoveredThreadLogState, append_turn_record, recover_thread_log_state,
 };
-use super::types::{ThreadInfo, ThreadState};
+use super::types::ThreadInfo;
 /// Default broadcast channel capacity.
 const DEFAULT_CHANNEL_CAPACITY: usize = 256;
 
@@ -101,10 +102,6 @@ pub struct Thread {
     #[builder(default)]
     title: Option<String>,
 
-    /// Creation timestamp.
-    #[builder(default = "Utc::now()")]
-    created_at: DateTime<Utc>,
-
     /// Last update timestamp.
     #[builder(default = "Utc::now()")]
     updated_at: DateTime<Utc>,
@@ -143,17 +140,17 @@ pub struct Thread {
     #[builder(default)]
     pipe_tx: broadcast::Sender<ThreadEvent>,
 
-    /// Internal control-plane sender for low-volume orchestration messages.
+    /// Thread ingress sender for low-volume orchestration and payload messages.
     #[builder(default)]
-    control_tx: mpsc::UnboundedSender<ThreadControlEvent>,
+    message_tx: mpsc::UnboundedSender<ThreadMessage>,
 
-    /// Single-consumer control receiver, taken by the session orchestrator.
+    /// Single-consumer thread ingress receiver, taken by the session orchestrator.
     #[builder(default)]
-    control_rx: Option<mpsc::UnboundedReceiver<ThreadControlEvent>>,
+    message_rx: Option<mpsc::UnboundedReceiver<ThreadMessage>>,
 
-    /// Thread-level mailbox shared between the orchestrator and active turns.
-    #[builder(default = "Arc::new(Mutex::new(ThreadMailbox::default()))")]
-    mailbox: Arc<Mutex<ThreadMailbox>>,
+    /// FIFO payload messages owned by the thread runtime.
+    #[builder(default)]
+    pending_messages: VecDeque<ThreadMessage>,
 
     /// Optional runtime resolver that injects ready MCP tools for this agent.
     #[builder(default, setter(strip_option))]
@@ -195,7 +192,7 @@ impl ThreadBuilder {
     /// Returns `ThreadError` if required fields (`provider`, `compactor`, `agent_record`, `session_id`) are not set.
     pub fn build(self) -> Result<Thread, ThreadError> {
         let (pipe_tx, _) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
-        let (control_tx, control_rx) = mpsc::unbounded_channel();
+        let (message_tx, message_rx) = mpsc::unbounded_channel();
 
         let agent_record = self.agent_record.ok_or(ThreadError::AgentRecordNotSet)?;
         let session_id = self.session_id.ok_or(ThreadError::SessionIdNotSet)?;
@@ -210,7 +207,6 @@ impl ThreadBuilder {
             agent_record,
             session_id,
             title: self.title.flatten(),
-            created_at: self.created_at.unwrap_or_else(Utc::now),
             updated_at: self.updated_at.unwrap_or_else(Utc::now),
             turns,
             provider: self.provider.ok_or(ThreadError::ProviderNotConfigured)?,
@@ -221,9 +217,9 @@ impl ThreadBuilder {
             runtime_state: ThreadRuntimeState::Idle,
             active_turn_cancellation: None,
             pipe_tx,
-            control_tx,
-            control_rx: Some(control_rx),
-            mailbox: Arc::new(Mutex::new(ThreadMailbox::default())),
+            message_tx,
+            message_rx: Some(message_rx),
+            pending_messages: VecDeque::new(),
             mcp_tool_resolver: self.mcp_tool_resolver.flatten(),
             plan_store,
         })
@@ -258,11 +254,6 @@ impl Thread {
         self.updated_at = Utc::now();
     }
 
-    /// Get creation timestamp.
-    pub fn created_at(&self) -> DateTime<Utc> {
-        self.created_at
-    }
-
     /// Get last update timestamp.
     pub fn updated_at(&self) -> DateTime<Utc> {
         self.updated_at
@@ -291,24 +282,16 @@ impl Thread {
         let _ = self.pipe_tx.send(event);
     }
 
-    /// Get a reference to the broadcast sender (for creating receivers).
-    pub fn pipe_tx(&self) -> &broadcast::Sender<ThreadEvent> {
-        &self.pipe_tx
+    /// Send a message into the thread-owned runtime ingress.
+    pub fn send_message(&self, message: ThreadMessage) -> Result<(), ThreadError> {
+        self.message_tx
+            .send(message)
+            .map_err(|_| ThreadError::ChannelClosed)
     }
 
-    /// Clone the internal control sender for this thread.
-    pub fn control_tx(&self) -> mpsc::UnboundedSender<ThreadControlEvent> {
-        self.control_tx.clone()
-    }
-
-    /// Take the single control receiver owned by the session orchestrator.
-    pub fn take_control_rx(&mut self) -> Option<mpsc::UnboundedReceiver<ThreadControlEvent>> {
-        self.control_rx.take()
-    }
-
-    /// Clone the shared mailbox.
-    pub fn mailbox(&self) -> Arc<Mutex<ThreadMailbox>> {
-        Arc::clone(&self.mailbox)
+    /// Take the single thread ingress receiver owned by the session orchestrator.
+    pub fn take_message_rx(&mut self) -> Option<mpsc::UnboundedReceiver<ThreadMessage>> {
+        self.message_rx.take()
     }
 
     /// Returns true if a Turn is currently executing.
@@ -316,76 +299,35 @@ impl Thread {
         !matches!(self.runtime_state, ThreadRuntimeState::Idle)
     }
 
-    /// Get current state.
-    pub fn state(&self) -> ThreadState {
-        match self.runtime_state {
-            ThreadRuntimeState::Idle => ThreadState::Idle,
-            ThreadRuntimeState::Running { .. } | ThreadRuntimeState::Stopping { .. } => {
-                ThreadState::Processing
-            }
-        }
-    }
-
     fn reset_runtime_loop_state(&mut self) {
         self.runtime_state = ThreadRuntimeState::Idle;
         self.active_turn_cancellation = None;
     }
 
-    fn dispatch_runtime_command(
-        &mut self,
-        command: ThreadCommand,
-        mailbox: &mut ThreadMailbox,
-    ) -> ThreadLoopAction {
-        match command {
-            ThreadCommand::EnqueueUserMessage {
-                content,
-                msg_override,
-            } => {
-                mailbox.enqueue_user_message(content, msg_override);
-                self.try_start_next_turn(mailbox)
+    fn dispatch_runtime_message(&mut self, message: ThreadMessage) -> ThreadLoopAction {
+        match message {
+            ThreadMessage::UserInput { .. }
+            | ThreadMessage::PeerMessage { .. }
+            | ThreadMessage::JobResult { .. } => {
+                self.pending_messages.push_back(message);
+                self.try_start_next_turn()
             }
-            ThreadCommand::EnqueueMailboxMessage(message) => {
-                mailbox.enqueue_mailbox_message(message);
-                self.try_start_next_turn(mailbox)
-            }
-            ThreadCommand::CancelActiveTurn => self.cancel_active_turn(),
+            ThreadMessage::Interrupt => self.cancel_active_turn(),
+            ThreadMessage::Control(ThreadControlMessage::ShutdownRuntime) => ThreadLoopAction::Noop,
         }
     }
 
-    fn complete_runtime_turn(
-        &mut self,
-        _committed: bool,
-        mailbox: &mut ThreadMailbox,
-    ) -> ThreadLoopAction {
-        // A stop request only applies to the turn that just settled; it must
-        // not spill into the next queued turn.
-        mailbox.clear_stop_signal();
+    fn complete_runtime_turn(&mut self, _committed: bool) -> ThreadLoopAction {
         self.runtime_state = ThreadRuntimeState::Idle;
-        self.try_start_next_turn(mailbox)
+        self.try_start_next_turn()
     }
 
-    fn inspect_runtime_mailbox(&mut self, mailbox: &mut ThreadMailbox) -> ThreadLoopAction {
-        if mailbox.take_stop_signal() {
-            if matches!(self.runtime_state, ThreadRuntimeState::Running { .. }) {
-                return self.cancel_active_turn();
-            }
-
-            return ThreadLoopAction::Noop;
-        }
-
-        if matches!(self.runtime_state, ThreadRuntimeState::Idle) {
-            return self.try_start_next_turn(mailbox);
-        }
-
-        ThreadLoopAction::Noop
-    }
-
-    fn try_start_next_turn(&mut self, mailbox: &mut ThreadMailbox) -> ThreadLoopAction {
+    fn try_start_next_turn(&mut self) -> ThreadLoopAction {
         if !matches!(self.runtime_state, ThreadRuntimeState::Idle) {
             return ThreadLoopAction::Noop;
         }
 
-        match self.take_next_turn_message(mailbox) {
+        match self.take_next_turn_message() {
             Some(message) => self.start_runtime_turn(message),
             None => ThreadLoopAction::Noop,
         }
@@ -414,8 +356,20 @@ impl Thread {
         }
     }
 
-    fn take_next_turn_message(&mut self, mailbox: &mut ThreadMailbox) -> Option<QueuedUserMessage> {
-        mailbox.take_next_turn_message()
+    fn take_next_turn_message(&mut self) -> Option<QueuedUserMessage> {
+        match self.pending_messages.pop_front()? {
+            ThreadMessage::UserInput {
+                content,
+                msg_override,
+            } => Some(QueuedUserMessage {
+                content,
+                msg_override,
+            }),
+            ThreadMessage::PeerMessage { message } | ThreadMessage::JobResult { message } => {
+                Some(message.into_queued_user_message())
+            }
+            ThreadMessage::Interrupt | ThreadMessage::Control(_) => None,
+        }
     }
 
     /// Returns true when committed history contains any visible transcript.
@@ -615,58 +569,55 @@ impl Thread {
         Ok(())
     }
 
-    /// Spawn the thread-owned reactor loop that coordinates queued control events.
+    /// Spawn the thread-owned reactor loop that coordinates queued thread messages.
     pub async fn spawn_reactor(thread: Arc<RwLock<Self>>) {
-        let (control_rx, mailbox) = {
+        let message_rx = {
             let mut guard = thread.write().await;
-            let control_rx = match guard.take_control_rx() {
+            let message_rx = match guard.take_message_rx() {
                 Some(rx) => rx,
                 None => {
-                    tracing::warn!("thread control receiver already taken");
+                    tracing::warn!("thread message receiver already taken");
                     return;
                 }
             };
             guard.reset_runtime_loop_state();
-            (control_rx, guard.mailbox())
+            message_rx
         };
 
         tokio::spawn(async move {
-            Self::run_reactor_loop(thread, control_rx, mailbox).await;
+            Self::run_reactor_loop(thread, message_rx).await;
         });
     }
 
     async fn run_reactor_loop(
         thread: Arc<RwLock<Self>>,
-        mut control_rx: mpsc::UnboundedReceiver<ThreadControlEvent>,
-        mailbox: Arc<Mutex<ThreadMailbox>>,
+        mut message_rx: mpsc::UnboundedReceiver<ThreadMessage>,
     ) {
         let mut active_turn: Option<JoinHandle<Result<TurnRecord, ThreadError>>> = None;
         let mut shutdown_requested = false;
 
         loop {
             tokio::select! {
-                Some(control_event) = control_rx.recv() => {
+                Some(message) = message_rx.recv() => {
                     if shutdown_requested {
                         continue;
                     }
 
-                    let runtime_action = match control_event {
-                        ThreadControlEvent::MailboxUpdated => {
-                            let mut mailbox = mailbox.lock().await;
-                            let mut guard = thread.write().await;
-                            guard.inspect_runtime_mailbox(&mut mailbox)
-                        }
-                        ThreadControlEvent::ShutdownRuntime => {
+                    let runtime_action = match message {
+                        ThreadMessage::Control(ThreadControlMessage::ShutdownRuntime) => {
                             shutdown_requested = true;
                             let state = { thread.read().await.runtime_state };
                             match state {
                                 ThreadRuntimeState::Idle => break,
                                 _ => {
-                                    let mut mailbox = mailbox.lock().await;
                                     let mut guard = thread.write().await;
-                                    guard.dispatch_runtime_command(ThreadCommand::CancelActiveTurn, &mut mailbox)
+                                    guard.cancel_active_turn()
                                 }
                             }
+                        }
+                        other => {
+                            let mut guard = thread.write().await;
+                            guard.dispatch_runtime_message(other)
                         }
                     };
 
@@ -926,17 +877,18 @@ impl Thread {
         }
 
         if shutdown_requested {
+            {
+                let mut guard = thread.write().await;
+                guard.reset_runtime_loop_state();
+            }
+            let guard = thread.read().await;
+            guard.broadcast_to_self(ThreadEvent::Idle { thread_id });
             return;
         }
 
         let runtime_action = {
-            let mailbox = {
-                let guard = thread.read().await;
-                guard.mailbox()
-            };
-            let mut guard = mailbox.lock().await;
             let mut thread_guard = thread.write().await;
-            thread_guard.complete_runtime_turn(committed, &mut guard)
+            thread_guard.complete_runtime_turn(committed)
         };
         Self::process_loop_action(Arc::clone(thread), runtime_action.clone(), active_turn).await;
 
@@ -953,7 +905,7 @@ impl Thread {
         msg_override: Option<MessageOverride>,
         cancellation: TurnCancellation,
     ) -> Result<TurnRecord, ThreadError> {
-        if self.control_rx.is_none() {
+        if self.message_rx.is_none() {
             return Err(ThreadError::RuntimeActive);
         }
 
@@ -1190,9 +1142,14 @@ mod tests {
     use crate::turn_log_store::recover_thread_log_state;
     use argus_protocol::llm::{CompletionRequest, CompletionResponse, LlmError, ToolDefinition};
     use argus_protocol::tool::{NamedTool, ToolError, ToolExecutionContext};
-    use argus_protocol::{AgentId, ProviderId, ThreadCommand};
+    use argus_protocol::{
+        AgentId, MailboxMessage, MailboxMessageType, ProviderId, ThreadControlMessage,
+        ThreadMessage,
+    };
     use async_trait::async_trait;
+    use futures_util::stream;
     use rust_decimal::Decimal;
+    use tokio::time::{Duration, sleep, timeout};
 
     fn usage(total_tokens: u32) -> TokenUsage {
         TokenUsage {
@@ -1270,6 +1227,62 @@ mod tests {
     }
 
     #[derive(Debug)]
+    struct PendingStreamProvider {
+        captured_user_inputs: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl PendingStreamProvider {
+        fn new(captured_user_inputs: Arc<Mutex<Vec<String>>>) -> Self {
+            Self {
+                captured_user_inputs,
+            }
+        }
+
+        fn capture_request(&self, request: &CompletionRequest) {
+            let last_user_input = request
+                .messages
+                .iter()
+                .rev()
+                .find(|message| message.role == argus_protocol::llm::Role::User)
+                .map(|message| message.content.clone())
+                .unwrap_or_default();
+            self.captured_user_inputs
+                .lock()
+                .unwrap()
+                .push(last_user_input);
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for PendingStreamProvider {
+        fn model_name(&self) -> &str {
+            "pending-stream"
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, LlmError> {
+            Err(LlmError::UnsupportedCapability {
+                provider: "pending-stream".to_string(),
+                capability: "complete".to_string(),
+            })
+        }
+
+        async fn stream_complete(
+            &self,
+            request: CompletionRequest,
+        ) -> Result<argus_protocol::llm::LlmEventStream, LlmError> {
+            self.capture_request(&request);
+            Ok(Box::pin(stream::pending()))
+        }
+    }
+
+    #[derive(Debug)]
     struct RecordingCompactor {
         seen_token_counts: Arc<Mutex<Vec<u32>>>,
         next_result: Arc<Mutex<VecDeque<CompactResult>>>,
@@ -1333,6 +1346,42 @@ mod tests {
             .session_id(SessionId::new())
             .build()
             .expect("thread should build")
+    }
+
+    fn plain_mailbox_message(text: &str) -> MailboxMessage {
+        MailboxMessage {
+            id: format!("msg-{text}"),
+            from_thread_id: ThreadId::new(),
+            to_thread_id: ThreadId::new(),
+            from_label: "Peer".to_string(),
+            message_type: MailboxMessageType::Plain,
+            text: text.to_string(),
+            timestamp: "2026-04-01T00:00:00Z".to_string(),
+            read: false,
+            summary: Some(format!("summary {text}")),
+        }
+    }
+
+    fn job_result_mailbox_message(job_id: &str, text: &str) -> MailboxMessage {
+        MailboxMessage {
+            id: format!("job-msg-{job_id}"),
+            from_thread_id: ThreadId::new(),
+            to_thread_id: ThreadId::new(),
+            from_label: "Worker".to_string(),
+            message_type: MailboxMessageType::JobResult {
+                job_id: job_id.to_string(),
+                success: true,
+                cancelled: false,
+                token_usage: None,
+                agent_id: AgentId::new(7),
+                agent_display_name: "Worker".to_string(),
+                agent_description: "Background worker".to_string(),
+            },
+            text: text.to_string(),
+            timestamp: "2026-04-01T00:00:00Z".to_string(),
+            read: false,
+            summary: Some(format!("summary {job_id}")),
+        }
     }
 
     #[test]
@@ -1764,28 +1813,20 @@ mod tests {
                 usage(5),
             ),
         ]);
-        let mut mailbox = ThreadMailbox::default();
-
-        thread.dispatch_runtime_command(
-            ThreadCommand::EnqueueUserMessage {
-                content: "first".to_string(),
-                msg_override: None,
-            },
-            &mut mailbox,
-        );
+        thread.dispatch_runtime_message(ThreadMessage::UserInput {
+            content: "first".to_string(),
+            msg_override: None,
+        });
         assert_eq!(
             thread.runtime_state,
             ThreadRuntimeState::Running { turn_number: 3 }
         );
 
-        thread.dispatch_runtime_command(
-            ThreadCommand::EnqueueUserMessage {
-                content: "second".to_string(),
-                msg_override: None,
-            },
-            &mut mailbox,
-        );
-        assert_eq!(mailbox.pending_len(), 1);
+        thread.dispatch_runtime_message(ThreadMessage::UserInput {
+            content: "second".to_string(),
+            msg_override: None,
+        });
+        assert_eq!(thread.pending_messages.len(), 1);
 
         let _agent = thread
             .prepare_turn_start(None, TurnCancellation::new())
@@ -1793,12 +1834,12 @@ mod tests {
         thread
             .finish_turn(Err(ThreadError::TurnFailed(crate::TurnError::Cancelled)))
             .expect("cancelled turn should settle");
-        thread.complete_runtime_turn(false, &mut mailbox);
+        thread.complete_runtime_turn(false);
         assert_eq!(
             thread.runtime_state,
             ThreadRuntimeState::Running { turn_number: 3 }
         );
-        assert_eq!(mailbox.pending_len(), 0);
+        assert_eq!(thread.pending_messages.len(), 0);
 
         let _agent = thread
             .prepare_turn_start(None, TurnCancellation::new())
@@ -1810,22 +1851,17 @@ mod tests {
                 usage(7),
             )))
             .expect("turn should settle");
-        thread.complete_runtime_turn(true, &mut mailbox);
+        thread.complete_runtime_turn(true);
         assert_eq!(thread.runtime_state, ThreadRuntimeState::Idle);
     }
 
     #[tokio::test]
     async fn thread_runtime_advances_turn_numbers_after_committed_turns() {
         let mut thread = build_test_thread_without_system_prompt();
-        let mut mailbox = ThreadMailbox::default();
-
-        thread.dispatch_runtime_command(
-            ThreadCommand::EnqueueUserMessage {
-                content: "hi".to_string(),
-                msg_override: None,
-            },
-            &mut mailbox,
-        );
+        thread.dispatch_runtime_message(ThreadMessage::UserInput {
+            content: "hi".to_string(),
+            msg_override: None,
+        });
         assert_eq!(
             thread.runtime_state,
             ThreadRuntimeState::Running { turn_number: 1 }
@@ -1841,46 +1877,94 @@ mod tests {
                 usage(4),
             )))
             .expect("turn should settle");
-        thread.complete_runtime_turn(true, &mut mailbox);
+        thread.complete_runtime_turn(true);
         assert_eq!(thread.runtime_state, ThreadRuntimeState::Idle);
 
-        thread.dispatch_runtime_command(
-            ThreadCommand::EnqueueUserMessage {
-                content: "again".to_string(),
-                msg_override: None,
-            },
-            &mut mailbox,
-        );
+        thread.dispatch_runtime_message(ThreadMessage::UserInput {
+            content: "again".to_string(),
+            msg_override: None,
+        });
         assert_eq!(
             thread.runtime_state,
             ThreadRuntimeState::Running { turn_number: 2 }
         );
     }
 
-    #[tokio::test]
-    async fn thread_stop_signal_does_not_cancel_next_turn_after_settle() {
+    #[test]
+    fn peer_message_starts_next_turn_via_thread_message_routing() {
         let mut thread = build_test_thread_without_system_prompt();
-        let mut mailbox = ThreadMailbox::default();
+        let message = plain_mailbox_message("peer hello");
 
-        thread.dispatch_runtime_command(
-            ThreadCommand::EnqueueUserMessage {
-                content: "first".to_string(),
+        let action = thread.dispatch_runtime_message(ThreadMessage::PeerMessage {
+            message: message.clone(),
+        });
+
+        assert!(matches!(
+            action,
+            ThreadLoopAction::StartTurn {
+                turn_number: 1,
+                ref content,
                 msg_override: None,
-            },
-            &mut mailbox,
+            } if content == &message.into_message_text()
+        ));
+        assert_eq!(
+            thread.runtime_state,
+            ThreadRuntimeState::Running { turn_number: 1 }
         );
-        thread.dispatch_runtime_command(
-            ThreadCommand::EnqueueUserMessage {
-                content: "second".to_string(),
+        assert!(
+            thread.pending_messages.is_empty(),
+            "idle routing should promote peer message directly into the next turn"
+        );
+    }
+
+    #[test]
+    fn job_result_starts_next_turn_via_thread_message_routing() {
+        let mut thread = build_test_thread_without_system_prompt();
+        let message = job_result_mailbox_message("job-42", "finished task");
+
+        let action = thread.dispatch_runtime_message(ThreadMessage::JobResult {
+            message: message.clone(),
+        });
+
+        let expected_content = message.into_message_text();
+        assert!(matches!(
+            action,
+            ThreadLoopAction::StartTurn {
+                turn_number: 1,
+                ref content,
                 msg_override: None,
-            },
-            &mut mailbox,
+            } if content == &expected_content
+        ));
+        assert_eq!(
+            thread.runtime_state,
+            ThreadRuntimeState::Running { turn_number: 1 }
         );
+        assert!(
+            thread.pending_messages.is_empty(),
+            "idle routing should promote job results directly into the next turn"
+        );
+    }
+
+    #[tokio::test]
+    async fn thread_interrupt_does_not_cancel_next_turn_after_settle() {
+        let mut thread = build_test_thread_without_system_prompt();
+        thread.dispatch_runtime_message(ThreadMessage::UserInput {
+            content: "first".to_string(),
+            msg_override: None,
+        });
+        thread.dispatch_runtime_message(ThreadMessage::UserInput {
+            content: "second".to_string(),
+            msg_override: None,
+        });
 
         let _agent = thread
             .prepare_turn_start(None, TurnCancellation::new())
             .await;
-        mailbox.interrupt_stop();
+        let action = thread.dispatch_runtime_message(ThreadMessage::Interrupt);
+        assert!(matches!(
+            action,
+            ThreadLoopAction::StopTurn { turn_number: 1 }
+        ));
         thread
             .finish_turn(Ok(TurnRecord::user_turn(
                 1,
@@ -1889,18 +1973,88 @@ mod tests {
             )))
             .expect("turn should settle");
 
-        thread.complete_runtime_turn(true, &mut mailbox);
+        thread.complete_runtime_turn(true);
         assert_eq!(
             thread.runtime_state,
             ThreadRuntimeState::Running { turn_number: 2 }
         );
+    }
 
-        let action = thread.inspect_runtime_mailbox(&mut mailbox);
-        assert!(matches!(action, ThreadLoopAction::Noop));
+    #[tokio::test]
+    async fn shutdown_runtime_control_cancels_active_turn_and_ignores_followup_messages() {
+        let captured_user_inputs = Arc::new(Mutex::new(Vec::new()));
+        let thread = Arc::new(RwLock::new(
+            ThreadBuilder::new()
+                .provider(Arc::new(PendingStreamProvider::new(Arc::clone(
+                    &captured_user_inputs,
+                ))))
+                .compactor(Arc::new(NoopCompactor))
+                .agent_record(test_agent_record_without_system_prompt())
+                .session_id(SessionId::new())
+                .build()
+                .expect("thread should build"),
+        ));
+
+        Thread::spawn_reactor(Arc::clone(&thread)).await;
+
+        thread
+            .read()
+            .await
+            .send_message(ThreadMessage::UserInput {
+                content: "first".to_string(),
+                msg_override: None,
+            })
+            .expect("first message should enqueue");
+
+        timeout(Duration::from_secs(5), async {
+            loop {
+                if thread.read().await.is_turn_running() {
+                    break;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("runtime should start the first turn");
+
+        thread
+            .read()
+            .await
+            .send_message(ThreadMessage::Control(
+                ThreadControlMessage::ShutdownRuntime,
+            ))
+            .expect("shutdown control should enqueue");
+        thread
+            .read()
+            .await
+            .send_message(ThreadMessage::UserInput {
+                content: "second".to_string(),
+                msg_override: None,
+            })
+            .expect("post-shutdown message should still reach the channel");
+
+        timeout(Duration::from_secs(5), async {
+            loop {
+                if !thread.read().await.is_turn_running() {
+                    break;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("shutdown should cancel the active turn and stop the runtime");
+
+        sleep(Duration::from_millis(100)).await;
+
+        let captured = captured_user_inputs.lock().unwrap().clone();
         assert_eq!(
-            thread.runtime_state,
-            ThreadRuntimeState::Running { turn_number: 2 }
+            captured,
+            vec!["first".to_string()],
+            "shutdown should prevent any follow-up turn from starting"
         );
+        let guard = thread.read().await;
+        assert_eq!(guard.turn_count(), 0);
+        assert_eq!(guard.runtime_state, ThreadRuntimeState::Idle);
     }
 
     #[tokio::test]

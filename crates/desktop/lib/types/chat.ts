@@ -42,17 +42,9 @@ export type ThreadRuntimeStatus =
   | "cooling"
   | "evicted";
 
-export type ThreadPoolRuntimeKind = "chat" | "job";
-
-export interface ThreadPoolRuntimeRef {
-  thread_id: string;
-  kind: ThreadPoolRuntimeKind;
-  session_id: string | null;
-  job_id: string | null;
-}
-
 export interface ThreadPoolRuntimeSummary {
-  runtime: ThreadPoolRuntimeRef;
+  thread_id: string;
+  session_id: string | null;
   status: ThreadRuntimeStatus;
   estimated_memory_bytes: number;
   last_active_at: string | null;
@@ -81,6 +73,37 @@ export interface ThreadPoolState {
   runtimes: ThreadPoolRuntimeSummary[];
 }
 
+export interface JobRuntimeSummary {
+  thread_id: string;
+  job_id: string;
+  status: ThreadRuntimeStatus;
+  estimated_memory_bytes: number;
+  last_active_at: string | null;
+  recoverable: boolean;
+  last_reason: ThreadPoolEventReason | null;
+}
+
+export interface JobRuntimeSnapshot {
+  max_threads: number;
+  active_threads: number;
+  queued_threads: number;
+  running_threads: number;
+  cooling_threads: number;
+  evicted_threads: number;
+  estimated_memory_bytes: number;
+  peak_estimated_memory_bytes: number;
+  process_memory_bytes: number | null;
+  peak_process_memory_bytes: number | null;
+  resident_thread_count: number;
+  avg_thread_memory_bytes: number;
+  captured_at: string;
+}
+
+export interface JobRuntimeState {
+  snapshot: JobRuntimeSnapshot;
+  runtimes: JobRuntimeSummary[];
+}
+
 export type ThreadPoolEventReason =
   | "cooling_expired"
   | "memory_pressure"
@@ -96,17 +119,23 @@ export interface ChatSessionPayload {
   effective_model: string | null;
 }
 
+export type JobLifecycleStatus =
+  | "running"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
 export interface JobStatusPayload {
   job_id: string;
   agent_id: number;
   prompt: string;
-  status: "running" | "completed" | "failed";
+  status: JobLifecycleStatus;
   message?: string | null;
   agent_display_name?: string | null;
   agent_description?: string | null;
 }
 
-export type JobDetailStatus = "running" | "completed" | "failed";
+export type JobDetailStatus = JobLifecycleStatus;
 
 export interface JobDetailTimelineItem {
   kind:
@@ -144,6 +173,7 @@ export interface MailboxMessageJobResultPayload {
   type: "job_result";
   job_id: string;
   success: boolean;
+  cancelled: boolean;
   token_usage?: {
     input_tokens: number;
     output_tokens: number;
@@ -230,17 +260,51 @@ export type ThreadEventPayload =
   | { type: "compaction_finished" }
   | { type: "compaction_failed"; error: string }
   | { type: "thread_bound_to_job"; job_id: string }
-  | { type: "thread_pool_queued"; runtime: ThreadPoolRuntimeRef }
-  | { type: "thread_pool_started"; runtime: ThreadPoolRuntimeRef }
-  | { type: "thread_pool_cooling"; runtime: ThreadPoolRuntimeRef }
+  | {
+      type: "thread_pool_queued";
+      session_id: string | null;
+    }
+  | {
+      type: "thread_pool_started";
+      session_id: string | null;
+    }
+  | {
+      type: "thread_pool_cooling";
+      session_id: string | null;
+    }
   | {
       type: "thread_pool_evicted";
-      runtime: ThreadPoolRuntimeRef;
+      session_id: string | null;
       reason: ThreadPoolEventReason;
     }
   | {
       type: "thread_pool_metrics_updated";
       snapshot: ThreadPoolSnapshot;
+    }
+  | {
+      type: "job_runtime_queued";
+      job_id: string;
+    }
+  | {
+      type: "job_runtime_started";
+      job_id: string;
+    }
+  | {
+      type: "job_runtime_cooling";
+      job_id: string;
+    }
+  | {
+      type: "job_runtime_evicted";
+      job_id: string;
+      reason: ThreadPoolEventReason;
+    }
+  | {
+      type: "job_runtime_updated";
+      runtime: JobRuntimeSummary;
+    }
+  | {
+      type: "job_runtime_metrics_updated";
+      snapshot: JobRuntimeSnapshot;
     }
   | {
       type: "job_dispatched";
@@ -253,6 +317,7 @@ export type ThreadEventPayload =
       type: "job_result";
       job_id: string;
       success: boolean;
+      cancelled: boolean;
       message: string;
       input_tokens?: number | null;
       output_tokens?: number | null;

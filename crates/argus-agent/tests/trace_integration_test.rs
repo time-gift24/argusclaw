@@ -18,20 +18,19 @@ use argus_protocol::llm::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmEventStream,
     LlmProvider, LlmStreamEvent,
 };
-use argus_protocol::{AgentRecord, SessionId, ThreadEvent, ThreadId};
+use argus_protocol::{AgentRecord, SessionId, ThreadEvent, ThreadId, ThreadMessage};
 use async_trait::async_trait;
 use rust_decimal::Decimal;
 
 async fn enqueue_thread_message(thread: &Arc<RwLock<Thread>>, message: String) {
-    let mailbox = {
-        let guard = thread.read().await;
-        guard.mailbox()
-    };
-    mailbox.lock().await.enqueue_user_message(message, None);
-    let guard = thread.read().await;
-    let _ = guard
-        .control_tx()
-        .send(argus_protocol::ThreadControlEvent::MailboxUpdated);
+    thread
+        .read()
+        .await
+        .send_message(ThreadMessage::UserInput {
+            content: message,
+            msg_override: None,
+        })
+        .expect("thread message should enqueue");
 }
 
 /// Mock provider that returns a simple response
@@ -353,15 +352,11 @@ async fn wait_for_provider_inputs(
 }
 
 async fn request_thread_stop(thread: &Arc<RwLock<Thread>>) {
-    let mailbox = {
-        let guard = thread.read().await;
-        guard.mailbox()
-    };
-    mailbox.lock().await.interrupt_stop();
-    let guard = thread.read().await;
-    let _ = guard
-        .control_tx()
-        .send(argus_protocol::ThreadControlEvent::MailboxUpdated);
+    thread
+        .read()
+        .await
+        .send_message(ThreadMessage::Interrupt)
+        .expect("thread interrupt should enqueue");
 }
 
 async fn collect_terminal_events_until_final_idle(

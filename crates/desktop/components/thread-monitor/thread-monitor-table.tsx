@@ -127,7 +127,9 @@ export function ThreadMonitorTable({
                 const canStop =
                   thread.kind === "job" &&
                   thread.jobId &&
-                  (thread.status === "queued" || thread.status === "running");
+                  (thread.status === "loading" ||
+                    thread.status === "queued" ||
+                    thread.status === "running");
                 const isStopping = thread.jobId
                   ? !!stoppingJobIds[thread.jobId]
                   : false;

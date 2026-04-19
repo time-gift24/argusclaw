@@ -2,8 +2,6 @@
 //!
 //! These events are emitted during thread processing and consumed by subscribers (CLI, Tauri).
 
-use std::collections::VecDeque;
-
 use crate::TokenUsage;
 use crate::ids::{AgentId, SessionId, ThreadId};
 use crate::llm::LlmStreamEvent;
@@ -11,33 +9,54 @@ use crate::mcp::ThreadNoticeLevel;
 use crate::message_override::MessageOverride;
 use serde::{Deserialize, Serialize};
 
-/// Internal control-plane event for thread orchestration.
+/// Internal control-plane message for thread orchestration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ThreadControlMessage {
+    /// Request the runtime actor to stop and release its owned thread state.
+    ///
+    /// This is an internal control-plane message used by the thread pool when a
+    /// chat runtime is unloaded from memory.
+    ShutdownRuntime,
+}
+
+/// Unified ingress message for thread routing.
 #[allow(clippy::large_enum_variant)]
-#[derive(Debug, Clone)]
-pub enum ThreadCommand {
-    /// Queue a user message for the runtime inbox.
-    EnqueueUserMessage {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", content = "payload", rename_all = "snake_case")]
+pub enum ThreadMessage {
+    /// Queue user input for the next runtime turn.
+    UserInput {
         /// Message content.
         content: String,
         /// Optional per-message overrides (temperature, max_tokens, etc.).
         msg_override: Option<MessageOverride>,
     },
-    /// Deliver a mailbox message back to the thread runtime.
-    EnqueueMailboxMessage(MailboxMessage),
+    /// Deliver a peer mailbox message to the thread runtime.
+    PeerMessage {
+        /// Peer mailbox payload.
+        message: MailboxMessage,
+    },
+    /// Deliver a job-result mailbox message to the thread runtime.
+    JobResult {
+        /// Job-result payload.
+        message: MailboxMessage,
+    },
     /// Request cancellation of the currently active turn.
-    CancelActiveTurn,
+    Interrupt,
+    /// Internal control-plane message.
+    Control(ThreadControlMessage),
 }
 
-/// Internal control-plane event used to wake or shut down a thread runtime.
-#[derive(Debug)]
-pub enum ThreadControlEvent {
-    /// Wake the runtime to inspect its mailbox state.
-    MailboxUpdated,
-    /// Request the runtime actor to stop and release its owned thread state.
-    ///
-    /// This is an internal control-plane event used by the thread pool when a
-    /// chat runtime is unloaded from memory.
-    ShutdownRuntime,
+impl ThreadMessage {
+    /// Returns true when this message participates in normal FIFO payload routing.
+    #[must_use]
+    pub fn is_fifo_payload(&self) -> bool {
+        matches!(
+            self,
+            Self::UserInput { .. } | Self::PeerMessage { .. } | Self::JobResult { .. }
+        )
+    }
 }
 
 /// Routed job result metadata shared by the control plane and public event stream.
@@ -47,6 +66,8 @@ pub struct ThreadJobResult {
     pub job_id: String,
     /// Whether the job succeeded.
     pub success: bool,
+    /// Whether the job was cancelled explicitly.
+    pub cancelled: bool,
     /// Output or error message summary.
     pub message: String,
     /// Token usage if available.
@@ -87,6 +108,8 @@ pub enum MailboxMessageType {
     JobResult {
         job_id: String,
         success: bool,
+        #[serde(default)]
+        cancelled: bool,
         token_usage: Option<TokenUsage>,
         agent_id: AgentId,
         agent_display_name: String,
@@ -173,10 +196,6 @@ impl MailboxMessage {
             msg_override: None,
         }
     }
-
-    pub fn mark_read(&mut self) {
-        self.read = true;
-    }
 }
 
 /// A queued user message retained by the mailbox.
@@ -186,117 +205,6 @@ pub struct QueuedUserMessage {
     pub content: String,
     /// Optional per-message overrides (temperature, max_tokens, etc.).
     pub msg_override: Option<MessageOverride>,
-}
-
-#[allow(clippy::large_enum_variant)]
-#[derive(Debug)]
-enum ThreadMailboxItem {
-    UserMessage(QueuedUserMessage),
-    MailboxMessage(MailboxMessage),
-}
-
-/// Thread-level mailbox for queued user messages and mailbox messages.
-#[derive(Debug, Default)]
-pub struct ThreadMailbox {
-    items: VecDeque<ThreadMailboxItem>,
-    stop_requested: bool,
-}
-
-impl ThreadMailbox {
-    /// Queue a user message.
-    pub fn enqueue_user_message(&mut self, content: String, msg_override: Option<MessageOverride>) {
-        self.items
-            .push_back(ThreadMailboxItem::UserMessage(QueuedUserMessage {
-                content,
-                msg_override,
-            }));
-    }
-
-    /// Queue a mailbox message.
-    pub fn enqueue_mailbox_message(&mut self, message: MailboxMessage) {
-        self.items
-            .push_back(ThreadMailboxItem::MailboxMessage(message));
-    }
-
-    /// Request that the current active turn stop.
-    pub fn interrupt_stop(&mut self) {
-        self.stop_requested = true;
-    }
-
-    /// Take the pending stop request, if any.
-    pub fn take_stop_signal(&mut self) -> bool {
-        std::mem::take(&mut self.stop_requested)
-    }
-
-    /// Clear any pending stop request without interpreting it as a fresh signal.
-    pub fn clear_stop_signal(&mut self) {
-        self.stop_requested = false;
-    }
-
-    /// Remove a queued job result by job ID while preserving FIFO order for remaining items.
-    pub fn claim_job_result(&mut self, job_id: &str) -> Option<MailboxMessage> {
-        let index = self.items.iter().position(|item| match item {
-            ThreadMailboxItem::MailboxMessage(message) => message.job_id() == Some(job_id),
-            ThreadMailboxItem::UserMessage(_) => false,
-        })?;
-
-        match self.items.remove(index) {
-            Some(ThreadMailboxItem::MailboxMessage(message)) => Some(message),
-            Some(ThreadMailboxItem::UserMessage(_)) | None => None,
-        }
-    }
-
-    /// Determine which queued work should start the next idle turn.
-    #[must_use]
-    pub fn take_next_turn_message(&mut self) -> Option<QueuedUserMessage> {
-        match self.items.pop_front() {
-            Some(ThreadMailboxItem::UserMessage(message)) => Some(message),
-            Some(ThreadMailboxItem::MailboxMessage(message)) => {
-                Some(message.into_queued_user_message())
-            }
-            None => None,
-        }
-    }
-
-    /// Return the number of pending mailbox items, including a pending stop request.
-    #[must_use]
-    pub fn pending_len(&self) -> usize {
-        self.items.len() + self.stop_requested as usize
-    }
-
-    /// Returns true when no pending control items remain.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        !self.stop_requested && self.items.is_empty()
-    }
-
-    /// Return unread mailbox messages that remain queued.
-    #[must_use]
-    pub fn unread_mailbox_messages(&self) -> Vec<MailboxMessage> {
-        self.items
-            .iter()
-            .filter_map(|item| match item {
-                ThreadMailboxItem::MailboxMessage(message) if !message.read => {
-                    Some(message.clone())
-                }
-                ThreadMailboxItem::UserMessage(_) | ThreadMailboxItem::MailboxMessage(_) => None,
-            })
-            .collect()
-    }
-
-    /// Mark a queued mailbox message as read by message ID.
-    pub fn mark_mailbox_message_read(&mut self, message_id: &str) -> bool {
-        for item in &mut self.items {
-            if let ThreadMailboxItem::MailboxMessage(message) = item
-                && message.id == message_id
-            {
-                message.mark_read();
-                return true;
-            }
-        }
-
-        false
-    }
 }
 
 /// Snapshot of a single thread tracked by the thread pool.
@@ -317,34 +225,13 @@ pub enum ThreadRuntimeStatus {
     Evicted,
 }
 
-/// Runtime source classification inside the unified thread pool.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum ThreadPoolRuntimeKind {
-    /// User-facing conversational runtime.
-    Chat,
-    /// Background job runtime.
-    Job,
-}
-
-/// Stable identifier for a runtime tracked by the unified thread pool.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ThreadPoolRuntimeRef {
-    /// Thread ID.
-    pub thread_id: ThreadId,
-    /// Runtime category.
-    pub kind: ThreadPoolRuntimeKind,
-    /// Bound session ID when the runtime belongs to a user chat thread.
-    pub session_id: Option<SessionId>,
-    /// Bound job ID if this runtime is associated with a dispatched job.
-    pub job_id: Option<String>,
-}
-
 /// Snapshot of a single thread tracked by the thread pool.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ThreadPoolRuntimeSummary {
-    /// Stable runtime identity.
-    pub runtime: ThreadPoolRuntimeRef,
+    /// Thread ID.
+    pub thread_id: ThreadId,
+    /// Bound session ID when the runtime belongs to a user chat thread.
+    pub session_id: Option<SessionId>,
     /// Runtime status.
     pub status: ThreadRuntimeStatus,
     /// Estimated memory usage for this runtime.
@@ -356,9 +243,6 @@ pub struct ThreadPoolRuntimeSummary {
     /// Last eviction/cooling reason when available.
     pub last_reason: Option<ThreadPoolEventReason>,
 }
-
-/// Backward-compatible alias for older thread-pool consumers.
-pub type ThreadRuntimeSnapshot = ThreadPoolRuntimeSummary;
 
 /// Aggregated thread-pool telemetry snapshot.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -398,6 +282,65 @@ pub struct ThreadPoolState {
     pub snapshot: ThreadPoolSnapshot,
     /// Current runtime summaries.
     pub runtimes: Vec<ThreadPoolRuntimeSummary>,
+}
+
+/// Snapshot of a single background job runtime.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct JobRuntimeSummary {
+    /// Thread ID bound to the job runtime.
+    pub thread_id: ThreadId,
+    /// Stable job ID.
+    pub job_id: String,
+    /// Runtime status.
+    pub status: ThreadRuntimeStatus,
+    /// Estimated memory usage for this runtime.
+    pub estimated_memory_bytes: u64,
+    /// Last activity timestamp (RFC3339).
+    pub last_active_at: Option<String>,
+    /// Whether the runtime can be reloaded after in-memory eviction.
+    pub recoverable: bool,
+    /// Last eviction/cooling reason when available.
+    pub last_reason: Option<ThreadPoolEventReason>,
+}
+
+/// Aggregated job-runtime telemetry snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct JobRuntimeSnapshot {
+    /// Configured max number of concurrently loaded runtimes.
+    pub max_threads: u32,
+    /// Total active (loaded) runtimes.
+    pub active_threads: u32,
+    /// Runtimes waiting in the queue.
+    pub queued_threads: u32,
+    /// Runtimes currently executing.
+    pub running_threads: u32,
+    /// Runtimes in cooling state.
+    pub cooling_threads: u32,
+    /// Number of evictions observed since process start.
+    pub evicted_threads: u64,
+    /// Estimated pool memory usage.
+    pub estimated_memory_bytes: u64,
+    /// Peak estimated pool memory usage.
+    pub peak_estimated_memory_bytes: u64,
+    /// Process-level memory usage when available.
+    pub process_memory_bytes: Option<u64>,
+    /// Peak process-level memory usage when available.
+    pub peak_process_memory_bytes: Option<u64>,
+    /// Number of currently resident runtime records.
+    pub resident_thread_count: u32,
+    /// Average estimated memory usage per resident runtime.
+    pub avg_thread_memory_bytes: u64,
+    /// Snapshot timestamp (RFC3339).
+    pub captured_at: String,
+}
+
+/// Authoritative job-runtime query payload used by external observers.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct JobRuntimeState {
+    /// Aggregated job-runtime metrics.
+    pub snapshot: JobRuntimeSnapshot,
+    /// Current job runtime summaries.
+    pub runtimes: Vec<JobRuntimeSummary>,
 }
 
 /// Reason associated with thread-pool lifecycle transitions.
@@ -537,6 +480,9 @@ pub enum ThreadEvent {
         job_id: String,
         /// Whether the job succeeded.
         success: bool,
+        /// Whether the job was cancelled explicitly.
+        #[serde(default)]
+        cancelled: bool,
         /// Output or error message.
         message: String,
         /// Token usage if available.
@@ -562,25 +508,33 @@ pub enum ThreadEvent {
         /// Thread ID.
         thread_id: ThreadId,
     },
-    /// Job/thread has entered queued state inside the thread pool.
+    /// Chat thread has entered queued state inside the thread pool.
     ThreadPoolQueued {
-        /// Runtime reference.
-        runtime: ThreadPoolRuntimeRef,
+        /// Thread ID.
+        thread_id: ThreadId,
+        /// Bound session ID when the runtime belongs to a user chat thread.
+        session_id: Option<SessionId>,
     },
-    /// Job/thread has started running inside the thread pool.
+    /// Chat thread has started running inside the thread pool.
     ThreadPoolStarted {
-        /// Runtime reference.
-        runtime: ThreadPoolRuntimeRef,
+        /// Thread ID.
+        thread_id: ThreadId,
+        /// Bound session ID when the runtime belongs to a user chat thread.
+        session_id: Option<SessionId>,
     },
-    /// Job/thread has entered cooling state inside the thread pool.
+    /// Chat thread has entered cooling state inside the thread pool.
     ThreadPoolCooling {
-        /// Runtime reference.
-        runtime: ThreadPoolRuntimeRef,
+        /// Thread ID.
+        thread_id: ThreadId,
+        /// Bound session ID when the runtime belongs to a user chat thread.
+        session_id: Option<SessionId>,
     },
-    /// Job/thread runtime has been evicted from memory.
+    /// Chat thread runtime has been evicted from memory.
     ThreadPoolEvicted {
-        /// Runtime reference.
-        runtime: ThreadPoolRuntimeRef,
+        /// Thread ID.
+        thread_id: ThreadId,
+        /// Bound session ID when the runtime belongs to a user chat thread.
+        session_id: Option<SessionId>,
         /// Eviction reason.
         reason: ThreadPoolEventReason,
     },
@@ -588,6 +542,46 @@ pub enum ThreadEvent {
     ThreadPoolMetricsUpdated {
         /// Current thread-pool telemetry snapshot.
         snapshot: ThreadPoolSnapshot,
+    },
+    /// Job runtime entered queued state.
+    JobRuntimeQueued {
+        /// Thread ID.
+        thread_id: ThreadId,
+        /// Stable job ID.
+        job_id: String,
+    },
+    /// Job runtime started running.
+    JobRuntimeStarted {
+        /// Thread ID.
+        thread_id: ThreadId,
+        /// Stable job ID.
+        job_id: String,
+    },
+    /// Job runtime entered cooling state.
+    JobRuntimeCooling {
+        /// Thread ID.
+        thread_id: ThreadId,
+        /// Stable job ID.
+        job_id: String,
+    },
+    /// Job runtime was evicted from memory.
+    JobRuntimeEvicted {
+        /// Thread ID.
+        thread_id: ThreadId,
+        /// Stable job ID.
+        job_id: String,
+        /// Eviction reason.
+        reason: ThreadPoolEventReason,
+    },
+    /// Job runtime summary changed.
+    JobRuntimeUpdated {
+        /// Current job runtime summary.
+        runtime: JobRuntimeSummary,
+    },
+    /// Aggregated job-runtime metrics update.
+    JobRuntimeMetricsUpdated {
+        /// Current job-runtime telemetry snapshot.
+        snapshot: JobRuntimeSnapshot,
     },
     /// User wants to interrupt the current turn.
     ///
@@ -631,8 +625,92 @@ pub(crate) fn assert_thread_pool_snapshot_round_trip() {
 }
 
 #[cfg(test)]
+pub(crate) fn assert_thread_pool_state_round_trip() {
+    let state = ThreadPoolState {
+        snapshot: ThreadPoolSnapshot {
+            max_threads: 8,
+            active_threads: 2,
+            queued_threads: 1,
+            running_threads: 1,
+            cooling_threads: 1,
+            evicted_threads: 3,
+            estimated_memory_bytes: 4096,
+            peak_estimated_memory_bytes: 8192,
+            process_memory_bytes: Some(16_384),
+            peak_process_memory_bytes: Some(32_768),
+            resident_thread_count: 2,
+            avg_thread_memory_bytes: 2048,
+            captured_at: "2026-03-29T00:00:00Z".to_string(),
+        },
+        runtimes: vec![ThreadPoolRuntimeSummary {
+            thread_id: ThreadId::new(),
+            session_id: Some(SessionId::new()),
+            status: ThreadRuntimeStatus::Queued,
+            estimated_memory_bytes: 1024,
+            last_active_at: Some("2026-03-29T00:00:01Z".to_string()),
+            recoverable: true,
+            last_reason: None,
+        }],
+    };
+
+    let value = serde_json::to_value(&state).unwrap();
+    let restored: ThreadPoolState = serde_json::from_value(value).unwrap();
+    assert_eq!(restored.runtimes.len(), 1);
+    assert!(restored.runtimes[0].session_id.is_some());
+}
+
+#[cfg(test)]
+pub(crate) fn assert_job_runtime_state_round_trip() {
+    let state = JobRuntimeState {
+        snapshot: JobRuntimeSnapshot {
+            max_threads: 8,
+            active_threads: 1,
+            queued_threads: 1,
+            running_threads: 0,
+            cooling_threads: 0,
+            evicted_threads: 0,
+            estimated_memory_bytes: 1024,
+            peak_estimated_memory_bytes: 2048,
+            process_memory_bytes: None,
+            peak_process_memory_bytes: None,
+            resident_thread_count: 1,
+            avg_thread_memory_bytes: 1024,
+            captured_at: "2026-03-29T00:00:00Z".to_string(),
+        },
+        runtimes: vec![JobRuntimeSummary {
+            thread_id: ThreadId::new(),
+            job_id: "job-1".to_string(),
+            status: ThreadRuntimeStatus::Queued,
+            estimated_memory_bytes: 1024,
+            last_active_at: Some("2026-03-29T00:00:01Z".to_string()),
+            recoverable: true,
+            last_reason: None,
+        }],
+    };
+
+    let value = serde_json::to_value(&state).unwrap();
+    let restored: JobRuntimeState = serde_json::from_value(value).unwrap();
+    assert_eq!(restored.runtimes.len(), 1);
+    assert_eq!(restored.runtimes[0].job_id, "job-1");
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    fn plain_mailbox_message(text: &str) -> MailboxMessage {
+        MailboxMessage {
+            id: format!("msg-{text}"),
+            from_thread_id: ThreadId::new(),
+            to_thread_id: ThreadId::new(),
+            from_label: "Peer".to_string(),
+            message_type: MailboxMessageType::Plain,
+            text: text.to_string(),
+            timestamp: "2026-04-01T00:00:00Z".to_string(),
+            read: false,
+            summary: Some(format!("summary {text}")),
+        }
+    }
 
     fn job_result_message(job_id: &str) -> MailboxMessage {
         MailboxMessage {
@@ -643,6 +721,7 @@ mod tests {
             message_type: MailboxMessageType::JobResult {
                 job_id: job_id.to_string(),
                 success: true,
+                cancelled: false,
                 token_usage: None,
                 agent_id: AgentId::new(7),
                 agent_display_name: "Worker".to_string(),
@@ -666,71 +745,112 @@ mod tests {
     }
 
     #[test]
-    fn thread_mailbox_take_next_turn_message_preserves_global_fifo() {
-        let mut mailbox = ThreadMailbox::default();
-        mailbox.enqueue_user_message("first".to_string(), None);
-        mailbox.enqueue_mailbox_message(job_result_message("job-1"));
+    fn thread_message_routes_fifo_payloads() {
+        let messages = vec![
+            ThreadMessage::UserInput {
+                content: "a".into(),
+                msg_override: None,
+            },
+            ThreadMessage::PeerMessage {
+                message: plain_mailbox_message("b"),
+            },
+            ThreadMessage::JobResult {
+                message: job_result_message("job-1"),
+            },
+        ];
 
-        let first = mailbox
-            .take_next_turn_message()
-            .expect("first queued message should exist");
-        let second = mailbox
-            .take_next_turn_message()
-            .expect("second queued message should exist");
+        let payloads: Vec<_> = messages
+            .iter()
+            .filter(|message| message.is_fifo_payload())
+            .collect();
 
-        assert_eq!(first.content, "first");
-        assert!(second.content.contains("Job: job-1"));
+        assert_eq!(payloads.len(), 3);
+        assert!(matches!(
+            payloads[0],
+            ThreadMessage::UserInput { content, .. } if content == "a"
+        ));
+        assert!(matches!(
+            payloads[1],
+            ThreadMessage::PeerMessage { message } if message.text == "b"
+        ));
+        assert!(matches!(
+            payloads[2],
+            ThreadMessage::JobResult { message }
+                if message.job_id() == Some("job-1")
+        ));
     }
 
     #[test]
-    fn thread_mailbox_claim_job_result_preserves_remaining_fifo_order() {
-        let mut mailbox = ThreadMailbox::default();
-        mailbox.enqueue_user_message("first".to_string(), None);
-        mailbox.enqueue_mailbox_message(job_result_message("job-1"));
-        mailbox.enqueue_mailbox_message(job_result_message("job-2"));
+    fn thread_message_interrupt_is_not_part_of_fifo_payload_flow() {
+        let messages = vec![
+            ThreadMessage::Interrupt,
+            ThreadMessage::UserInput {
+                content: "after-interrupt".into(),
+                msg_override: None,
+            },
+        ];
 
-        let claimed = mailbox.claim_job_result("job-1");
+        let payloads: Vec<_> = messages
+            .iter()
+            .filter(|message| message.is_fifo_payload())
+            .collect();
+
+        assert!(matches!(messages[0], ThreadMessage::Interrupt));
+        assert_eq!(payloads.len(), 1);
+        assert!(matches!(
+            payloads[0],
+            ThreadMessage::UserInput { content, .. } if content == "after-interrupt"
+        ));
+    }
+
+    #[test]
+    fn thread_message_control_wraps_thread_control_message() {
+        let control = ThreadMessage::Control(ThreadControlMessage::ShutdownRuntime);
+
+        assert!(!control.is_fifo_payload());
+        assert!(matches!(
+            control,
+            ThreadMessage::Control(ThreadControlMessage::ShutdownRuntime)
+        ));
+    }
+
+    #[test]
+    fn thread_message_serializes_with_stable_snake_case_shape() {
+        let value = serde_json::to_value(ThreadMessage::UserInput {
+            content: "hello".to_string(),
+            msg_override: None,
+        })
+        .unwrap();
+
         assert_eq!(
-            claimed.as_ref().and_then(MailboxMessage::job_id),
-            Some("job-1")
-        );
-
-        let next = mailbox
-            .take_next_turn_message()
-            .expect("remaining user message should stay at the head of the queue");
-        let final_message = mailbox
-            .take_next_turn_message()
-            .expect("remaining job result should preserve FIFO order");
-
-        assert_eq!(next.content, "first");
-        assert!(final_message.content.contains("Job: job-2"));
-    }
-
-    #[test]
-    fn thread_mailbox_messages_remain_unread_until_marked_read() {
-        let mut mailbox = ThreadMailbox::default();
-        let message = job_result_message("job-unread");
-        mailbox.enqueue_mailbox_message(message.clone());
-
-        let unread = mailbox.unread_mailbox_messages();
-        assert_eq!(unread.len(), 1);
-        assert_eq!(unread[0].id, message.id);
-
-        assert!(mailbox.mark_mailbox_message_read(&message.id));
-        assert!(
-            mailbox.unread_mailbox_messages().is_empty(),
-            "queued mailbox messages should remain unread until mark_read is called"
+            value,
+            serde_json::json!({
+                "type": "user_input",
+                "payload": {
+                    "content": "hello",
+                    "msg_override": null
+                }
+            })
         );
     }
 
     #[test]
-    fn thread_mailbox_interrupt_stop_is_not_enqueued() {
-        let mut mailbox = ThreadMailbox::default();
-        mailbox.interrupt_stop();
+    fn thread_message_control_round_trips_with_explicit_shape() {
+        let value = serde_json::json!({
+            "type": "control",
+            "payload": {
+                "type": "shutdown_runtime"
+            }
+        });
 
-        assert!(mailbox.take_next_turn_message().is_none());
-        assert!(mailbox.take_stop_signal());
-        assert!(!mailbox.take_stop_signal());
+        let message: ThreadMessage = serde_json::from_value(value.clone()).unwrap();
+        assert!(matches!(
+            message,
+            ThreadMessage::Control(ThreadControlMessage::ShutdownRuntime)
+        ));
+
+        let restored = serde_json::to_value(message).unwrap();
+        assert_eq!(restored, value);
     }
 
     #[test]
