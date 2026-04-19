@@ -105,6 +105,8 @@ function resetStore() {
     sessionListLoading: false,
     threadListBySessionId: {},
     threadListLoadingBySessionId: {},
+    chatThreadPoolSnapshot: null,
+    jobRuntimeSnapshot: null,
     threadPoolSnapshot: null,
     threadPoolSnapshotLoading: false,
     threadPoolError: null,
@@ -146,7 +148,73 @@ test("fast-path thread switch clears the selected job detail", async () => {
   );
 });
 
-test("thread-pool events append the runtime timeline to the matching parent session", () => {
+test("thread switch preserves session-scoped job state for later runtime events", async () => {
+  const tauriInternals = (globalThis as any).window.__TAURI_INTERNALS__;
+  const originalInvoke = tauriInternals.invoke;
+  tauriInternals.invoke = async (command: string) => {
+    if (command === "activate_existing_thread") {
+      return {
+        session_key: "session-1",
+        session_id: "session-1",
+        template_id: 1,
+        thread_id: "thread-2",
+        effective_provider_id: null,
+        effective_model: null,
+      };
+    }
+    if (command === "get_thread_snapshot") {
+      return {
+        session_id: "session-1",
+        thread_id: "thread-2",
+        messages: [],
+        turn_count: 2,
+        token_count: 11,
+        plan_item_count: 0,
+      };
+    }
+    return null;
+  };
+
+  try {
+    useChatStore.setState({
+      activeSessionKey: "session-1",
+      sessionsByKey: {
+        "session-1": makeSession({
+          sessionKey: "session-1",
+          sessionId: "session-1",
+          threadId: "thread-1",
+          jobStatuses: {
+            "job-1": {
+              job_id: "job-1",
+              agent_id: 101,
+              prompt: "Investigate the issue",
+              status: "running",
+              message: null,
+              agent_display_name: "Worker",
+              agent_description: "Background worker",
+            },
+          },
+          jobDetails: {
+            "job-1": makeDetail({ job_id: "job-1" }),
+          },
+          selectedJobDetailId: "job-1",
+        }),
+      },
+    });
+
+    await useChatStore.getState().switchToThread("session-1", "thread-2");
+
+    const nextSession = useChatStore.getState().sessionsByKey["session-1"];
+    assert.equal(nextSession.threadId, "thread-2");
+    assert.equal(nextSession.jobStatuses["job-1"]?.status, "running");
+    assert.equal(nextSession.jobDetails["job-1"]?.job_id, "job-1");
+    assert.equal(nextSession.selectedJobDetailId, null);
+  } finally {
+    tauriInternals.invoke = originalInvoke;
+  }
+});
+
+test("job runtime events append the runtime timeline to the matching parent session", () => {
   useChatStore.setState({
     activeSessionKey: "session-parent",
     sessionsByKey: {
@@ -194,9 +262,7 @@ test("thread-pool events append the runtime timeline to the matching parent sess
     thread_id: "runtime-thread-1",
     turn_number: null,
     payload: {
-      type: "thread_pool_started",
-      kind: "job",
-      session_id: "session-parent",
+      type: "job_runtime_started",
       job_id: "job-1",
     },
   };
@@ -223,4 +289,56 @@ test("thread-pool events append the runtime timeline to the matching parent sess
       ),
     true,
   );
+});
+
+test("job result events still resolve by session id after the active thread changes", () => {
+  useChatStore.setState({
+    activeSessionKey: "session-parent",
+    sessionsByKey: {
+      "session-parent": makeSession({
+        sessionKey: "session-parent",
+        sessionId: "session-parent",
+        threadId: "thread-current",
+        jobStatuses: {
+          "job-1": {
+            job_id: "job-1",
+            agent_id: 101,
+            prompt: "Investigate the issue",
+            status: "running",
+            message: null,
+            agent_display_name: "Worker",
+            agent_description: "Background worker",
+          },
+        },
+        jobDetails: {
+          "job-1": makeDetail({ job_id: "job-1" }),
+        },
+      }),
+    },
+  });
+
+  const envelope: ThreadEventEnvelope = {
+    session_id: "session-parent",
+    thread_id: "thread-originating",
+    turn_number: null,
+    payload: {
+      type: "job_result",
+      job_id: "job-1",
+      success: true,
+      cancelled: false,
+      message: "completed work",
+      input_tokens: 12,
+      output_tokens: 6,
+      agent_id: 101,
+      agent_display_name: "Worker",
+      agent_description: "Background worker",
+    },
+  };
+
+  useChatStore.getState()._handleThreadEvent(envelope);
+
+  const session = useChatStore.getState().sessionsByKey["session-parent"];
+  assert.equal(session.jobStatuses["job-1"]?.status, "completed");
+  assert.equal(session.jobDetails["job-1"]?.result_text, "completed work");
+  assert.equal(session.jobDetails["job-1"]?.timeline.at(-1)?.status, "completed");
 });

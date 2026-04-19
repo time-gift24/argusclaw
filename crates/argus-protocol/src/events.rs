@@ -66,6 +66,8 @@ pub struct ThreadJobResult {
     pub job_id: String,
     /// Whether the job succeeded.
     pub success: bool,
+    /// Whether the job was cancelled explicitly.
+    pub cancelled: bool,
     /// Output or error message summary.
     pub message: String,
     /// Token usage if available.
@@ -106,6 +108,8 @@ pub enum MailboxMessageType {
     JobResult {
         job_id: String,
         success: bool,
+        #[serde(default)]
+        cancelled: bool,
         token_usage: Option<TokenUsage>,
         agent_id: AgentId,
         agent_display_name: String,
@@ -221,27 +225,13 @@ pub enum ThreadRuntimeStatus {
     Evicted,
 }
 
-/// Runtime source classification inside the unified thread pool.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum ThreadPoolRuntimeKind {
-    /// User-facing conversational runtime.
-    Chat,
-    /// Background job runtime.
-    Job,
-}
-
 /// Snapshot of a single thread tracked by the thread pool.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ThreadPoolRuntimeSummary {
     /// Thread ID.
     pub thread_id: ThreadId,
-    /// Runtime category.
-    pub kind: ThreadPoolRuntimeKind,
     /// Bound session ID when the runtime belongs to a user chat thread.
     pub session_id: Option<SessionId>,
-    /// Bound job ID if this runtime is associated with a dispatched job.
-    pub job_id: Option<String>,
     /// Runtime status.
     pub status: ThreadRuntimeStatus,
     /// Estimated memory usage for this runtime.
@@ -292,6 +282,65 @@ pub struct ThreadPoolState {
     pub snapshot: ThreadPoolSnapshot,
     /// Current runtime summaries.
     pub runtimes: Vec<ThreadPoolRuntimeSummary>,
+}
+
+/// Snapshot of a single background job runtime.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct JobRuntimeSummary {
+    /// Thread ID bound to the job runtime.
+    pub thread_id: ThreadId,
+    /// Stable job ID.
+    pub job_id: String,
+    /// Runtime status.
+    pub status: ThreadRuntimeStatus,
+    /// Estimated memory usage for this runtime.
+    pub estimated_memory_bytes: u64,
+    /// Last activity timestamp (RFC3339).
+    pub last_active_at: Option<String>,
+    /// Whether the runtime can be reloaded after in-memory eviction.
+    pub recoverable: bool,
+    /// Last eviction/cooling reason when available.
+    pub last_reason: Option<ThreadPoolEventReason>,
+}
+
+/// Aggregated job-runtime telemetry snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct JobRuntimeSnapshot {
+    /// Configured max number of concurrently loaded runtimes.
+    pub max_threads: u32,
+    /// Total active (loaded) runtimes.
+    pub active_threads: u32,
+    /// Runtimes waiting in the queue.
+    pub queued_threads: u32,
+    /// Runtimes currently executing.
+    pub running_threads: u32,
+    /// Runtimes in cooling state.
+    pub cooling_threads: u32,
+    /// Number of evictions observed since process start.
+    pub evicted_threads: u64,
+    /// Estimated pool memory usage.
+    pub estimated_memory_bytes: u64,
+    /// Peak estimated pool memory usage.
+    pub peak_estimated_memory_bytes: u64,
+    /// Process-level memory usage when available.
+    pub process_memory_bytes: Option<u64>,
+    /// Peak process-level memory usage when available.
+    pub peak_process_memory_bytes: Option<u64>,
+    /// Number of currently resident runtime records.
+    pub resident_thread_count: u32,
+    /// Average estimated memory usage per resident runtime.
+    pub avg_thread_memory_bytes: u64,
+    /// Snapshot timestamp (RFC3339).
+    pub captured_at: String,
+}
+
+/// Authoritative job-runtime query payload used by external observers.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct JobRuntimeState {
+    /// Aggregated job-runtime metrics.
+    pub snapshot: JobRuntimeSnapshot,
+    /// Current job runtime summaries.
+    pub runtimes: Vec<JobRuntimeSummary>,
 }
 
 /// Reason associated with thread-pool lifecycle transitions.
@@ -431,6 +480,9 @@ pub enum ThreadEvent {
         job_id: String,
         /// Whether the job succeeded.
         success: bool,
+        /// Whether the job was cancelled explicitly.
+        #[serde(default)]
+        cancelled: bool,
         /// Output or error message.
         message: String,
         /// Token usage if available.
@@ -456,49 +508,33 @@ pub enum ThreadEvent {
         /// Thread ID.
         thread_id: ThreadId,
     },
-    /// Job/thread has entered queued state inside the thread pool.
+    /// Chat thread has entered queued state inside the thread pool.
     ThreadPoolQueued {
         /// Thread ID.
         thread_id: ThreadId,
-        /// Runtime category.
-        kind: ThreadPoolRuntimeKind,
         /// Bound session ID when the runtime belongs to a user chat thread.
         session_id: Option<SessionId>,
-        /// Bound job ID if this runtime is associated with a dispatched job.
-        job_id: Option<String>,
     },
-    /// Job/thread has started running inside the thread pool.
+    /// Chat thread has started running inside the thread pool.
     ThreadPoolStarted {
         /// Thread ID.
         thread_id: ThreadId,
-        /// Runtime category.
-        kind: ThreadPoolRuntimeKind,
         /// Bound session ID when the runtime belongs to a user chat thread.
         session_id: Option<SessionId>,
-        /// Bound job ID if this runtime is associated with a dispatched job.
-        job_id: Option<String>,
     },
-    /// Job/thread has entered cooling state inside the thread pool.
+    /// Chat thread has entered cooling state inside the thread pool.
     ThreadPoolCooling {
         /// Thread ID.
         thread_id: ThreadId,
-        /// Runtime category.
-        kind: ThreadPoolRuntimeKind,
         /// Bound session ID when the runtime belongs to a user chat thread.
         session_id: Option<SessionId>,
-        /// Bound job ID if this runtime is associated with a dispatched job.
-        job_id: Option<String>,
     },
-    /// Job/thread runtime has been evicted from memory.
+    /// Chat thread runtime has been evicted from memory.
     ThreadPoolEvicted {
         /// Thread ID.
         thread_id: ThreadId,
-        /// Runtime category.
-        kind: ThreadPoolRuntimeKind,
         /// Bound session ID when the runtime belongs to a user chat thread.
         session_id: Option<SessionId>,
-        /// Bound job ID if this runtime is associated with a dispatched job.
-        job_id: Option<String>,
         /// Eviction reason.
         reason: ThreadPoolEventReason,
     },
@@ -506,6 +542,46 @@ pub enum ThreadEvent {
     ThreadPoolMetricsUpdated {
         /// Current thread-pool telemetry snapshot.
         snapshot: ThreadPoolSnapshot,
+    },
+    /// Job runtime entered queued state.
+    JobRuntimeQueued {
+        /// Thread ID.
+        thread_id: ThreadId,
+        /// Stable job ID.
+        job_id: String,
+    },
+    /// Job runtime started running.
+    JobRuntimeStarted {
+        /// Thread ID.
+        thread_id: ThreadId,
+        /// Stable job ID.
+        job_id: String,
+    },
+    /// Job runtime entered cooling state.
+    JobRuntimeCooling {
+        /// Thread ID.
+        thread_id: ThreadId,
+        /// Stable job ID.
+        job_id: String,
+    },
+    /// Job runtime was evicted from memory.
+    JobRuntimeEvicted {
+        /// Thread ID.
+        thread_id: ThreadId,
+        /// Stable job ID.
+        job_id: String,
+        /// Eviction reason.
+        reason: ThreadPoolEventReason,
+    },
+    /// Job runtime summary changed.
+    JobRuntimeUpdated {
+        /// Current job runtime summary.
+        runtime: JobRuntimeSummary,
+    },
+    /// Aggregated job-runtime metrics update.
+    JobRuntimeMetricsUpdated {
+        /// Current job-runtime telemetry snapshot.
+        snapshot: JobRuntimeSnapshot,
     },
     /// User wants to interrupt the current turn.
     ///
@@ -568,9 +644,7 @@ pub(crate) fn assert_thread_pool_state_round_trip() {
         },
         runtimes: vec![ThreadPoolRuntimeSummary {
             thread_id: ThreadId::new(),
-            kind: ThreadPoolRuntimeKind::Job,
-            session_id: None,
-            job_id: Some("job-1".to_string()),
+            session_id: Some(SessionId::new()),
             status: ThreadRuntimeStatus::Queued,
             estimated_memory_bytes: 1024,
             last_active_at: Some("2026-03-29T00:00:01Z".to_string()),
@@ -582,8 +656,42 @@ pub(crate) fn assert_thread_pool_state_round_trip() {
     let value = serde_json::to_value(&state).unwrap();
     let restored: ThreadPoolState = serde_json::from_value(value).unwrap();
     assert_eq!(restored.runtimes.len(), 1);
-    assert_eq!(restored.runtimes[0].kind, ThreadPoolRuntimeKind::Job);
-    assert_eq!(restored.runtimes[0].job_id.as_deref(), Some("job-1"));
+    assert!(restored.runtimes[0].session_id.is_some());
+}
+
+#[cfg(test)]
+pub(crate) fn assert_job_runtime_state_round_trip() {
+    let state = JobRuntimeState {
+        snapshot: JobRuntimeSnapshot {
+            max_threads: 8,
+            active_threads: 1,
+            queued_threads: 1,
+            running_threads: 0,
+            cooling_threads: 0,
+            evicted_threads: 0,
+            estimated_memory_bytes: 1024,
+            peak_estimated_memory_bytes: 2048,
+            process_memory_bytes: None,
+            peak_process_memory_bytes: None,
+            resident_thread_count: 1,
+            avg_thread_memory_bytes: 1024,
+            captured_at: "2026-03-29T00:00:00Z".to_string(),
+        },
+        runtimes: vec![JobRuntimeSummary {
+            thread_id: ThreadId::new(),
+            job_id: "job-1".to_string(),
+            status: ThreadRuntimeStatus::Queued,
+            estimated_memory_bytes: 1024,
+            last_active_at: Some("2026-03-29T00:00:01Z".to_string()),
+            recoverable: true,
+            last_reason: None,
+        }],
+    };
+
+    let value = serde_json::to_value(&state).unwrap();
+    let restored: JobRuntimeState = serde_json::from_value(value).unwrap();
+    assert_eq!(restored.runtimes.len(), 1);
+    assert_eq!(restored.runtimes[0].job_id, "job-1");
 }
 
 #[cfg(test)]
@@ -613,6 +721,7 @@ mod tests {
             message_type: MailboxMessageType::JobResult {
                 job_id: job_id.to_string(),
                 success: true,
+                cancelled: false,
                 token_usage: None,
                 agent_id: AgentId::new(7),
                 agent_display_name: "Worker".to_string(),

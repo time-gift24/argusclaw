@@ -14,15 +14,20 @@ test("switchToThread activates an existing thread before fetching its snapshot",
   assert.match(storeSource, /await chat\.getThreadSnapshot\(sessionId,\s*threadId\)/);
 });
 
-test("switchToThread resets per-thread UI state instead of reusing the previous thread state", () => {
+test("switchToThread keeps session-scoped job state while resetting transient selection state", () => {
   const switchBranch = storeSource.match(
     /async switchToThread\(sessionId: string, threadId: string\) \{(?<branch>[\s\S]*?)\n  \},/,
   );
   assert.ok(switchBranch?.groups?.branch, "switchToThread branch should exist");
   assert.match(
     switchBranch.groups.branch,
-    /jobStatuses:\s*\{\}/,
-    "switching threads should clear ephemeral job statuses from the previously viewed thread",
+    /jobStatuses:\s*existingSession\?\.jobStatuses\s*\?\?\s*\{\}/,
+    "switching threads should preserve session-scoped job statuses across thread activation",
+  );
+  assert.match(
+    switchBranch.groups.branch,
+    /jobDetails:\s*existingSession\?\.jobDetails\s*\?\?\s*\{\}/,
+    "switching threads should preserve session-scoped job details across thread activation",
   );
   assert.match(
     switchBranch.groups.branch,
@@ -31,9 +36,12 @@ test("switchToThread resets per-thread UI state instead of reusing the previous 
   );
 });
 
-test("existing thread activation reuses a stable session-based forwarder key", () => {
+test("existing thread activation keeps per-session forwarders for multiple threads alive", () => {
   assert.match(commandSource, /start_forwarder\(\s*session_id\.to_string\(\)/);
-  assert.match(subscriptionSource, /subscriptions: HashMap<String, CancellationToken>/);
+  assert.match(
+    subscriptionSource,
+    /subscriptions: HashMap<String,\s*HashMap<String,\s*CancellationToken>>/,
+  );
 });
 
 test("desktop commands expose persistent session and thread rename entry points", () => {

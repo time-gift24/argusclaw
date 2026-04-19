@@ -10,8 +10,7 @@ use argus_job::{JobLookup, JobManager, ThreadPool};
 use argus_protocol::{
     llm::{ChatMessage, CompletionRequest, CompletionResponse, LlmError, LlmEventStream},
     AgentId, ArgusError, LlmProviderId, MailboxMessage, MailboxMessageType, McpToolResolver,
-    ProviderId, Result, SessionId, ThreadEvent, ThreadId, ThreadMessage, ThreadPoolRuntimeKind,
-    ToolError,
+    ProviderId, Result, SessionId, ThreadEvent, ThreadId, ThreadMessage, ToolError,
 };
 use argus_repository::traits::{LlmProviderRepository, SessionRepository, ThreadRepository};
 use argus_template::TemplateManager;
@@ -123,6 +122,7 @@ impl SessionSchedulerBackend {
             JobLookup::Pending => SchedulerJobLookup::Pending,
             JobLookup::Completed(result) => SchedulerJobLookup::Completed(SchedulerJobResult {
                 success: result.success,
+                cancelled: result.cancelled,
                 message: result.message,
                 token_usage: result.token_usage,
                 agent_id: result.agent_id,
@@ -131,6 +131,7 @@ impl SessionSchedulerBackend {
             }),
             JobLookup::Consumed(result) => SchedulerJobLookup::Consumed(SchedulerJobResult {
                 success: result.success,
+                cancelled: result.cancelled,
                 message: result.message,
                 token_usage: result.token_usage,
                 agent_id: result.agent_id,
@@ -145,20 +146,15 @@ impl SessionSchedulerBackend {
         thread_id: ThreadId,
         job_id: &str,
     ) -> std::result::Result<(), ToolError> {
-        let thread_pool = self.thread_pool();
-        if thread_pool.runtime_summary(&thread_id).is_none() {
-            tracing::warn!(job_id, thread_id = %thread_id, "failed to claim queued job result: thread not registered");
-            return Ok(());
-        }
-
-        if thread_pool
-            .claim_queued_job_result(thread_id, job_id)
+        if self
+            .job_manager
+            .claim_delivered_job_result(thread_id, job_id)
             .is_none()
         {
             tracing::debug!(
                 job_id,
                 thread_id = %thread_id,
-                "claim queued job result missed because the mailbox item was already absent"
+                "claim delivered job result missed because the mailbox item was already absent"
             );
         }
 
@@ -191,12 +187,12 @@ impl SessionSchedulerBackend {
         &self,
         thread_id: ThreadId,
     ) -> std::result::Result<u32, ToolError> {
-        let thread_pool = self.thread_pool();
         let mut depth = 0;
         let mut cursor = thread_id;
 
-        while let Some(parent_thread_id) = thread_pool.parent_thread_id(&cursor).or(thread_pool
-            .recover_parent_thread_id(&cursor)
+        while let Some(parent_thread_id) = self.job_manager.parent_job_thread_id(&cursor).or(self
+            .job_manager
+            .recover_parent_job_thread_id(&cursor)
             .await
             .map_err(|error| Self::scheduler_error(error.to_string()))?)
         {
@@ -211,9 +207,9 @@ impl SessionSchedulerBackend {
         &self,
         thread_id: ThreadId,
     ) -> std::result::Result<Vec<ThreadId>, ToolError> {
-        let thread_pool = self.thread_pool();
-        let children = thread_pool
-            .recover_child_jobs(thread_id)
+        let children = self
+            .job_manager
+            .recover_child_jobs_for_thread(thread_id)
             .await
             .map_err(|error| Self::scheduler_error(error.to_string()))?;
         let mut active = Vec::new();
@@ -252,11 +248,11 @@ impl SessionSchedulerBackend {
             return Ok(true);
         }
 
-        let thread_pool = self.thread_pool();
-        let parent = match thread_pool.parent_thread_id(&source_thread_id) {
+        let parent = match self.job_manager.parent_job_thread_id(&source_thread_id) {
             Some(parent) => Some(parent),
-            None => thread_pool
-                .recover_parent_thread_id(&source_thread_id)
+            None => self
+                .job_manager
+                .recover_parent_job_thread_id(&source_thread_id)
                 .await
                 .map_err(|error| Self::scheduler_error(error.to_string()))?,
         };
@@ -264,8 +260,9 @@ impl SessionSchedulerBackend {
             return Ok(true);
         }
 
-        Ok(thread_pool
-            .recover_child_jobs(source_thread_id)
+        Ok(self
+            .job_manager
+            .recover_child_jobs_for_thread(source_thread_id)
             .await
             .map_err(|error| Self::scheduler_error(error.to_string()))?
             .into_iter()
@@ -277,9 +274,30 @@ impl SessionSchedulerBackend {
         target_thread_id: ThreadId,
     ) -> std::result::Result<(), ToolError> {
         let thread_pool = self.thread_pool();
-        let Some(summary) = thread_pool.runtime_summary(&target_thread_id) else {
-            if thread_pool
-                .recover_parent_thread_id(&target_thread_id)
+        if let Some(summary) = thread_pool.runtime_summary(&target_thread_id) {
+            let session_id = summary.session_id.ok_or_else(|| {
+                Self::scheduler_error(format!(
+                    "chat thread {} is missing a session binding",
+                    target_thread_id
+                ))
+            })?;
+            let Some(_session) = self.sessions.get(&session_id) else {
+                return Err(Self::scheduler_error(format!(
+                    "session {} is not loaded for thread {}",
+                    session_id, target_thread_id
+                )));
+            };
+            return Ok(());
+        }
+
+        if self
+            .job_manager
+            .job_runtime_summary(&target_thread_id)
+            .is_none()
+        {
+            if self
+                .job_manager
+                .recover_parent_job_thread_id(&target_thread_id)
                 .await
                 .map_err(|error| Self::scheduler_error(error.to_string()))?
                 .is_some()
@@ -291,11 +309,9 @@ impl SessionSchedulerBackend {
             return Err(Self::scheduler_error(format!(
                 "thread {target_thread_id} is not registered"
             )));
-        };
+        }
 
-        if summary.kind == ThreadPoolRuntimeKind::Job
-            && thread_pool.loaded_thread(&target_thread_id).is_none()
-        {
+        if thread_pool.loaded_thread(&target_thread_id).is_none() {
             return Err(Self::scheduler_error(format!(
                 "thread {target_thread_id} is not ready to receive mailbox messages"
             )));
@@ -341,8 +357,6 @@ impl SessionSchedulerBackend {
         thread_id: ThreadId,
         to: &str,
     ) -> std::result::Result<Vec<ThreadId>, ToolError> {
-        let thread_pool = self.thread_pool();
-
         if let Some(job_id) = to.strip_prefix("job:") {
             if !matches!(
                 self.job_manager
@@ -353,8 +367,9 @@ impl SessionSchedulerBackend {
             ) {
                 return Err(Self::scheduler_error(format!("job {job_id} is not active")));
             }
-            let target = thread_pool
-                .recover_thread_binding(job_id)
+            let target = self
+                .job_manager
+                .recover_job_execution_thread_id(job_id)
                 .await
                 .map_err(|error| Self::scheduler_error(error.to_string()))?
                 .ok_or_else(|| {
@@ -384,10 +399,11 @@ impl SessionSchedulerBackend {
         }
 
         if to == "parent" {
-            let parent = match thread_pool.parent_thread_id(&thread_id) {
+            let parent = match self.job_manager.parent_job_thread_id(&thread_id) {
                 Some(parent) => Some(parent),
-                None => thread_pool
-                    .recover_parent_thread_id(&thread_id)
+                None => self
+                    .job_manager
+                    .recover_parent_job_thread_id(&thread_id)
                     .await
                     .map_err(|error| Self::scheduler_error(error.to_string()))?,
             }
@@ -528,7 +544,7 @@ impl SchedulerBackend for SessionSchedulerBackend {
             };
 
             match thread_pool.runtime_summary(target) {
-                Some(summary) if summary.kind == ThreadPoolRuntimeKind::Chat => {
+                Some(summary) => {
                     let session_id = summary.session_id.ok_or_else(|| {
                         Self::scheduler_error(format!(
                             "chat thread {} is missing a session binding",
@@ -618,9 +634,6 @@ impl SessionManager {
                     let Some(summary) = thread_pool.runtime_summary(&thread_id) else {
                         return false;
                     };
-                    if summary.kind != ThreadPoolRuntimeKind::Chat {
-                        return false;
-                    }
                     let Some(session_id) = summary.session_id else {
                         return false;
                     };
@@ -1988,7 +2001,6 @@ mod tests {
                 .thread_pool
                 .runtime_summary(&thread_id)
                 .expect("thread summary should exist")
-                .runtime
                 .thread_id,
             thread_id,
             "mailbox delivery should keep the thread runtime registered"
@@ -2015,6 +2027,7 @@ mod tests {
             message_type: MailboxMessageType::JobResult {
                 job_id: job_id.clone(),
                 success: true,
+                cancelled: false,
                 token_usage: None,
                 agent_id: harness.agent_id,
                 agent_display_name: "Routing Test Agent".to_string(),
@@ -2066,9 +2079,8 @@ mod tests {
 
         assert!(
             harness
-                .manager
-                .thread_pool
-                .claim_queued_job_result(harness.thread_id, &job_id)
+                .job_manager
+                .claim_delivered_job_result(harness.thread_id, &job_id)
                 .is_none(),
             "job-result inbox copy should already be claimed from the evicted runtime entry"
         );

@@ -1371,6 +1371,7 @@ mod tests {
             message_type: MailboxMessageType::JobResult {
                 job_id: job_id.to_string(),
                 success: true,
+                cancelled: false,
                 token_usage: None,
                 agent_id: AgentId::new(7),
                 agent_display_name: "Worker".to_string(),

@@ -6,7 +6,7 @@ import { useActiveChatSession } from "@/hooks/use-active-chat-session";
 import { useChatStore } from "@/lib/chat-store";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { Badge } from "@/components/ui/badge";
-import type { JobDetailPayload } from "@/lib/types/chat";
+import type { JobDetailPayload, JobDetailStatus } from "@/lib/types/chat";
 import { cn } from "@/lib/utils";
 
 function formatTimestamp(value: string | null | undefined) {
@@ -24,7 +24,7 @@ function formatTimestamp(value: string | null | undefined) {
   });
 }
 
-function statusLabel(status: "running" | "completed" | "failed") {
+function statusLabel(status: JobDetailStatus) {
   switch (status) {
     case "running":
       return "运行中";
@@ -32,10 +32,12 @@ function statusLabel(status: "running" | "completed" | "failed") {
       return "已完成";
     case "failed":
       return "失败";
+    case "cancelled":
+      return "已取消";
   }
 }
 
-function statusBadgeClass(status: "running" | "completed" | "failed") {
+function statusBadgeClass(status: JobDetailStatus) {
   switch (status) {
     case "running":
       return "border-sky-500/30 bg-sky-500/10 text-sky-700 dark:text-sky-300";
@@ -43,6 +45,8 @@ function statusBadgeClass(status: "running" | "completed" | "failed") {
       return "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300";
     case "failed":
       return "border-destructive/30 bg-destructive/10 text-destructive";
+    case "cancelled":
+      return "border-muted-foreground/30 bg-muted/40 text-muted-foreground";
   }
 }
 
@@ -169,6 +173,8 @@ export const SubagentJobDetailsPanel: FC<{
                         "size-2.5 rounded-full",
                         entry.status === "failed"
                           ? "bg-destructive"
+                          : entry.status === "cancelled"
+                            ? "bg-muted-foreground"
                           : entry.status === "completed"
                             ? "bg-emerald-500"
                             : "bg-sky-500",

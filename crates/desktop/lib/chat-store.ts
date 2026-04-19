@@ -1,8 +1,11 @@
 import { create } from "zustand";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
-import { agents, chat, providers, sessions, threadPool } from "@/lib/tauri";
+import { agents, chat, jobRuntime, providers, sessions, threadPool } from "@/lib/tauri";
 import type {
+  JobRuntimeSnapshot,
+  JobRuntimeSummary,
+  JobDetailStatus,
   JobDetailPayload,
   JobDetailTimelineItem,
   JobStatusPayload,
@@ -10,7 +13,6 @@ import type {
   MailboxMessagePayload,
   ThreadEventEnvelope,
   ThreadPoolEventReason,
-  ThreadPoolRuntimeKind,
   ThreadPoolRuntimeSummary,
   ThreadPoolSnapshot,
   ThreadSnapshotPayload,
@@ -129,6 +131,14 @@ function buildJobDetailTimelineEntry(
   };
 }
 
+function resolveJobResultStatus(
+  success: boolean,
+  cancelled: boolean,
+): JobDetailStatus {
+  if (cancelled) return "cancelled";
+  return success ? "completed" : "failed";
+}
+
 function seedJobDetailFromDispatch(
   jobId: string,
   agentId: number,
@@ -166,6 +176,7 @@ function updateJobDetailFromResult(
   sourceMessageId?: string | null,
   resultText?: string | null,
 ): JobDetailPayload {
+  const nextStatus = resolveJobResultStatus(payload.success, payload.cancelled);
   const summaryText = existing?.summary_text ?? payload.message;
   return normalizeJobDetailPayload({
     job_id: payload.job_id,
@@ -173,7 +184,7 @@ function updateJobDetailFromResult(
     agent_display_name: payload.agent_display_name,
     agent_description: payload.agent_description,
     prompt: existing?.prompt ?? "",
-    status: payload.success ? "completed" : "failed",
+    status: nextStatus,
     summary_text: summaryText,
     result_text: resultText ?? existing?.result_text ?? payload.message,
     started_at: existing?.started_at ?? null,
@@ -187,8 +198,8 @@ function updateJobDetailFromResult(
       buildJobDetailTimelineEntry(
         "result",
         at,
-        payload.success ? "已完成" : "已失败",
-        payload.success ? "completed" : "failed",
+        payload.cancelled ? "已取消" : payload.success ? "已完成" : "已失败",
+        nextStatus,
       ),
     ],
   });
@@ -199,6 +210,7 @@ function updateJobDetailFromMailboxResult(
   message: MailboxMessagePayload,
   result: MailboxMessageJobResultPayload,
 ): JobDetailPayload {
+  const nextStatus = resolveJobResultStatus(result.success, result.cancelled);
   const tokenUsage = result.token_usage ?? null;
   const summaryText = existing?.summary_text ?? message.summary ?? null;
   return normalizeJobDetailPayload({
@@ -207,7 +219,7 @@ function updateJobDetailFromMailboxResult(
     agent_display_name: result.agent_display_name,
     agent_description: result.agent_description,
     prompt: existing?.prompt ?? "",
-    status: result.success ? "completed" : "failed",
+    status: nextStatus,
     summary_text: summaryText,
     result_text: message.text,
     started_at: existing?.started_at ?? null,
@@ -221,8 +233,12 @@ function updateJobDetailFromMailboxResult(
       buildJobDetailTimelineEntry(
         "result",
         message.timestamp,
-        result.success ? "收件箱收到完成结果" : "收件箱收到失败结果",
-        result.success ? "completed" : "failed",
+        result.cancelled
+          ? "收件箱收到取消结果"
+          : result.success
+            ? "收件箱收到完成结果"
+            : "收件箱收到失败结果",
+        nextStatus,
       ),
     ],
   });
@@ -248,7 +264,7 @@ const ensurePendingAssistantSession = (
 
 export interface ThreadPoolThreadState {
   threadId: string;
-  kind: ThreadPoolRuntimeKind;
+  kind: "chat" | "job";
   sessionId: string | null;
   jobId: string | null;
   status: ThreadRuntimeStatus;
@@ -301,6 +317,8 @@ export interface ChatStore {
   sessionListLoading: boolean;
   threadListBySessionId: Record<string, ThreadSummary[]>;
   threadListLoadingBySessionId: Record<string, boolean>;
+  chatThreadPoolSnapshot: ThreadPoolSnapshot | null;
+  jobRuntimeSnapshot: JobRuntimeSnapshot | null;
   threadPoolSnapshot: ThreadPoolSnapshot | null;
   threadPoolSnapshotLoading: boolean;
   threadPoolError: string | null;
@@ -359,14 +377,32 @@ function getTemplateDraftSelection(
   };
 }
 
-function mapRuntimeSummaryToThreadState(
+function mapChatRuntimeSummaryToThreadState(
   runtime: ThreadPoolRuntimeSummary,
   existing?: ThreadPoolThreadState,
 ): ThreadPoolThreadState {
   return {
     threadId: runtime.thread_id,
-    kind: runtime.kind,
+    kind: "chat",
     sessionId: runtime.session_id,
+    jobId: null,
+    status: runtime.status,
+    estimatedMemoryBytes: runtime.estimated_memory_bytes,
+    lastActiveAt: runtime.last_active_at,
+    recoverable: runtime.recoverable,
+    lastReason: runtime.last_reason,
+    eventCount: existing?.eventCount ?? 0,
+  };
+}
+
+function mapJobRuntimeSummaryToThreadState(
+  runtime: JobRuntimeSummary,
+  existing?: ThreadPoolThreadState,
+): ThreadPoolThreadState {
+  return {
+    threadId: runtime.thread_id,
+    kind: "job",
+    sessionId: null,
     jobId: runtime.job_id,
     status: runtime.status,
     estimatedMemoryBytes: runtime.estimated_memory_bytes,
@@ -374,6 +410,49 @@ function mapRuntimeSummaryToThreadState(
     recoverable: runtime.recoverable,
     lastReason: runtime.last_reason,
     eventCount: existing?.eventCount ?? 0,
+  };
+}
+
+function mergeMonitorSnapshot(
+  chatSnapshot: ThreadPoolSnapshot | null,
+  jobSnapshot: JobRuntimeSnapshot | null,
+): ThreadPoolSnapshot | null {
+  if (!chatSnapshot && !jobSnapshot) return null;
+  if (!chatSnapshot) return { ...jobSnapshot! };
+  if (!jobSnapshot) return chatSnapshot;
+
+  const activeThreads = chatSnapshot.active_threads + jobSnapshot.active_threads;
+  const estimatedMemoryBytes =
+    chatSnapshot.estimated_memory_bytes + jobSnapshot.estimated_memory_bytes;
+  const residentThreadCount =
+    chatSnapshot.resident_thread_count + jobSnapshot.resident_thread_count;
+
+  return {
+    max_threads: Math.max(chatSnapshot.max_threads, jobSnapshot.max_threads),
+    active_threads: activeThreads,
+    queued_threads: chatSnapshot.queued_threads + jobSnapshot.queued_threads,
+    running_threads: chatSnapshot.running_threads + jobSnapshot.running_threads,
+    cooling_threads: chatSnapshot.cooling_threads + jobSnapshot.cooling_threads,
+    evicted_threads: chatSnapshot.evicted_threads + jobSnapshot.evicted_threads,
+    estimated_memory_bytes: estimatedMemoryBytes,
+    peak_estimated_memory_bytes: Math.max(
+      chatSnapshot.peak_estimated_memory_bytes,
+      jobSnapshot.peak_estimated_memory_bytes,
+    ),
+    process_memory_bytes:
+      chatSnapshot.process_memory_bytes ?? jobSnapshot.process_memory_bytes,
+    peak_process_memory_bytes:
+      chatSnapshot.peak_process_memory_bytes ??
+      jobSnapshot.peak_process_memory_bytes,
+    resident_thread_count: residentThreadCount,
+    avg_thread_memory_bytes:
+      residentThreadCount === 0
+        ? 0
+        : Math.floor(estimatedMemoryBytes / residentThreadCount),
+    captured_at:
+      chatSnapshot.captured_at.localeCompare(jobSnapshot.captured_at) >= 0
+        ? chatSnapshot.captured_at
+        : jobSnapshot.captured_at,
   };
 }
 
@@ -444,14 +523,41 @@ function findSessionKeyForEnvelope(
     ) ?? null;
   if (exactMatch) return exactMatch;
 
+  const sessionScopedJobPayload =
+    envelope.payload.type === "thread_bound_to_job" ||
+    envelope.payload.type === "job_runtime_queued" ||
+    envelope.payload.type === "job_runtime_started" ||
+    envelope.payload.type === "job_runtime_cooling" ||
+    envelope.payload.type === "job_runtime_evicted" ||
+    envelope.payload.type === "job_runtime_updated" ||
+    envelope.payload.type === "job_dispatched" ||
+    envelope.payload.type === "job_result" ||
+    envelope.payload.type === "mailbox_message_queued";
+
+  if (!sessionScopedJobPayload) return null;
+
+  const sessionMatch =
+    Object.keys(sessionsByKey).find(
+      (key) => sessionsByKey[key].sessionId === envelope.session_id,
+    ) ?? null;
+  if (sessionMatch) return sessionMatch;
+
   const jobId =
     envelope.payload.type === "thread_bound_to_job"
       ? envelope.payload.job_id
-      : envelope.payload.type === "thread_pool_queued" ||
-          envelope.payload.type === "thread_pool_started" ||
-          envelope.payload.type === "thread_pool_cooling" ||
-          envelope.payload.type === "thread_pool_evicted"
+      : envelope.payload.type === "job_runtime_queued" ||
+          envelope.payload.type === "job_runtime_started" ||
+          envelope.payload.type === "job_runtime_cooling" ||
+          envelope.payload.type === "job_runtime_evicted"
         ? envelope.payload.job_id
+        : envelope.payload.type === "job_runtime_updated"
+          ? envelope.payload.runtime.job_id
+        : envelope.payload.type === "job_dispatched" ||
+            envelope.payload.type === "job_result"
+          ? envelope.payload.job_id
+          : envelope.payload.type === "mailbox_message_queued" &&
+              envelope.payload.message.message_type.type === "job_result"
+            ? envelope.payload.message.message_type.job_id
         : null;
 
   if (!jobId) return null;
@@ -503,6 +609,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   sessionListLoading: false,
   threadListBySessionId: {},
   threadListLoadingBySessionId: {},
+  chatThreadPoolSnapshot: null,
+  jobRuntimeSnapshot: null,
   threadPoolSnapshot: null,
   threadPoolSnapshotLoading: false,
   threadPoolError: null,
@@ -677,8 +785,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         messages: snapshot.messages,
         pendingUserMessage: null,
         pendingAssistant: null,
-        jobStatuses: {},
-        jobDetails: {},
+        jobStatuses: existingSession?.jobStatuses ?? {},
+        jobDetails: existingSession?.jobDetails ?? {},
         selectedJobDetailId: null,
         error: null,
         tokenCount: snapshot.token_count,
@@ -960,22 +1068,41 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     }));
 
     try {
-      const poolState = await threadPool.getState();
+      const [poolState, jobState] = await Promise.all([
+        threadPool.getState(),
+        jobRuntime.getState(),
+      ]);
+      const mergedSnapshot = mergeMonitorSnapshot(
+        poolState.snapshot,
+        jobState.snapshot,
+      );
       set((state) => ({
         ...(requestVersion === threadPoolSnapshotRequestVersion
           ? {
-              threadPoolSnapshot: poolState.snapshot,
+              chatThreadPoolSnapshot: poolState.snapshot,
+              jobRuntimeSnapshot: jobState.snapshot,
+              threadPoolSnapshot: mergedSnapshot,
               threadPoolSnapshotLoading: false,
               threadPoolError: null,
               threadPoolThreads: sortThreadPoolThreads(
-                poolState.runtimes.map((runtime) =>
-                  mapRuntimeSummaryToThreadState(
-                    runtime,
-                    state.threadPoolThreads.find(
-                      (thread) => thread.threadId === runtime.thread_id,
+                [
+                  ...poolState.runtimes.map((runtime) =>
+                    mapChatRuntimeSummaryToThreadState(
+                      runtime,
+                      state.threadPoolThreads.find(
+                        (thread) => thread.threadId === runtime.thread_id,
+                      ),
                     ),
                   ),
-                ),
+                  ...jobState.runtimes.map((runtime) =>
+                    mapJobRuntimeSummaryToThreadState(
+                      runtime,
+                      state.threadPoolThreads.find(
+                        (thread) => thread.threadId === runtime.thread_id,
+                      ),
+                    ),
+                  ),
+                ],
               ),
             }
           : {}),
@@ -1103,6 +1230,12 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         case "thread_pool_cooling":
         case "thread_pool_evicted":
         case "thread_pool_metrics_updated":
+        case "job_runtime_queued":
+        case "job_runtime_started":
+        case "job_runtime_cooling":
+        case "job_runtime_evicted":
+        case "job_runtime_updated":
+        case "job_runtime_metrics_updated":
           return true;
         default:
           return false;
@@ -1147,6 +1280,91 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             };
           }
           case "thread_pool_queued": {
+            return {
+              threadPoolThreads: touchThreadPoolThread(
+                state.threadPoolThreads,
+                {
+                  threadId: envelope.thread_id,
+                  kind: "chat",
+                  sessionId: payload.session_id,
+                  jobId: null,
+                  status: "queued",
+                  reason: null,
+                  lastActiveAt: now,
+                },
+                state.threadPoolSnapshot,
+              ),
+            };
+          }
+          case "thread_pool_started": {
+            return {
+              threadPoolThreads: touchThreadPoolThread(
+                state.threadPoolThreads,
+                {
+                  threadId: envelope.thread_id,
+                  kind: "chat",
+                  sessionId: payload.session_id,
+                  jobId: null,
+                  status: "running",
+                  reason: null,
+                  lastActiveAt: now,
+                },
+                state.threadPoolSnapshot,
+              ),
+            };
+          }
+          case "thread_pool_cooling": {
+            return {
+              threadPoolThreads: touchThreadPoolThread(
+                state.threadPoolThreads,
+                {
+                  threadId: envelope.thread_id,
+                  kind: "chat",
+                  sessionId: payload.session_id,
+                  jobId: null,
+                  status: "cooling",
+                  reason: null,
+                  lastActiveAt: now,
+                },
+                state.threadPoolSnapshot,
+              ),
+            };
+          }
+          case "thread_pool_evicted": {
+            return {
+              threadPoolThreads: touchThreadPoolThread(
+                state.threadPoolThreads,
+                {
+                  threadId: envelope.thread_id,
+                  kind: "chat",
+                  sessionId: payload.session_id,
+                  jobId: null,
+                  status: "evicted",
+                  reason: payload.reason,
+                  lastActiveAt: now,
+                },
+                state.threadPoolSnapshot,
+              ),
+            };
+          }
+          case "thread_pool_metrics_updated":
+            return {
+              chatThreadPoolSnapshot: payload.snapshot,
+              threadPoolSnapshot: mergeMonitorSnapshot(
+                payload.snapshot,
+                state.jobRuntimeSnapshot,
+              ),
+              threadPoolSnapshotLoading: false,
+              threadPoolError: null,
+              threadPoolThreads: state.threadPoolThreads.map((thread) => ({
+                ...thread,
+                estimatedMemoryBytes:
+                  thread.estimatedMemoryBytes > 0
+                    ? thread.estimatedMemoryBytes
+                    : payload.snapshot.avg_thread_memory_bytes,
+              })),
+            };
+          case "job_runtime_queued": {
             const nextSessionsByKey = updateSessionJobDetailTimeline(
               state.sessionsByKey,
               sessionKey,
@@ -1158,8 +1376,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
                 state.threadPoolThreads,
                 {
                   threadId: envelope.thread_id,
-                  kind: payload.kind,
-                  sessionId: payload.session_id,
+                  kind: "job",
+                  sessionId: null,
                   jobId: payload.job_id,
                   status: "queued",
                   reason: null,
@@ -1167,12 +1385,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
                 },
                 state.threadPoolSnapshot,
               ),
-              ...(nextSessionsByKey
-                ? { sessionsByKey: nextSessionsByKey }
-                : {}),
+              ...(nextSessionsByKey ? { sessionsByKey: nextSessionsByKey } : {}),
             };
           }
-          case "thread_pool_started": {
+          case "job_runtime_started": {
             const nextSessionsByKey = updateSessionJobDetailTimeline(
               state.sessionsByKey,
               sessionKey,
@@ -1184,8 +1400,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
                 state.threadPoolThreads,
                 {
                   threadId: envelope.thread_id,
-                  kind: payload.kind,
-                  sessionId: payload.session_id,
+                  kind: "job",
+                  sessionId: null,
                   jobId: payload.job_id,
                   status: "running",
                   reason: null,
@@ -1193,12 +1409,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
                 },
                 state.threadPoolSnapshot,
               ),
-              ...(nextSessionsByKey
-                ? { sessionsByKey: nextSessionsByKey }
-                : {}),
+              ...(nextSessionsByKey ? { sessionsByKey: nextSessionsByKey } : {}),
             };
           }
-          case "thread_pool_cooling": {
+          case "job_runtime_cooling": {
             const nextSessionsByKey = updateSessionJobDetailTimeline(
               state.sessionsByKey,
               sessionKey,
@@ -1210,8 +1424,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
                 state.threadPoolThreads,
                 {
                   threadId: envelope.thread_id,
-                  kind: payload.kind,
-                  sessionId: payload.session_id,
+                  kind: "job",
+                  sessionId: null,
                   jobId: payload.job_id,
                   status: "cooling",
                   reason: null,
@@ -1219,12 +1433,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
                 },
                 state.threadPoolSnapshot,
               ),
-              ...(nextSessionsByKey
-                ? { sessionsByKey: nextSessionsByKey }
-                : {}),
+              ...(nextSessionsByKey ? { sessionsByKey: nextSessionsByKey } : {}),
             };
           }
-          case "thread_pool_evicted": {
+          case "job_runtime_evicted": {
             const nextSessionsByKey = updateSessionJobDetailTimeline(
               state.sessionsByKey,
               sessionKey,
@@ -1242,8 +1454,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
                 state.threadPoolThreads,
                 {
                   threadId: envelope.thread_id,
-                  kind: payload.kind,
-                  sessionId: payload.session_id,
+                  kind: "job",
+                  sessionId: null,
                   jobId: payload.job_id,
                   status: "evicted",
                   reason: payload.reason,
@@ -1251,23 +1463,36 @@ export const useChatStore = create<ChatStore>((set, get) => ({
                 },
                 state.threadPoolSnapshot,
               ),
-              ...(nextSessionsByKey
-                ? { sessionsByKey: nextSessionsByKey }
-                : {}),
+              ...(nextSessionsByKey ? { sessionsByKey: nextSessionsByKey } : {}),
             };
           }
-          case "thread_pool_metrics_updated":
+          case "job_runtime_updated":
             return {
-              threadPoolSnapshot: payload.snapshot,
+              threadPoolThreads: touchThreadPoolThread(
+                state.threadPoolThreads,
+                {
+                  threadId: payload.runtime.thread_id,
+                  kind: "job",
+                  sessionId: null,
+                  jobId: payload.runtime.job_id,
+                  status: payload.runtime.status,
+                  estimatedMemoryBytes: payload.runtime.estimated_memory_bytes,
+                  lastActiveAt: payload.runtime.last_active_at ?? now,
+                  recoverable: payload.runtime.recoverable,
+                  reason: payload.runtime.last_reason,
+                },
+                state.threadPoolSnapshot,
+              ),
+            };
+          case "job_runtime_metrics_updated":
+            return {
+              jobRuntimeSnapshot: payload.snapshot,
+              threadPoolSnapshot: mergeMonitorSnapshot(
+                state.chatThreadPoolSnapshot,
+                payload.snapshot,
+              ),
               threadPoolSnapshotLoading: false,
               threadPoolError: null,
-              threadPoolThreads: state.threadPoolThreads.map((thread) => ({
-                ...thread,
-                estimatedMemoryBytes:
-                  thread.estimatedMemoryBytes > 0
-                    ? thread.estimatedMemoryBytes
-                    : payload.snapshot.avg_thread_memory_bytes,
-              })),
             };
           default:
             return {};
@@ -1557,7 +1782,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             job_id: payload.job_id,
             agent_id: payload.agent_id,
             prompt: existing?.prompt ?? "",
-            status: payload.success ? "completed" : "failed",
+            status: resolveJobResultStatus(payload.success, payload.cancelled),
             message: payload.message,
             agent_display_name: payload.agent_display_name,
             agent_description: payload.agent_description,

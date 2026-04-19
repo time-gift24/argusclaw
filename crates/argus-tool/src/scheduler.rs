@@ -47,6 +47,8 @@ enum SchedulerInput {
 #[derive(Debug, Clone, Serialize)]
 pub struct SchedulerJobResult {
     pub success: bool,
+    #[serde(default)]
+    pub cancelled: bool,
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub token_usage: Option<argus_protocol::TokenUsage>,
@@ -446,6 +448,7 @@ mod tests {
     fn sample_result() -> SchedulerJobResult {
         SchedulerJobResult {
             success: true,
+            cancelled: false,
             message: "finished".to_string(),
             token_usage: None,
             agent_id: AgentId::new(7),
@@ -818,6 +821,7 @@ mod tests {
         let thread_result = ThreadJobResult {
             job_id: "job-8".to_string(),
             success: true,
+            cancelled: false,
             message: "ok".to_string(),
             token_usage: None,
             agent_id: AgentId::new(5),
@@ -827,6 +831,7 @@ mod tests {
 
         let scheduler_payload = SchedulerJobResult {
             success: thread_result.success,
+            cancelled: thread_result.cancelled,
             message: thread_result.message,
             token_usage: thread_result.token_usage,
             agent_id: thread_result.agent_id,
@@ -836,5 +841,6 @@ mod tests {
 
         assert_eq!(scheduler_payload.agent_id, AgentId::new(5));
         assert_eq!(scheduler_payload.message, "ok");
+        assert!(!scheduler_payload.cancelled);
     }
 }
