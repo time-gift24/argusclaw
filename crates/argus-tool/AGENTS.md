@@ -1,8 +1,48 @@
-# argus-tool AGENTS Guide
+# Argus-Tool
 
-先熟悉同目录 `CLAUDE.md`。
+> 特性：`ToolManager` 与内置 filesystem、shell、browser、scheduler、clap tools。
 
-以下内容补充 `ClapTool` 的设计细节和后续开发约束。
+## 作用域
+
+- 本文件适用于 `crates/argus-tool/` 及其子目录。
+
+## 核心职责
+
+- `ToolManager` 负责注册、发现、执行与风险查询
+- 内置文件工具：`glob`、`grep`、`read`、`list_dir`、`write_file`、`apply_patch`
+- 执行与网络工具：`shell`、`http`
+- 编排工具：`scheduler`
+- 浏览器工具：`ChromeTool`
+- CLI 适配：`ClapTool`
+
+## 关键模块
+
+- `src/lib.rs`
+- `src/scheduler.rs`
+- `src/clap_tool.rs`
+- `src/chrome/*`
+- `src/path_utils.rs`
+
+## 公开入口
+
+- `ToolManager`
+- 各内置 tool 类型
+- `SchedulerBackend`
+- `ClapTool`、`ClapExecutor`
+
+## 修改守则
+
+- tool schema、风险等级与执行语义必须在实现里自洽，不能只靠 prompt 约定
+- 任何会读写文件或执行命令的工具都要经过路径校验或明确的安全边界
+- 对外返回优先直接序列化底层库类型或原始 `serde_json::Value`；不要新增包装型 `*Summary` 输出。如果某能力只能靠自定义摘要才能暴露，优先不要暴露。
+- `NamedTool::execute` 的成功返回必须先建模为 `#[derive(Serialize)]` 的 typed response，再通过统一 helper 序列化成 `serde_json::Value`；不要在成功路径直接手写 `json!({ ... })`。
+- tool 的实现细节不要直接构造/返回 `ToolError`；每个 tool 先定义自己的 error 类型，在 `NamedTool` 边界通过 `From` / `Into` 统一转换。
+- Chrome 的共享范围是进程级单例：`ChromeManager` 对外是无 `session_id` 概念的共享浏览器服务。不要新增磁盘 session state，也不要在 tool schema、response 或 manager public API 中暴露 browser session id。
+- `scheduler` 与 `clap_tool` 仍有联合返回 / 动态返回场景，后续改动时按上述 typed response 与 tool-local error 规则单独收口。
+
+## ClapTool Design Standard
+
+以下内容约束 `ClapTool` 的设计细节和后续开发方式。
 
 ## ClapTool 是什么
 
@@ -150,8 +190,8 @@ pub trait ClapExecutor: Send + Sync {
 - 不要为了兼容模型输出，放宽 hidden/unknown 参数校验
 - 如果 schema 与执行行为不一致，优先修 schema 生成，而不是在 prompt 里打补丁
 - 新增功能时，先补回归测试，再改 `clap_tool.rs`
-- 其它内置 tool 的输出、error 与底层库透传规则，以同目录 `CLAUDE.md` 的修改守则为准；尤其不要新增自定义 `*Summary` 输出，成功返回要先用 typed response 建模。
-- Chrome 相关代码还要遵守同目录 `CLAUDE.md` 的 sessionless 约束：进程级共享 `ChromeManager`，不新增磁盘 session state，不向外部暴露 `session_id`。
+- 其它内置 tool 的输出、error 与底层库透传规则以上面的修改守则为准；尤其不要新增自定义 `*Summary` 输出，成功返回要先用 typed response 建模。
+- Chrome 相关代码还要遵守上面的 sessionless 约束：进程级共享 `ChromeManager`，不新增磁盘 session state，不向外部暴露 `session_id`。
 
 ## 一个简单心智模型
 

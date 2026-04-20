@@ -656,23 +656,18 @@ Expected: All tests pass.
 ### Task 15: Update crate documentation
 
 **Files:**
-- Modify: `crates/argus-template/CLAUDE.md`
 - Modify: `crates/argus-template/AGENTS.md`
-- Modify: `crates/argus-repository/CLAUDE.md` (if it references subagent methods)
-- Modify: `crates/argus-session/CLAUDE.md` (references scheduler behavior)
+- Modify: `crates/argus-repository/AGENTS.md` (if it references subagent methods)
+- Modify: `crates/argus-session/AGENTS.md` (references scheduler behavior)
 
-- [ ] **Step 1: Update CLAUDE.md files**
+- [ ] **Step 1: Update AGENTS.md files**
 
 Remove references to `AgentType`, `parent_agent_id`, subagent binding methods. Update descriptions to reflect the flat model with `subagent_names`.
 
-- [ ] **Step 2: Update AGENTS.md files**
-
-Sync any changes from CLAUDE.md updates.
-
-- [ ] **Step 3: Commit**
+- [ ] **Step 2: Commit**
 
 ```bash
-git add crates/*/CLAUDE.md crates/*/AGENTS.md
+git add crates/*/AGENTS.md
 git commit -m "docs: update crate documentation for flat subagent model"
 ```
 

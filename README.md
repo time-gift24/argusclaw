@@ -47,6 +47,5 @@ pnpm tauri dev
 
 ## 文档约定
 
-- 根目录与各 crate 维护本地 `CLAUDE.md`，记录职责边界与修改守则。
-- 同级 `AGENTS.md` 负责提醒代理先读最近的 `CLAUDE.md`；如果同目录还有额外规则，也放在 `AGENTS.md`。
-- 进入更深目录工作时，以更近的 `CLAUDE.md` / `AGENTS.md` 为准。
+- 根目录与各 crate 维护本地 `AGENTS.md`，记录职责边界、修改守则与补充不变量。
+- 进入更深目录工作时，以更近的 `AGENTS.md` 为准。
