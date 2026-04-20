@@ -24,8 +24,7 @@ use argus_protocol::llm::{ChatMessage, LlmProvider, Role};
 use argus_protocol::{
     AgentId, JobRuntimeSnapshot, JobRuntimeState, JobRuntimeSummary, MailboxMessage,
     MailboxMessageType, McpToolResolver, ProviderId, ProviderResolver, SessionId, ThreadEvent,
-    ThreadId, ThreadJobResult, ThreadMessage, ThreadPoolEventReason, ThreadPoolRuntimeSummary,
-    ThreadPoolSnapshot, ThreadPoolState, ThreadRuntimeStatus,
+    ThreadId, ThreadJobResult, ThreadMessage, ThreadPoolEventReason, ThreadRuntimeStatus,
 };
 use argus_repository::traits::{JobRepository, LlmProviderRepository, ThreadRepository};
 use argus_repository::types::{
@@ -33,8 +32,7 @@ use argus_repository::types::{
 };
 use argus_template::TemplateManager;
 use argus_thread_pool::{
-    PoolState as CoreThreadPoolState, RuntimeLifecycleChange, RuntimeSummary as CoreRuntimeSummary,
-    ThreadPool, ThreadPoolError,
+    RuntimeLifecycleChange, ThreadPool, ThreadPoolError,
 };
 use argus_tool::ToolManager;
 use chrono::Utc;
@@ -246,18 +244,6 @@ impl JobManager {
         JobError::ExecutionFailed(error.to_string())
     }
 
-    fn protocol_thread_pool_runtime(runtime: CoreRuntimeSummary) -> ThreadPoolRuntimeSummary {
-        ThreadPoolRuntimeSummary {
-            thread_id: runtime.thread_id,
-            session_id: None,
-            status: runtime.status,
-            estimated_memory_bytes: runtime.estimated_memory_bytes,
-            last_active_at: runtime.last_active_at,
-            recoverable: runtime.recoverable,
-            last_reason: runtime.last_reason,
-        }
-    }
-
     async fn resolve_provider_with_fallback(
         &self,
         provider_id: ProviderId,
@@ -291,24 +277,6 @@ impl JobManager {
             .lock()
             .expect("chat mailbox forwarder mutex poisoned");
         *slot = Some(forwarder);
-    }
-
-    /// Collect a point-in-time thread-pool snapshot.
-    pub fn thread_pool_snapshot(&self) -> ThreadPoolSnapshot {
-        self.thread_pool.collect_metrics()
-    }
-
-    /// Collect the authoritative thread-pool state.
-    pub fn thread_pool_state(&self) -> ThreadPoolState {
-        let core_state: CoreThreadPoolState = self.thread_pool.collect_state();
-        ThreadPoolState {
-            snapshot: core_state.snapshot,
-            runtimes: core_state
-                .runtimes
-                .into_iter()
-                .map(Self::protocol_thread_pool_runtime)
-                .collect(),
-        }
     }
 
     /// Collect the authoritative job-runtime state.

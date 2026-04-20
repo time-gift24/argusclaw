@@ -8,7 +8,7 @@ pub struct ToolOutputError {
     source: serde_json::Error,
 }
 
-pub fn serialize_tool_output<T: Serialize>(
+pub(crate) fn serialize_tool_output<T: Serialize>(
     tool_name: &'static str,
     value: T,
 ) -> Result<serde_json::Value, ToolOutputError> {

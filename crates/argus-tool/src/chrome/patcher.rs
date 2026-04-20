@@ -3,7 +3,7 @@ use super::error::ChromeToolError;
 const CDC_PREFIX: &[u8] = b"cdc_";
 const CDC_MARKER_SPAN: usize = 18;
 
-pub fn patch_cdc_tokens(mut bytes: Vec<u8>, fill: u8) -> Result<Vec<u8>, ChromeToolError> {
+pub(super) fn patch_cdc_tokens(mut bytes: Vec<u8>, fill: u8) -> Result<Vec<u8>, ChromeToolError> {
     let patch_len = CDC_PREFIX.len() + CDC_MARKER_SPAN;
     let mut index = 0usize;
     while index + CDC_PREFIX.len() <= bytes.len() {

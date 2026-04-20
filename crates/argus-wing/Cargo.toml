@@ -25,9 +25,6 @@ tracing = { workspace = true }
 
 # Utilities
 thiserror = { workspace = true }
-uuid = { workspace = true }
-chrono = { workspace = true }
-dashmap = { workspace = true }
 dirs = { workspace = true }
 
 # Internal crates

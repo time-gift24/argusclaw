@@ -3,13 +3,13 @@ use std::collections::HashSet;
 use super::error::ChromeToolError;
 use super::models::ChromeAction;
 
-pub struct ExplorePolicy {
+pub(super) struct ExplorePolicy {
     allowed: HashSet<ChromeAction>,
 }
 
 impl ExplorePolicy {
     #[must_use]
-    pub fn readonly() -> Self {
+    pub(super) fn readonly() -> Self {
         let allowed = HashSet::from([
             ChromeAction::Install,
             ChromeAction::Navigate,
@@ -25,7 +25,7 @@ impl ExplorePolicy {
     }
 
     #[must_use]
-    pub fn interactive() -> Self {
+    pub(super) fn interactive() -> Self {
         let allowed = HashSet::from([
             ChromeAction::Install,
             ChromeAction::Navigate,
@@ -44,7 +44,7 @@ impl ExplorePolicy {
         Self { allowed }
     }
 
-    pub fn validate_action(&self, action: ChromeAction) -> Result<(), ChromeToolError> {
+    pub(super) fn validate_action(&self, action: ChromeAction) -> Result<(), ChromeToolError> {
         if self.allowed.contains(&action) {
             Ok(())
         } else {

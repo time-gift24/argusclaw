@@ -421,8 +421,6 @@ dependencies = [
  "argus-thread-pool",
  "argus-tool",
  "async-trait",
- "chrono",
- "dashmap",
  "dirs",
  "serde",
  "serde_json",
@@ -431,7 +429,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
- "uuid",
 ]
 
 [[package]]

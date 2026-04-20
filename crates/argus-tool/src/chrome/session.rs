@@ -15,7 +15,7 @@ use super::error::ChromeToolError;
 use super::models::PageMetadata;
 
 #[async_trait]
-pub trait BrowserSession: Send + Sync {
+pub(super) trait BrowserSession: Send + Sync {
     async fn extract_text(&self, selector: Option<&str>) -> Result<String, ChromeToolError>;
     async fn shutdown(&self) -> Result<(), ChromeToolError>;
     async fn query(&self, _by: By) -> Result<ElementQuery, ChromeToolError> {
@@ -61,10 +61,10 @@ struct TabState {
 }
 
 #[derive(Clone)]
-pub struct ChromeSession {
-    pub session_id: String,
-    pub current_url: String,
-    pub page_title: String,
+pub(super) struct ChromeSession {
+    pub(super) session_id: String,
+    pub(super) current_url: String,
+    pub(super) page_title: String,
     interaction: Arc<dyn BrowserSession>,
     tab_state: Arc<Mutex<TabState>>,
     next_tab_counter: Arc<AtomicU64>,
@@ -82,7 +82,7 @@ impl fmt::Debug for ChromeSession {
 
 impl ChromeSession {
     #[must_use]
-    pub fn new(
+    pub(super) fn new(
         session_id: String,
         current_url: String,
         page_title: String,
@@ -99,16 +99,16 @@ impl ChromeSession {
     }
 
     #[must_use]
-    pub fn interaction(&self) -> Arc<dyn BrowserSession> {
+    pub(super) fn interaction(&self) -> Arc<dyn BrowserSession> {
         Arc::clone(&self.interaction)
     }
 
-    pub fn update_metadata(&mut self, metadata: PageMetadata) {
+    pub(super) fn update_metadata(&mut self, metadata: PageMetadata) {
         self.current_url = metadata.final_url;
         self.page_title = metadata.page_title;
     }
 
-    pub async fn register_initial_tab(&self, window_handle: String) {
+    pub(super) async fn register_initial_tab(&self, window_handle: String) {
         let mut state = self.tab_state.lock().await;
         let tab_id = self.ensure_tab_for_window(
             &mut state,
@@ -119,7 +119,7 @@ impl ChromeSession {
         state.active_tab_id = Some(tab_id);
     }
 
-    pub async fn create_new_tab(
+    pub(super) async fn create_new_tab(
         &self,
         url: &str,
     ) -> Result<super::models::NewTabResult, ChromeToolError> {
@@ -143,7 +143,7 @@ impl ChromeSession {
         })
     }
 
-    pub async fn switch_tab(&self, tab_id: &str) -> Result<PageMetadata, ChromeToolError> {
+    pub(super) async fn switch_tab(&self, tab_id: &str) -> Result<PageMetadata, ChromeToolError> {
         let window_handle = self
             .tab_state
             .lock()
@@ -167,7 +167,7 @@ impl ChromeSession {
         Ok(metadata)
     }
 
-    pub async fn close_tab(&self, tab_id: &str) -> Result<PageMetadata, ChromeToolError> {
+    pub(super) async fn close_tab(&self, tab_id: &str) -> Result<PageMetadata, ChromeToolError> {
         let (window_handle, was_active, previous_active_handle) = {
             let state = self.tab_state.lock().await;
             if state.tabs.len() <= 1 {
@@ -220,7 +220,7 @@ impl ChromeSession {
         Ok(metadata)
     }
 
-    pub async fn list_tabs(&self) -> Result<Vec<super::models::TabInfo>, ChromeToolError> {
+    pub(super) async fn list_tabs(&self) -> Result<Vec<super::models::TabInfo>, ChromeToolError> {
         let windows = self.interaction.list_windows().await?;
         let active_window_handle = self.interaction.current_window_handle().await.ok();
 
@@ -383,7 +383,7 @@ impl ChromeDriverProcess {
     }
 }
 
-pub struct ManagedWebDriverSession {
+pub(super) struct ManagedWebDriverSession {
     driver: Mutex<Option<WebDriver>>,
 }
 
@@ -396,7 +396,7 @@ impl fmt::Debug for ManagedWebDriverSession {
 
 impl ManagedWebDriverSession {
     #[must_use]
-    pub fn new(driver: WebDriver) -> Self {
+    pub(super) fn new(driver: WebDriver) -> Self {
         Self {
             driver: Mutex::new(Some(driver)),
         }

@@ -54,19 +54,19 @@ fn create_directory(path: &Path) -> Result<(), ChromeToolError> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InstalledDriver {
-    pub original_driver: PathBuf,
-    pub patched_driver: PathBuf,
-    pub driver_version: String,
-    pub cache_hit: bool,
+pub(super) struct InstalledDriver {
+    pub(super) original_driver: PathBuf,
+    pub(super) patched_driver: PathBuf,
+    pub(super) driver_version: String,
+    pub(super) cache_hit: bool,
 }
 
 #[async_trait]
-pub trait DriverDownloader: Send + Sync {
+pub(super) trait DriverDownloader: Send + Sync {
     async fn fetch(&self, url: &str) -> Result<Vec<u8>, ChromeToolError>;
 }
 
-pub struct ChromeInstaller {
+pub(super) struct ChromeInstaller {
     paths: ChromePaths,
     downloader: Arc<dyn DriverDownloader>,
     install_lock: Mutex<()>,
@@ -74,7 +74,7 @@ pub struct ChromeInstaller {
 
 impl ChromeInstaller {
     #[must_use]
-    pub fn new(paths: ChromePaths, downloader: Arc<dyn DriverDownloader>) -> Self {
+    pub(super) fn new(paths: ChromePaths, downloader: Arc<dyn DriverDownloader>) -> Self {
         Self {
             paths,
             downloader,
@@ -82,7 +82,7 @@ impl ChromeInstaller {
         }
     }
 
-    pub async fn ensure_driver(
+    pub(super) async fn ensure_driver(
         &self,
         chrome_version: &str,
     ) -> Result<InstalledDriver, ChromeToolError> {
@@ -133,7 +133,7 @@ impl ChromeInstaller {
         })
     }
 
-    pub fn find_installed_driver(
+    pub(super) fn find_installed_driver(
         &self,
         chrome_version: &str,
     ) -> Result<Option<InstalledDriver>, ChromeToolError> {
@@ -224,13 +224,13 @@ enum DriverVersionSource {
     LegacyLatestRelease,
 }
 
-pub struct ReqwestDriverDownloader {
+pub(super) struct ReqwestDriverDownloader {
     client: Client,
 }
 
 impl ReqwestDriverDownloader {
     #[must_use]
-    pub fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             client: Client::new(),
         }
