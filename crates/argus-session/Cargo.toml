@@ -9,6 +9,7 @@ argus-protocol = { path = "../argus-protocol" }
 argus-repository = { path = "../argus-repository" }
 argus-template = { path = "../argus-template" }
 argus-agent = { path = "../argus-agent" }
+argus-thread-pool = { path = "../argus-thread-pool" }
 argus-tool = { path = "../argus-tool" }
 argus-llm = { path = "../argus-llm" }
 argus-job = { path = "../argus-job" }

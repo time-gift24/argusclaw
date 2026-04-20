@@ -211,6 +211,7 @@ dependencies = [
  "argus-protocol",
  "argus-repository",
  "argus-template",
+ "argus-thread-pool",
  "argus-tool",
  "async-trait",
  "chrono",
@@ -320,6 +321,7 @@ dependencies = [
  "argus-protocol",
  "argus-repository",
  "argus-template",
+ "argus-thread-pool",
  "argus-tool",
  "async-trait",
  "chrono",
@@ -364,6 +366,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "argus-thread-pool"
+version = "0.1.0"
+dependencies = [
+ "argus-agent",
+ "argus-protocol",
+ "async-trait",
+ "chrono",
+ "rust_decimal",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "argus-tool"
 version = "0.1.0"
 dependencies = [
@@ -403,6 +418,7 @@ dependencies = [
  "argus-repository",
  "argus-session",
  "argus-template",
+ "argus-thread-pool",
  "argus-tool",
  "async-trait",
  "chrono",

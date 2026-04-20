@@ -304,13 +304,9 @@ export type ThreadRuntimeStatus =
   | "cooling"
   | "evicted";
 
-export type ThreadPoolRuntimeKind = "chat" | "job";
-
 export interface ThreadPoolRuntimeSummary {
   thread_id: string;
-  kind: ThreadPoolRuntimeKind;
   session_id: string | null;
-  job_id: string | null;
   status: ThreadRuntimeStatus;
   estimated_memory_bytes: number;
   last_active_at: string | null;
@@ -337,6 +333,37 @@ export interface ThreadPoolSnapshot {
 export interface ThreadPoolState {
   snapshot: ThreadPoolSnapshot;
   runtimes: ThreadPoolRuntimeSummary[];
+}
+
+export interface JobRuntimeSummary {
+  thread_id: string;
+  job_id: string;
+  status: ThreadRuntimeStatus;
+  estimated_memory_bytes: number;
+  last_active_at: string | null;
+  recoverable: boolean;
+  last_reason: ThreadPoolEventReason | null;
+}
+
+export interface JobRuntimeSnapshot {
+  max_threads: number;
+  active_threads: number;
+  queued_threads: number;
+  running_threads: number;
+  cooling_threads: number;
+  evicted_threads: number;
+  estimated_memory_bytes: number;
+  peak_estimated_memory_bytes: number;
+  process_memory_bytes: number | null;
+  peak_process_memory_bytes: number | null;
+  resident_thread_count: number;
+  avg_thread_memory_bytes: number;
+  captured_at: string;
+}
+
+export interface JobRuntimeState {
+  snapshot: JobRuntimeSnapshot;
+  runtimes: JobRuntimeSummary[];
 }
 
 export type ThreadPoolEventReason =
@@ -397,4 +424,8 @@ export const chat = {
 export const threadPool = {
   getSnapshot: () => invoke<ThreadPoolSnapshot>("get_thread_pool_snapshot"),
   getState: () => invoke<ThreadPoolState>("get_thread_pool_state"),
+};
+
+export const jobRuntime = {
+  getState: () => invoke<JobRuntimeState>("get_job_runtime_state"),
 };

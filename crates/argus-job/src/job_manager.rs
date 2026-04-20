@@ -12,6 +12,9 @@ use std::sync::{Arc, Mutex as StdMutex, Weak};
 
 #[cfg(test)]
 use argus_agent::TurnRecord;
+use argus_agent::thread_bootstrap::{
+    build_thread_config, cleanup_trace_dir, hydrate_turn_log_state, recover_and_validate_metadata,
+};
 use argus_agent::thread_trace_store::{
     ThreadTraceKind, ThreadTraceMetadata, child_thread_base_dir, find_job_thread_base_dir,
     list_direct_child_threads, persist_thread_metadata, recover_thread_metadata,
@@ -21,21 +24,24 @@ use argus_protocol::llm::{ChatMessage, LlmProvider, Role};
 use argus_protocol::{
     AgentId, JobRuntimeSnapshot, JobRuntimeState, JobRuntimeSummary, MailboxMessage,
     MailboxMessageType, McpToolResolver, ProviderId, ProviderResolver, SessionId, ThreadEvent,
-    ThreadId, ThreadJobResult, ThreadMessage, ThreadPoolEventReason, ThreadPoolSnapshot,
-    ThreadPoolState, ThreadRuntimeStatus,
+    ThreadId, ThreadJobResult, ThreadMessage, ThreadPoolEventReason, ThreadPoolRuntimeSummary,
+    ThreadPoolSnapshot, ThreadPoolState, ThreadRuntimeStatus,
 };
 use argus_repository::traits::{JobRepository, LlmProviderRepository, ThreadRepository};
 use argus_repository::types::{
     AgentId as RepoAgentId, JobId, JobRecord, JobResult, JobStatus, JobType, ThreadRecord,
 };
 use argus_template::TemplateManager;
+use argus_thread_pool::{
+    PoolState as CoreThreadPoolState, RuntimeLifecycleChange, RuntimeSummary as CoreRuntimeSummary,
+    ThreadPool, ThreadPoolError,
+};
 use argus_tool::ToolManager;
 use chrono::Utc;
 use tokio::sync::{RwLock, broadcast};
 use uuid::Uuid;
 
 use crate::error::JobError;
-use crate::thread_pool::{RuntimeLifecycleChange, ThreadPool, ThreadPoolPersistence};
 use crate::types::{JobExecutionRequest, RecoveredChildJob};
 
 #[derive(Debug, Clone)]
@@ -89,6 +95,13 @@ pub enum JobLookup {
 #[derive(Clone)]
 pub struct JobManager {
     thread_pool: Arc<ThreadPool>,
+    template_manager: Arc<TemplateManager>,
+    provider_resolver: Arc<dyn ProviderResolver>,
+    tool_manager: Arc<ToolManager>,
+    trace_dir: PathBuf,
+    mcp_tool_resolver: Arc<StdMutex<Option<Arc<dyn McpToolResolver>>>>,
+    thread_repository: Option<Arc<dyn ThreadRepository>>,
+    provider_repository: Option<Arc<dyn LlmProviderRepository>>,
     tracked_jobs: Arc<StdMutex<TrackedJobsStore>>,
     job_runtime_store: Arc<StdMutex<JobRuntimeStore>>,
     chat_mailbox_forwarder: Arc<StdMutex<Option<Arc<ChatMailboxForwarder>>>>,
@@ -112,40 +125,44 @@ impl JobManager {
 
     /// Create a new JobManager.
     pub fn new(
+        thread_pool: Arc<ThreadPool>,
         template_manager: Arc<TemplateManager>,
         provider_resolver: Arc<dyn ProviderResolver>,
         tool_manager: Arc<ToolManager>,
         trace_dir: PathBuf,
     ) -> Self {
-        Self::new_with_persistence(
+        Self::new_with_repositories(
+            thread_pool,
             template_manager,
             provider_resolver,
             tool_manager,
             trace_dir,
+            None,
             None,
             None,
         )
     }
 
-    /// Create a new JobManager with optional persistent thread-pool backing.
+    /// Create a new JobManager with optional repository backing.
     pub fn new_with_persistence(
+        thread_pool: Arc<ThreadPool>,
         template_manager: Arc<TemplateManager>,
         provider_resolver: Arc<dyn ProviderResolver>,
         tool_manager: Arc<ToolManager>,
         trace_dir: PathBuf,
-        thread_pool_persistence: Option<ThreadPoolPersistence>,
         job_repository: Option<Arc<dyn JobRepository>>,
+        thread_repository: Option<Arc<dyn ThreadRepository>>,
+        provider_repository: Option<Arc<dyn LlmProviderRepository>>,
     ) -> Self {
-        let thread_pool = Arc::new(ThreadPool::with_persistence(
+        let manager = Self {
+            thread_pool,
             template_manager,
             provider_resolver,
             tool_manager,
             trace_dir,
-            thread_pool_persistence,
-        ));
-
-        let manager = Self {
-            thread_pool,
+            mcp_tool_resolver: Arc::new(StdMutex::new(None)),
+            thread_repository,
+            provider_repository,
             tracked_jobs: Arc::new(StdMutex::new(TrackedJobsStore::default())),
             job_runtime_store: Arc::new(StdMutex::new(JobRuntimeStore::default())),
             chat_mailbox_forwarder: Arc::new(StdMutex::new(None)),
@@ -158,24 +175,24 @@ impl JobManager {
     /// Create a new JobManager wired with repository-backed persistence.
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_repositories(
+        thread_pool: Arc<ThreadPool>,
         template_manager: Arc<TemplateManager>,
         provider_resolver: Arc<dyn ProviderResolver>,
         tool_manager: Arc<ToolManager>,
         trace_dir: PathBuf,
-        job_repository: Arc<dyn JobRepository>,
-        thread_repository: Arc<dyn ThreadRepository>,
-        provider_repository: Arc<dyn LlmProviderRepository>,
+        job_repository: Option<Arc<dyn JobRepository>>,
+        thread_repository: Option<Arc<dyn ThreadRepository>>,
+        provider_repository: Option<Arc<dyn LlmProviderRepository>>,
     ) -> Self {
         Self::new_with_persistence(
+            thread_pool,
             template_manager,
             provider_resolver,
             tool_manager,
             trace_dir,
-            Some(ThreadPoolPersistence::new(
-                thread_repository,
-                provider_repository,
-            )),
-            Some(job_repository),
+            job_repository,
+            thread_repository,
+            provider_repository,
         )
     }
 
@@ -204,7 +221,59 @@ impl JobManager {
     }
 
     pub fn set_mcp_tool_resolver(&self, resolver: Option<Arc<dyn McpToolResolver>>) {
-        self.thread_pool.set_mcp_tool_resolver(resolver);
+        *self
+            .mcp_tool_resolver
+            .lock()
+            .expect("mcp resolver mutex poisoned") = resolver;
+    }
+
+    fn current_mcp_tool_resolver(&self) -> Option<Arc<dyn McpToolResolver>> {
+        self.mcp_tool_resolver
+            .lock()
+            .expect("mcp resolver mutex poisoned")
+            .clone()
+    }
+
+    fn thread_repository(&self) -> Option<Arc<dyn ThreadRepository>> {
+        self.thread_repository.clone()
+    }
+
+    fn provider_repository(&self) -> Option<Arc<dyn LlmProviderRepository>> {
+        self.provider_repository.clone()
+    }
+
+    fn map_pool_error(error: ThreadPoolError) -> JobError {
+        JobError::ExecutionFailed(error.to_string())
+    }
+
+    fn protocol_thread_pool_runtime(runtime: CoreRuntimeSummary) -> ThreadPoolRuntimeSummary {
+        ThreadPoolRuntimeSummary {
+            thread_id: runtime.thread_id,
+            session_id: None,
+            status: runtime.status,
+            estimated_memory_bytes: runtime.estimated_memory_bytes,
+            last_active_at: runtime.last_active_at,
+            recoverable: runtime.recoverable,
+            last_reason: runtime.last_reason,
+        }
+    }
+
+    async fn resolve_provider_with_fallback(
+        &self,
+        provider_id: ProviderId,
+        model: Option<&str>,
+    ) -> argus_protocol::Result<Arc<dyn LlmProvider>> {
+        match model {
+            Some(model) => match self
+                .provider_resolver
+                .resolve_with_model(provider_id, model)
+                .await
+            {
+                Ok(provider) => Ok(provider),
+                Err(_) => self.provider_resolver.resolve(provider_id).await,
+            },
+            None => self.provider_resolver.resolve(provider_id).await,
+        }
     }
 
     pub fn set_chat_mailbox_forwarder<F, Fut>(&self, forwarder: F)
@@ -231,7 +300,15 @@ impl JobManager {
 
     /// Collect the authoritative thread-pool state.
     pub fn thread_pool_state(&self) -> ThreadPoolState {
-        self.thread_pool.collect_state()
+        let core_state: CoreThreadPoolState = self.thread_pool.collect_state();
+        ThreadPoolState {
+            snapshot: core_state.snapshot,
+            runtimes: core_state
+                .runtimes
+                .into_iter()
+                .map(Self::protocol_thread_pool_runtime)
+                .collect(),
+        }
     }
 
     /// Collect the authoritative job-runtime state.
@@ -437,9 +514,9 @@ impl JobManager {
         let thread_pool = Arc::downgrade(&self.thread_pool);
         let job_runtime_store = Arc::downgrade(&self.job_runtime_store);
         self.thread_pool
-            .set_runtime_lifecycle_observer(Some(Arc::new(move |change| {
+            .add_runtime_lifecycle_observer(Arc::new(move |change| {
                 Self::handle_runtime_lifecycle_change(&thread_pool, &job_runtime_store, change);
-            })));
+            }));
     }
 
     fn handle_runtime_lifecycle_change(
@@ -456,6 +533,7 @@ impl JobManager {
 
         let runtime = match change {
             RuntimeLifecycleChange::Evicted(runtime) => runtime,
+            RuntimeLifecycleChange::Cooling(_) => return,
         };
         let (parent_thread_id, runtime) = {
             let mut store = job_runtime_store
@@ -553,7 +631,7 @@ impl JobManager {
             return Ok(Some(thread_id));
         }
 
-        if self.thread_pool.persistence().is_none() {
+        if self.thread_repository.is_none() {
             return Ok(None);
         }
         let Some(job_repository) = self.job_repository.as_ref() else {
@@ -1053,7 +1131,10 @@ impl JobManager {
             } else {
                 match self
                     .thread_pool
-                    .deliver_mailbox_message(execution_thread_id, task_assignment)
+                    .deliver_thread_message(
+                        execution_thread_id,
+                        Self::route_mailbox_message(task_assignment),
+                    )
                     .await
                 {
                     Ok(()) => {
@@ -1134,26 +1215,6 @@ impl JobManager {
         thread_id: ThreadId,
         pipe_tx: &broadcast::Sender<ThreadEvent>,
     ) -> Result<Arc<RwLock<argus_agent::Thread>>, JobError> {
-        if let Some(thread) = self.thread_pool.loaded_runtime(&thread_id) {
-            return Ok(thread);
-        }
-
-        let load_mutex = self.thread_pool.runtime_load_mutex(&thread_id)?;
-        let _load_guard = load_mutex.lock().await;
-        if let Some(thread) = self.thread_pool.loaded_runtime(&thread_id) {
-            return Ok(thread);
-        }
-
-        self.thread_pool.ensure_runtime_slot(&thread_id).await?;
-        self.thread_pool.register_runtime(
-            thread_id,
-            ThreadRuntimeStatus::Loading,
-            0,
-            Some(Utc::now().to_rfc3339()),
-            true,
-            None,
-            None,
-        );
         let runtime = self.upsert_job_runtime_summary(
             thread_id,
             request.job_id.clone(),
@@ -1166,60 +1227,51 @@ impl JobManager {
         Self::emit_job_runtime_updated(pipe_tx, &runtime);
         self.emit_job_runtime_metrics(pipe_tx);
 
-        let thread = match self.build_job_thread(request, thread_id).await {
-            Ok(thread) => thread,
-            Err(error) => {
-                self.thread_pool.reset_runtime_after_load_failure(
-                    &thread_id,
-                    ThreadPoolEventReason::ExecutionFailed,
-                );
-                let runtime = self.upsert_job_runtime_summary(
+        let manager = self.clone();
+        let request_for_build = request.clone();
+        let job_id = request.job_id.clone();
+        let thread = if let Some(thread) = self.thread_pool.loaded_runtime(&thread_id) {
+            thread
+        } else {
+            match self
+                .thread_pool
+                .load_runtime_with_builder(
                     thread_id,
-                    request.job_id.clone(),
-                    ThreadRuntimeStatus::Inactive,
-                    0,
-                    Some(Utc::now().to_rfc3339()),
+                    "job thread",
+                    false,
+                    None,
                     true,
-                    Some(ThreadPoolEventReason::ExecutionFailed),
-                );
-                Self::emit_job_runtime_updated(pipe_tx, &runtime);
-                self.emit_job_runtime_metrics(pipe_tx);
-                return Err(error);
+                    move || {
+                        let manager = manager.clone();
+                        let request = request_for_build.clone();
+                        async move {
+                            manager
+                                .build_job_thread(&request, thread_id)
+                                .await
+                                .map_err(|error| ThreadPoolError::ExecutionFailed(error.to_string()))
+                        }
+                    },
+                )
+                .await
+            {
+                Ok(thread) => thread,
+                Err(error) => {
+                    let error = Self::map_pool_error(error);
+                    let runtime = self.upsert_job_runtime_summary(
+                        thread_id,
+                        job_id,
+                        ThreadRuntimeStatus::Inactive,
+                        0,
+                        Some(Utc::now().to_rfc3339()),
+                        true,
+                        Some(ThreadPoolEventReason::ExecutionFailed),
+                    );
+                    Self::emit_job_runtime_updated(pipe_tx, &runtime);
+                    self.emit_job_runtime_metrics(pipe_tx);
+                    return Err(error);
+                }
             }
         };
-        let mut runtime_rx = {
-            let guard = thread.read().await;
-            guard.subscribe()
-        };
-        argus_agent::Thread::spawn_reactor(Arc::clone(&thread)).await;
-        if let Err(error) = self
-            .thread_pool
-            .attach_runtime(
-                thread_id,
-                Arc::clone(&thread),
-                &mut runtime_rx,
-                "job thread",
-                false,
-            )
-            .await
-        {
-            self.thread_pool.reset_runtime_after_load_failure(
-                &thread_id,
-                ThreadPoolEventReason::ExecutionFailed,
-            );
-            let runtime = self.upsert_job_runtime_summary(
-                thread_id,
-                request.job_id.clone(),
-                ThreadRuntimeStatus::Inactive,
-                0,
-                Some(Utc::now().to_rfc3339()),
-                true,
-                Some(ThreadPoolEventReason::ExecutionFailed),
-            );
-            Self::emit_job_runtime_updated(pipe_tx, &runtime);
-            self.emit_job_runtime_metrics(pipe_tx);
-            return Err(error);
-        }
         Ok(thread)
     }
 
@@ -1228,10 +1280,8 @@ impl JobManager {
         request: &JobExecutionRequest,
         thread_id: ThreadId,
     ) -> Result<Arc<RwLock<argus_agent::Thread>>, JobError> {
-        let persistence = self.thread_pool.persistence();
-        let thread_record = if let Some(persistence) = persistence.as_ref() {
-            persistence
-                .thread_repository()
+        let thread_record = if let Some(thread_repository) = self.thread_repository() {
+            thread_repository
                 .get_thread(&thread_id)
                 .await
                 .map_err(|err| {
@@ -1240,12 +1290,12 @@ impl JobManager {
         } else {
             None
         };
-        let base_dir = find_job_thread_base_dir(self.thread_pool.trace_dir(), thread_id)
+        let base_dir = find_job_thread_base_dir(&self.trace_dir, thread_id)
             .await
             .map_err(|err| JobError::ExecutionFailed(err.to_string()))?;
-        let metadata =
-            ThreadPool::recover_and_validate_metadata(&base_dir, thread_id, ThreadTraceKind::Job)
-                .await?;
+        let metadata = recover_and_validate_metadata(&base_dir, thread_id, ThreadTraceKind::Job)
+            .await
+            .map_err(|err| JobError::ExecutionFailed(err.to_string()))?;
         if metadata.parent_thread_id != Some(request.originating_thread_id) {
             return Err(JobError::ExecutionFailed(format!(
                 "job thread {} is bound to parent {:?}, not {}",
@@ -1261,26 +1311,21 @@ impl JobManager {
         let agent_record = metadata.agent_snapshot.clone();
         let provider = if let Some(thread_record) = thread_record.as_ref() {
             let provider_id = ProviderId::new(thread_record.provider_id.into_inner());
-            self.thread_pool
-                .resolve_provider_with_fallback(
-                    provider_id,
-                    thread_record.model_override.as_deref(),
-                )
-                .await
+            self.resolve_provider_with_fallback(
+                provider_id,
+                thread_record.model_override.as_deref(),
+            )
+            .await
         } else if let Some(provider_id) = agent_record.provider_id {
-            self.thread_pool
-                .resolve_provider_with_fallback(provider_id, agent_record.model_id.as_deref())
+            self.resolve_provider_with_fallback(provider_id, agent_record.model_id.as_deref())
                 .await
         } else {
-            self.thread_pool
-                .provider_resolver()
-                .default_provider()
-                .await
+            self.provider_resolver.default_provider().await
         }
         .map_err(|err| JobError::ExecutionFailed(format!("failed to resolve provider: {err}")))?;
 
-        let config =
-            ThreadPool::build_thread_config(base_dir.clone(), provider.model_name().to_string())?;
+        let config = build_thread_config(base_dir.clone(), provider.model_name().to_string())
+            .map_err(|err| JobError::ExecutionFailed(err.to_string()))?;
         let plan_store = FilePlanStore::new(base_dir.clone());
         let thread_title = thread_record
             .as_ref()
@@ -1292,11 +1337,11 @@ impl JobManager {
             .agent_record(Arc::new(agent_record))
             .title(thread_title)
             .provider(provider.clone())
-            .tool_manager(self.thread_pool.tool_manager())
+            .tool_manager(Arc::clone(&self.tool_manager))
             .compactor(Arc::new(LlmThreadCompactor::new(provider)))
             .plan_store(plan_store)
             .config(config);
-        if let Some(resolver) = self.thread_pool.current_mcp_tool_resolver() {
+        if let Some(resolver) = self.current_mcp_tool_resolver() {
             builder = builder.mcp_tool_resolver(resolver);
         }
         let thread = builder
@@ -1310,8 +1355,9 @@ impl JobManager {
         );
 
         if let Some(thread_record) = thread_record {
-            ThreadPool::hydrate_turn_log_state(&thread, &base_dir, &thread_record.updated_at)
-                .await?;
+            hydrate_turn_log_state(&thread, &base_dir, &thread_record.updated_at)
+                .await
+                .map_err(|err| JobError::ExecutionFailed(err.to_string()))?;
         }
 
         Ok(thread)
@@ -1326,14 +1372,23 @@ impl JobManager {
         thread_id: &ThreadId,
         thread: &Arc<RwLock<argus_agent::Thread>>,
     ) {
-        let persistence = self.thread_pool.persistence();
-        ThreadPool::persist_thread_stats_with_persistence(
-            persistence.as_ref(),
-            thread_id,
-            thread,
-            "job thread",
-        )
-        .await;
+        let Some(thread_repository) = self.thread_repository() else {
+            return;
+        };
+        let (token_count, turn_count) = {
+            let guard = thread.read().await;
+            (guard.token_count(), guard.turn_count())
+        };
+        if let Err(error) = thread_repository
+            .update_thread_stats(thread_id, token_count, turn_count)
+            .await
+        {
+            tracing::warn!(
+                thread_id = %thread_id,
+                error = %error,
+                "Failed to persist job thread stats"
+            );
+        }
     }
 
     async fn persist_job_status(
@@ -1413,14 +1468,15 @@ impl JobManager {
         request: &JobExecutionRequest,
         now: &str,
     ) -> Result<ThreadId, JobError> {
-        let thread_pool_persistence = self.thread_pool.persistence();
-        if thread_pool_persistence.is_none() || self.job_repository.is_none() {
+        if self.thread_repository.is_none()
+            || self.provider_repository.is_none()
+            || self.job_repository.is_none()
+        {
             return Ok(ThreadId::new());
         }
 
         let agent_record = self
-            .thread_pool
-            .template_manager()
+            .template_manager
             .get(request.agent_id)
             .await
             .map_err(|err| {
@@ -1439,7 +1495,10 @@ impl JobManager {
             .await
             .map_err(|err| JobError::ExecutionFailed(err.to_string()))?;
 
-        let Some(persistence) = thread_pool_persistence.as_ref() else {
+        let Some(thread_repository) = self.thread_repository() else {
+            return Ok(ThreadId::new());
+        };
+        let Some(provider_repository) = self.provider_repository() else {
             return Ok(ThreadId::new());
         };
         let Some(job_repository) = self.job_repository.as_ref() else {
@@ -1452,8 +1511,7 @@ impl JobManager {
         })?;
         let existing_thread_id = existing_job.as_ref().and_then(|job| job.thread_id);
         let existing_thread = if let Some(thread_id) = existing_thread_id {
-            persistence
-                .thread_repository()
+            thread_repository
                 .get_thread(&thread_id)
                 .await
                 .map_err(|err| {
@@ -1467,10 +1525,9 @@ impl JobManager {
         let should_cleanup_trace_dir = existing_thread_id.is_none();
         let default_base_dir = child_thread_base_dir(&parent_base_dir, thread_id);
         let base_dir = if existing_thread_id.is_some() {
-            let existing_base_dir =
-                find_job_thread_base_dir(self.thread_pool.trace_dir(), thread_id)
-                    .await
-                    .map_err(|err| JobError::ExecutionFailed(err.to_string()))?;
+            let existing_base_dir = find_job_thread_base_dir(&self.trace_dir, thread_id)
+                .await
+                .map_err(|err| JobError::ExecutionFailed(err.to_string()))?;
             if existing_base_dir != default_base_dir {
                 return Err(JobError::ExecutionFailed(format!(
                     "job thread {} cannot move between parents without trace migration",
@@ -1519,8 +1576,7 @@ impl JobManager {
             .map(|id| argus_protocol::LlmProviderId::new(id.inner()));
         let provider_id = match template_provider_id {
             Some(provider_id) => provider_id,
-            None => persistence
-                .provider_repository()
+            None => provider_repository
                 .get_default_provider_id()
                 .await
                 .map_err(|err| {
@@ -1553,13 +1609,9 @@ impl JobManager {
         thread_record.template_id = Some(RepoAgentId::new(request.agent_id.inner()));
         thread_record.model_override = model_override;
         thread_record.updated_at = now.to_string();
-        if let Err(err) = persistence
-            .thread_repository()
-            .upsert_thread(&thread_record)
-            .await
-        {
+        if let Err(err) = thread_repository.upsert_thread(&thread_record).await {
             if should_cleanup_trace_dir {
-                ThreadPool::cleanup_trace_dir(&base_dir).await;
+                cleanup_trace_dir(&base_dir).await;
             }
             return Err(JobError::ExecutionFailed(format!(
                 "failed to persist thread record: {err}"
@@ -1572,11 +1624,14 @@ impl JobManager {
                     Self::persist_existing_job_binding(job_repository, &job_id, thread_id).await
             {
                 if should_cleanup_trace_dir {
-                    ThreadPool::cleanup_trace_dir(&base_dir).await;
+                    cleanup_trace_dir(&base_dir).await;
                 }
-                return Err(
-                    Self::rollback_thread_record(persistence, thread_id, format!("{err}")).await,
-                );
+                return Err(Self::rollback_thread_record(
+                    &thread_repository,
+                    thread_id,
+                    format!("{err}"),
+                )
+                .await);
             }
             return Ok(thread_id);
         }
@@ -1605,10 +1660,10 @@ impl JobManager {
 
         if let Err(err) = job_repository.create(&job_record).await {
             if should_cleanup_trace_dir {
-                ThreadPool::cleanup_trace_dir(&base_dir).await;
+                cleanup_trace_dir(&base_dir).await;
             }
             return Err(Self::rollback_thread_record(
-                persistence,
+                &thread_repository,
                 thread_id,
                 format!("failed to create job record: {err}"),
             )
@@ -1632,15 +1687,11 @@ impl JobManager {
     }
 
     async fn rollback_thread_record(
-        persistence: &ThreadPoolPersistence,
+        thread_repository: &Arc<dyn ThreadRepository>,
         thread_id: ThreadId,
         message: String,
     ) -> JobError {
-        match persistence
-            .thread_repository()
-            .delete_thread(&thread_id)
-            .await
-        {
+        match thread_repository.delete_thread(&thread_id).await {
             Ok(_) => JobError::ExecutionFailed(message),
             Err(cleanup_err) => JobError::ExecutionFailed(format!(
                 "{message}; failed to roll back thread record: {cleanup_err}"
@@ -1652,8 +1703,7 @@ impl JobManager {
         &self,
         thread_id: ThreadId,
     ) -> Result<Option<ThreadTraceMetadata>, JobError> {
-        let base_dir = match find_job_thread_base_dir(self.thread_pool.trace_dir(), thread_id).await
-        {
+        let base_dir = match find_job_thread_base_dir(&self.trace_dir, thread_id).await {
             Ok(base_dir) => base_dir,
             Err(argus_agent::error::TurnLogError::ThreadMetadataNotFound(_)) => {
                 return Ok(None);
@@ -1664,9 +1714,9 @@ impl JobManager {
                 )));
             }
         };
-        let metadata =
-            ThreadPool::recover_and_validate_metadata(&base_dir, thread_id, ThreadTraceKind::Job)
-                .await?;
+        let metadata = recover_and_validate_metadata(&base_dir, thread_id, ThreadTraceKind::Job)
+            .await
+            .map_err(|err| JobError::ExecutionFailed(err.to_string()))?;
         self.sync_job_runtime_metadata(
             metadata.thread_id,
             metadata.job_id.clone(),
@@ -1685,24 +1735,24 @@ impl JobManager {
             });
         }
 
-        if let Some(persistence) = self.thread_pool.persistence()
-            && let Some(thread_record) = persistence
-                .thread_repository()
-                .get_thread(&thread_id)
-                .await
-                .map_err(|err| {
-                    JobError::ExecutionFailed(format!("failed to load thread record: {err}"))
-                })?
+        if let Some(thread_repository) = self.thread_repository()
+            && let Some(thread_record) =
+                thread_repository
+                    .get_thread(&thread_id)
+                    .await
+                    .map_err(|err| {
+                        JobError::ExecutionFailed(format!("failed to load thread record: {err}"))
+                    })?
             && let Some(session_id) = thread_record.session_id
         {
             return Ok(argus_agent::thread_trace_store::chat_thread_base_dir(
-                self.thread_pool.trace_dir(),
+                &self.trace_dir,
                 session_id,
                 thread_id,
             ));
         }
 
-        find_job_thread_base_dir(self.thread_pool.trace_dir(), thread_id)
+        find_job_thread_base_dir(&self.trace_dir, thread_id)
             .await
             .map_err(|_| {
                 JobError::ExecutionFailed(format!("thread {} trace directory not found", thread_id))
@@ -1716,6 +1766,14 @@ impl JobManager {
 
         let guard = thread.read().await;
         guard.agent_record().display_name.clone()
+    }
+
+    fn route_mailbox_message(message: MailboxMessage) -> ThreadMessage {
+        if matches!(message.message_type, MailboxMessageType::JobResult { .. }) {
+            ThreadMessage::JobResult { message }
+        } else {
+            ThreadMessage::PeerMessage { message }
+        }
     }
 
     fn task_subject(prompt: &str) -> String {
@@ -2101,7 +2159,10 @@ impl JobManager {
         if !forwarded {
             let _ = self
                 .thread_pool
-                .deliver_mailbox_message(originating_thread_id, mailbox_message)
+                .deliver_thread_message(
+                    originating_thread_id,
+                    Self::route_mailbox_message(mailbox_message),
+                )
                 .await;
         }
     }
@@ -2308,7 +2369,9 @@ mod tests {
         let pool = SqlitePool::connect_lazy("sqlite::memory:")
             .expect("lazy sqlite pool should build for tests");
         let sqlite = Arc::new(ArgusSqlite::new(pool));
+        let thread_pool = Arc::new(ThreadPool::new());
         JobManager::new(
+            thread_pool,
             Arc::new(TemplateManager::new(
                 sqlite.clone() as Arc<dyn AgentRepository>,
                 sqlite.clone(),
@@ -2466,13 +2529,14 @@ mod tests {
 
         (
             JobManager::new_with_repositories(
+                Arc::new(ThreadPool::new()),
                 template_manager,
                 Arc::new(FixedProviderResolver::new(provider)),
                 Arc::new(ToolManager::new()),
                 trace_dir,
-                sqlite.clone() as Arc<dyn JobRepository>,
-                sqlite.clone() as Arc<dyn ThreadRepository>,
-                sqlite as Arc<dyn LlmProviderRepository>,
+                Some(sqlite.clone() as Arc<dyn JobRepository>),
+                Some(sqlite.clone() as Arc<dyn ThreadRepository>),
+                Some(sqlite as Arc<dyn LlmProviderRepository>),
             ),
             agent_id,
             parent_thread_id,
@@ -2496,6 +2560,7 @@ mod tests {
         }
 
         JobManager::new_with_repositories(
+            Arc::new(ThreadPool::new()),
             Arc::new(TemplateManager::new(
                 sqlite.clone() as Arc<dyn AgentRepository>,
                 sqlite.clone(),
@@ -2503,9 +2568,9 @@ mod tests {
             Arc::new(DummyProviderResolver),
             Arc::new(ToolManager::new()),
             std::env::temp_dir().join("argus-job-tests"),
-            sqlite.clone() as Arc<dyn JobRepository>,
-            sqlite.clone() as Arc<dyn ThreadRepository>,
-            sqlite as Arc<dyn LlmProviderRepository>,
+            Some(sqlite.clone() as Arc<dyn JobRepository>),
+            Some(sqlite.clone() as Arc<dyn ThreadRepository>),
+            Some(sqlite as Arc<dyn LlmProviderRepository>),
         )
     }
 
@@ -2791,9 +2856,19 @@ mod tests {
         ));
         let (manager, agent_id, originating_thread_id) =
             test_job_manager_with_provider(provider).await;
+        manager.thread_pool().register_runtime(
+            originating_thread_id,
+            ThreadRuntimeStatus::Inactive,
+            0,
+            None,
+            true,
+            None,
+            None,
+        );
         let mut parent_rx = manager
             .thread_pool()
-            .register_chat_thread(SessionId::new(), originating_thread_id);
+            .subscribe(&originating_thread_id)
+            .expect("parent runtime should be registered");
         let (pipe_tx, _pipe_rx) = broadcast::channel(32);
         let job_id = "job-eviction-bridge".to_string();
 
@@ -2827,7 +2902,7 @@ mod tests {
 
         manager
             .thread_pool()
-            .evict_chat_if_idle(&execution_thread_id)
+            .evict_runtime(&execution_thread_id, ThreadPoolEventReason::CoolingExpired)
             .expect("cooling job runtime should be evictable");
 
         let mut saw_updated = false;
@@ -3031,8 +3106,14 @@ mod tests {
         .await
         .expect("job result event should arrive");
 
-        assert!(!job_event.0, "cancelled job should still report unsuccessful execution");
-        assert!(job_event.1, "cancelled job should report cancellation explicitly");
+        assert!(
+            !job_event.0,
+            "cancelled job should still report unsuccessful execution"
+        );
+        assert!(
+            job_event.1,
+            "cancelled job should report cancellation explicitly"
+        );
         assert!(
             job_event.2.contains("Turn cancelled"),
             "unexpected cancel message: {}",

@@ -26,7 +26,10 @@ fn format_delete_blocked_reason(
         blockers.push(format!("{} 个任务", job_count));
     }
     if subagent_ref_count > 0 {
-        blockers.push(format!("{} 个智能体的 subagent_names 配置", subagent_ref_count));
+        blockers.push(format!(
+            "{} 个智能体的 subagent_names 配置",
+            subagent_ref_count
+        ));
     }
 
     format!(
@@ -155,7 +158,12 @@ impl TemplateManager {
                 .await?
                 .into_iter()
                 .filter(|record| record.id != id)
-                .filter(|record| record.subagent_names.iter().any(|name| name == &display_name))
+                .filter(|record| {
+                    record
+                        .subagent_names
+                        .iter()
+                        .any(|name| name == &display_name)
+                })
                 .count()
         } else {
             0
@@ -186,13 +194,13 @@ impl TemplateManager {
     pub async fn list_subagents_by_names(&self, names: &[String]) -> Result<Vec<AgentRecord>> {
         let mut results = Vec::new();
         for name in names {
-            if let Some(record) =
-                self.repository
-                    .find_by_display_name(name)
-                    .await
-                    .map_err(|e| ArgusError::DatabaseError {
-                        reason: e.to_string(),
-                    })?
+            if let Some(record) = self
+                .repository
+                .find_by_display_name(name)
+                .await
+                .map_err(|e| ArgusError::DatabaseError {
+                    reason: e.to_string(),
+                })?
             {
                 results.push(record);
             } else {
@@ -206,8 +214,8 @@ impl TemplateManager {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
 
     use argus_repository::{connect_path, migrate, AgentRepository, ArgusSqlite};
 

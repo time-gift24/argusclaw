@@ -1,0 +1,95 @@
+{
+  "active": false,
+  "current_phase": "completed",
+  "iteration": 7,
+  "max_iterations": 12,
+  "started_at": "2026-04-19T03:18:42Z",
+  "task_description": "Clarify responsibility boundaries among Session, ThreadPool, and Job; evaluate whether ThreadPool should be fully session/job-agnostic and possibly move to argus-agent.",
+  "interview_id": "ec552d6e-06F1-454c-8fc3-c1e21208d172",
+  "profile": "standard",
+  "type": "brownfield",
+  "initial_idea": "确认 Session、ThreadPool、Job 的职责边界；ThreadPool 应该对 Session、Job 无感，并评估是否放到 argus-agent 更好",
+  "rounds": [
+    {
+      "round": 1,
+      "target": "scope",
+      "question": "你这轮希望现在拍板到什么程度：只是确认 Session / ThreadPool / Job 的职责边界，还是要把 crate 归属也一起定掉（即 ThreadPool 是否必须迁到 argus-agent）？如果只能选一个必须项，哪个必须、哪个可以后置？",
+      "answer": "crate 归属也一起定"
+    },
+    {
+      "round": 2,
+      "target": "decision-boundaries",
+      "question": "我查到当前 ThreadPool 不是一个纯 runtime-slot 原语：它直接依赖 TemplateManager、ProviderResolver、ToolManager，以及可选的 ThreadRepository / LlmProviderRepository 来装载 runtime。你说“放到 argus-agent 更好”时，真正想定的是哪一种终态：1) 整个 ThreadPool 连这些依赖一起下沉进 argus-agent；2) 只把纯 runtime-pool core 下沉到 argus-agent，runtime 构建/恢复仍留在上层；3) 你不接受继续拆两层，必须保留一个完整 ThreadPool 但换 crate",
+      "answer": "1"
+    },
+    {
+      "round": 3,
+      "target": "constraints/non-goals",
+      "question": "我找到的现状是：argus-agent 现在被文档定义为“thread-owned turn runtime / trace / compact 的事实来源”，而不是多 runtime orchestration 层；如果把整个 ThreadPool 连 TemplateManager / ProviderResolver / ToolManager / repository 访问一起搬进去，这个 crate 的定位就会变。这里我想逼你拍一个 tradeoff：你更想守住哪条不变量？A. argus-agent 必须保持“单 thread runtime 内核”，那就不能整包搬 ThreadPool；B. ThreadPool 必须物理归到 argus-agent，就接受 argus-agent 升格成 runtime orchestration crate",
+      "answer": "换个思路，新增一个 crate argus-thread-pool"
+    },
+    {
+      "round": 4,
+      "target": "non-goals/decision-boundaries",
+      "question": "做一个 simplifier 收口：这个新 crate 你要它成为哪一种最小单元？A. 纯 runtime pool 基础设施，只负责 runtime 注册、装载/驱逐、容量、投递，禁止知道 Session 和 Job；B. 完整 runtime orchestration 层，除了 pool 还负责 runtime 构建/恢复，因此仍会依赖 TemplateManager / ProviderResolver / ToolManager / repository；C. 介于两者之间，但你接受留下少量 chat-specific 装载逻辑",
+      "answer": "A"
+    },
+    {
+      "round": 5,
+      "target": "decision-boundaries/ownership",
+      "question": "我找到一个直接的落点分叉：当前 chat runtime 的构建/恢复在 ThreadPool 里，job runtime 的构建/恢复主要在 JobManager 里。如果新 crate 选 A，你是否要明确拍板成下面这个所有权模型：SessionManager 负责 chat runtime 的构建/恢复并把已构建 Thread 交给 ThreadPool；JobManager 负责 job runtime 的构建/恢复并把已构建 Thread 交给 ThreadPool；ThreadPool 只负责 admit/attach/deliver/cool/evict，不再持有 TemplateManager / ProviderResolver / ToolManager / repository？回答“是”或指出你要改哪一段。",
+      "answer": "SessionManager、Job 也要轻量化 —— 应该是从ThreadPool 中拿 Thread ，拿到了之后所有的行为和 ThreadPool 无关！怎么组装是 Session、Job 自己的事情，ThreadPool 只做 Thread 的用量管理与监控"
+    },
+    {
+      "round": 6,
+      "target": "non-goals",
+      "question": "最后只差一个非目标要拍板：这轮规格里，你是否明确把“改名/重命名 pass（例如 ThreadPool -> RuntimePool）、桌面端 monitor/UI 协议调整、以及行为级优化（性能调参/容量策略变化）”都列为非目标，先只定职责与 crate 拆分边界？回答“是”，或者指出哪一项你要纳入本轮。",
+      "answer": "不需要改名"
+    }
+  ],
+  "current_ambiguity": 0.11,
+  "threshold": 0.2,
+  "max_rounds": 12,
+  "challenge_modes_used": [
+    "contrarian",
+    "simplifier"
+  ],
+  "codebase_context": {
+    "root_contract": "argus-job should decouple job lifecycle from runtime pool; ThreadPool chat/runtime-only, JobManager job-only",
+    "current_signals": [
+      "Session is thin thread container plus broadcast/interrupt helpers",
+      "JobManager already owns job bindings/runtime summaries",
+      "ThreadPool still returns JobError and special-cases JobResult routing",
+      "ThreadPool physically lives in argus-job though docs treat it as generic runtime residency layer"
+    ]
+  },
+  "current_stage": "completed",
+  "current_focus": "handoff",
+  "context_snapshot_path": ".omx/context/session-threadpool-job-boundaries-20260419T031842Z.md",
+  "readiness": {
+    "non_goals_explicit": true,
+    "decision_boundaries_explicit": true,
+    "pressure_pass_complete": true
+  },
+  "scores": {
+    "intent": 0.9,
+    "outcome": 0.93,
+    "scope": 0.91,
+    "constraints": 0.88,
+    "success": 0.76,
+    "context": 0.91
+  },
+  "pending_question": "我找到一个直接的落点分叉：当前 chat runtime 的构建/恢复在 ThreadPool 里，job runtime 的构建/恢复主要在 JobManager 里。如果新 crate 选 A，你是否要明确拍板成下面这个所有权模型：SessionManager 负责 chat runtime 的构建/恢复并把已构建 Thread 交给 ThreadPool；JobManager 负责 job runtime 的构建/恢复并把已构建 Thread 交给 ThreadPool；ThreadPool 只负责 admit/attach/deliver/cool/evict，不再持有 TemplateManager / ProviderResolver / ToolManager / repository？回答“是”或指出你要改哪一段。",
+  "last_answer": "不需要改名",
+  "assumption_updates": [
+    "crate 归属决定已改为新增独立 crate argus-thread-pool",
+    "新 crate 应为纯 runtime pool 基础设施，不感知 Session / Job",
+    "ThreadPool 负责 Thread 的用量管理与监控；Session/Job 只获取 Thread 并自行编排后续行为",
+    "ThreadPool 命名保留，不做 rename pass"
+  ],
+  "completed_at": "2026-04-19T15:44:42Z",
+  "transcript_path": ".omx/interviews/session-threadpool-job-boundaries-20260419T154442Z.md",
+  "spec_path": ".omx/specs/deep-interview-session-threadpool-job-boundaries.md",
+  "recommended_handoff": "$ralplan .omx/specs/deep-interview-session-threadpool-job-boundaries.md",
+  "residual_risk": "none; clarified spec ready for planning handoff"
+}

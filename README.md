@@ -37,7 +37,7 @@ pnpm tauri dev
 | `crates/argus-llm` | provider 管理、OpenAI-compatible provider、retry |
 | `crates/argus-tool` | 工具注册表与内置 filesystem / shell / browser / scheduler tools |
 | `crates/argus-agent` | thread-owned turn runtime、compact、trace、plan |
-| `crates/argus-job` | 后台 job 调度与统一 thread pool |
+| `crates/argus-job` | 后台 job 调度、恢复与 runtime pool 解耦 |
 | `crates/argus-session` | session 聚合、thread 恢复、scheduler backend |
 | `crates/argus-template` | agent 模板管理与 builtin agents seed |
 | `crates/argus-mcp` | MCP server runtime、supervision、tool adapter |

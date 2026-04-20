@@ -69,7 +69,7 @@ git worktree add .worktrees/<branch-name> -b codex/<branch-name>
 | `argus-llm` | Provider manager、OpenAI-compatible provider、retry | provider 细节封装在此处 |
 | `argus-tool` | ToolManager 与内置 tools | 风险分级、schema、执行边界都在此维护 |
 | `argus-agent` | thread-owned turn runtime、compact、plan、trace | thread/turn 的事实来源和结算规则集中于此 |
-| `argus-job` | 后台 job 生命周期与统一 thread pool | job child thread 必须受池统一管理 |
+| `argus-job` | 后台 job 生命周期与 runtime pool 解耦 | `JobManager` 管 job，`ThreadPool` 只管 chat/runtime 生命周期 |
 | `argus-session` | session 聚合、thread 恢复、scheduler backend | 负责把 agent/job/tool 组合成会话层语义 |
 | `argus-template` | agent template 管理与 builtin seed | 模板不直接做运行时编排 |
 | `argus-mcp` | MCP server runtime、supervision、tool adapter | MCP 连接与发现逻辑只放这里 |
