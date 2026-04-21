@@ -165,6 +165,10 @@ pub enum ThreadError {
     /// Channel send error.
     #[error("Event channel closed")]
     ChannelClosed,
+
+    /// Owner-only control message attempted through a generic observer handle.
+    #[error("Runtime control messages require an owner handle")]
+    OwnerControlRestricted,
 }
 
 // ---------------------------------------------------------------------------
@@ -289,5 +293,11 @@ mod tests {
     fn thread_error_display_runtime_active() {
         let err = ThreadError::RuntimeActive;
         assert!(err.to_string().contains("runtime is active"));
+    }
+
+    #[test]
+    fn thread_error_display_owner_control_restricted() {
+        let err = ThreadError::OwnerControlRestricted;
+        assert!(err.to_string().contains("owner handle"));
     }
 }

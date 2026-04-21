@@ -760,13 +760,13 @@ impl SessionManager {
                 };
                 match change {
                     RuntimeLifecycleChange::Cooling(_) => {
-                        let _ = thread_pool.emit_event(&runtime.thread_id, ThreadEvent::ThreadPoolCooling {
+                        let _ = thread_pool.emit_observer_event(&runtime.thread_id, ThreadEvent::ThreadPoolCooling {
                             thread_id: runtime.thread_id,
                             session_id: Some(session_id),
                         });
                     }
                     RuntimeLifecycleChange::Evicted(_) => {
-                        let _ = thread_pool.emit_event(&runtime.thread_id, ThreadEvent::ThreadPoolEvicted {
+                        let _ = thread_pool.emit_observer_event(&runtime.thread_id, ThreadEvent::ThreadPoolEvicted {
                             thread_id: runtime.thread_id,
                             session_id: Some(session_id),
                             reason: runtime
@@ -781,7 +781,7 @@ impl SessionManager {
                 )
                 .snapshot;
                 let _ = thread_pool
-                    .emit_event(&runtime.thread_id, ThreadEvent::ThreadPoolMetricsUpdated { snapshot });
+                    .emit_observer_event(&runtime.thread_id, ThreadEvent::ThreadPoolMetricsUpdated { snapshot });
             }));
     }
 
@@ -871,7 +871,7 @@ impl SessionManager {
             .map_err(Self::map_pool_error)?;
         let _ = self
             .thread_pool
-            .emit_event(&thread_id, ThreadEvent::MailboxMessageQueued { thread_id, message });
+            .emit_observer_event(&thread_id, ThreadEvent::MailboxMessageQueued { thread_id, message });
         Ok(())
     }
 
@@ -998,11 +998,11 @@ impl SessionManager {
         self.thread_pool
             .mark_runtime_running(&thread_id, estimated_memory_bytes, started_at)
             .ok_or_else(|| ArgusError::ThreadNotFound(thread_id.inner().to_string()))?;
-        let _ = self.thread_pool.emit_event(&thread_id, ThreadEvent::ThreadPoolStarted {
+        let _ = self.thread_pool.emit_observer_event(&thread_id, ThreadEvent::ThreadPoolStarted {
             thread_id,
             session_id: Some(session_id),
         });
-        let _ = self.thread_pool.emit_event(&thread_id, ThreadEvent::ThreadPoolMetricsUpdated {
+        let _ = self.thread_pool.emit_observer_event(&thread_id, ThreadEvent::ThreadPoolMetricsUpdated {
             snapshot: self.thread_pool_snapshot(),
         });
         Ok(())
@@ -2560,6 +2560,7 @@ mod tests {
             .manager
             .thread_pool
             .evict_runtime(&harness.thread_id, ThreadPoolEventReason::CoolingExpired)
+            .await
             .expect("chat runtime should evict once cooling");
         assert!(
             harness

@@ -528,7 +528,7 @@ impl JobManager {
             (parent_thread_id, runtime)
         };
 
-        if !thread_pool.emit_event(
+        if !thread_pool.emit_observer_event(
             &parent_thread_id,
             ThreadEvent::JobRuntimeUpdated {
                 runtime: runtime.clone(),
@@ -536,7 +536,7 @@ impl JobManager {
         ) {
             return;
         }
-        let _ = thread_pool.emit_event(
+        let _ = thread_pool.emit_observer_event(
             &parent_thread_id,
             ThreadEvent::JobRuntimeEvicted {
                 thread_id: runtime.thread_id,
@@ -558,7 +558,7 @@ impl JobManager {
                 &runtimes,
             )
         };
-        let _ = thread_pool.emit_event(
+        let _ = thread_pool.emit_observer_event(
             &parent_thread_id,
             ThreadEvent::JobRuntimeMetricsUpdated { snapshot },
         );
@@ -2847,6 +2847,7 @@ mod tests {
         manager
             .thread_pool()
             .evict_runtime(&execution_thread_id, ThreadPoolEventReason::CoolingExpired)
+            .await
             .expect("cooling job runtime should be evictable");
 
         let mut saw_updated = false;

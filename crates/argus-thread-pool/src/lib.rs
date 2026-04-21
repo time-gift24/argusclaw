@@ -9,12 +9,12 @@ use std::sync::{Arc, Mutex as StdMutex};
 
 use argus_agent::{Thread, ThreadHandle, ThreadOwnerHandle};
 use argus_protocol::{
-    ThreadControlMessage, ThreadEvent, ThreadId, ThreadMessage, ThreadPoolEventReason,
-    ThreadPoolSnapshot, ThreadRuntimeStatus,
+    ThreadEvent, ThreadId, ThreadMessage, ThreadPoolEventReason, ThreadPoolSnapshot,
+    ThreadRuntimeStatus,
 };
 use chrono::Utc;
 use thiserror::Error;
-use tokio::sync::{Mutex as AsyncMutex, OwnedSemaphorePermit, Semaphore, broadcast};
+use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard, OwnedSemaphorePermit, Semaphore, broadcast};
 use tokio::task::AbortHandle;
 
 const DEFAULT_MAX_THREADS: u32 = 8;
@@ -75,6 +75,7 @@ struct ThreadPoolStore {
 pub struct RuntimeShutdown {
     thread: Option<ThreadOwnerHandle>,
     forwarder_abort: Option<AbortHandle>,
+    slot_permit: Option<OwnedSemaphorePermit>,
 }
 
 #[derive(Debug, Clone)]
@@ -89,15 +90,14 @@ pub type RuntimeIdleObserver =
     dyn Fn(ThreadId, ThreadHandle, &'static str) -> RuntimeIdleObserverFuture + Send + Sync;
 
 impl RuntimeShutdown {
-    pub fn run(self) {
+    pub async fn run_and_wait(self) {
         if let Some(forwarder_abort) = self.forwarder_abort {
             forwarder_abort.abort();
         }
         if let Some(thread) = self.thread {
-            let _ = thread.observer().send_message(ThreadMessage::Control(
-                ThreadControlMessage::ShutdownRuntime,
-            ));
+            let _ = thread.shutdown().await;
         }
+        drop(self.slot_permit);
     }
 }
 
@@ -166,7 +166,20 @@ impl ThreadPool {
             .map(|entry| entry.sender.subscribe())
     }
 
-    pub fn emit_event(&self, thread_id: &ThreadId, event: ThreadEvent) -> bool {
+    pub fn emit_observer_event(&self, thread_id: &ThreadId, event: ThreadEvent) -> bool {
+        if !matches!(
+            event,
+            ThreadEvent::ThreadPoolCooling { .. }
+                | ThreadEvent::ThreadPoolEvicted { .. }
+                | ThreadEvent::ThreadPoolMetricsUpdated { .. }
+                | ThreadEvent::ThreadPoolStarted { .. }
+                | ThreadEvent::MailboxMessageQueued { .. }
+                | ThreadEvent::JobRuntimeUpdated { .. }
+                | ThreadEvent::JobRuntimeEvicted { .. }
+                | ThreadEvent::JobRuntimeMetricsUpdated { .. }
+        ) {
+            return false;
+        }
         let Some(sender) = self
             .store
             .lock()
@@ -181,25 +194,17 @@ impl ThreadPool {
     }
 
     pub async fn remove_runtime(&self, thread_id: &ThreadId) -> bool {
-        let (forwarder_abort, thread) = {
+        let Some(_load_guard) = self.lock_runtime_load(thread_id).await else {
+            return false;
+        };
+        let shutdown = {
             let mut store = self.store.lock().expect("thread-pool mutex poisoned");
             let Some(entry) = store.runtimes.get_mut(thread_id) else {
                 return false;
             };
-            (entry.forwarder_abort.take(), entry.thread.clone())
+            Self::take_runtime_shutdown(entry)
         };
-
-        if let Some(forwarder_abort) = forwarder_abort {
-            forwarder_abort.abort();
-        }
-
-        if let Some(thread) = thread {
-            let observer = thread.observer();
-            let _ = observer.send_message(ThreadMessage::Control(
-                ThreadControlMessage::ShutdownRuntime,
-            ));
-            observer.wait_for_termination().await;
-        }
+        shutdown.run_and_wait().await;
 
         let mut store = self.store.lock().expect("thread-pool mutex poisoned");
         let removed = store.runtimes.remove(thread_id).is_some();
@@ -229,6 +234,17 @@ impl ThreadPool {
             .runtimes
             .get(thread_id)
             .and_then(|entry| entry.thread.clone())
+    }
+
+    async fn lock_runtime_load(&self, thread_id: &ThreadId) -> Option<OwnedMutexGuard<()>> {
+        let load_mutex = self
+            .store
+            .lock()
+            .expect("thread-pool mutex poisoned")
+            .runtimes
+            .get(thread_id)
+            .map(|entry| Arc::clone(&entry.load_mutex))?;
+        Some(load_mutex.lock_owned().await)
     }
 
     pub fn is_runtime_resident(&self, thread_id: &ThreadId) -> bool {
@@ -343,6 +359,7 @@ impl ThreadPool {
 
             if self
                 .evict_oldest_cooling_runtime(ThreadPoolEventReason::MemoryPressure)
+                .await
                 .is_some()
             {
                 continue;
@@ -433,24 +450,26 @@ impl ThreadPool {
         Some((runtime, sender, snapshot))
     }
 
-    pub fn reset_runtime_after_load_failure(
+    pub async fn reset_runtime_after_load_failure(
         &self,
         thread_id: &ThreadId,
         reason: ThreadPoolEventReason,
     ) {
-        let mut store = self.store.lock().expect("thread-pool mutex poisoned");
-        let mut shutdown = RuntimeShutdown::default();
-        if let Some(entry) = store.runtimes.get_mut(thread_id) {
-            entry.summary.status = ThreadRuntimeStatus::Inactive;
-            entry.summary.estimated_memory_bytes = 0;
-            entry.summary.last_active_at = Some(Utc::now().to_rfc3339());
-            entry.summary.last_reason = Some(reason);
-            shutdown = Self::take_runtime_shutdown(entry);
-            entry.slot_permit = None;
-            Self::refresh_peaks(&mut store);
-        }
-        drop(store);
-        shutdown.run();
+        let shutdown = {
+            let mut store = self.store.lock().expect("thread-pool mutex poisoned");
+            let mut shutdown = RuntimeShutdown::default();
+            if let Some(entry) = store.runtimes.get_mut(thread_id) {
+                entry.summary.status = ThreadRuntimeStatus::Inactive;
+                entry.summary.estimated_memory_bytes = 0;
+                entry.summary.last_active_at = Some(Utc::now().to_rfc3339());
+                entry.summary.last_reason = Some(reason);
+                shutdown = Self::take_runtime_shutdown(entry);
+                entry.slot_permit = None;
+                Self::refresh_peaks(&mut store);
+            }
+            shutdown
+        };
+        shutdown.run_and_wait().await;
     }
 
     pub async fn attach_runtime(
@@ -481,18 +500,27 @@ impl ThreadPool {
                 } else {
                     RuntimeShutdown::default()
                 };
-                entry.summary.status = ThreadRuntimeStatus::Inactive;
-                entry.summary.estimated_memory_bytes = estimated_memory_bytes;
-                entry.summary.last_active_at = Some(Utc::now().to_rfc3339());
-                entry.summary.last_reason = None;
-                entry.thread = Some(thread.clone());
-                entry.forwarder_abort = None;
                 (entry.sender.clone(), replaced_runtime)
             };
-            Self::refresh_peaks(&mut store);
             (sender, replaced_runtime)
         };
-        replaced_runtime.run();
+        replaced_runtime.run_and_wait().await;
+        {
+            let mut store = self.store.lock().expect("thread-pool mutex poisoned");
+            let Some(entry) = store.runtimes.get_mut(&thread_id) else {
+                return Err(ThreadPoolError::ExecutionFailed(format!(
+                    "thread {} was removed while attaching",
+                    thread_id
+                )));
+            };
+            entry.summary.status = ThreadRuntimeStatus::Inactive;
+            entry.summary.estimated_memory_bytes = estimated_memory_bytes;
+            entry.summary.last_active_at = Some(Utc::now().to_rfc3339());
+            entry.summary.last_reason = None;
+            entry.thread = Some(thread.clone());
+            entry.forwarder_abort = None;
+            Self::refresh_peaks(&mut store);
+        }
         let store = Arc::clone(&self.store);
         let max_threads = self.max_threads;
         let admission_waiters = Arc::clone(&self.admission_waiters);
@@ -522,7 +550,8 @@ impl ThreadPool {
                                 &admission_waiters,
                                 &thread_id,
                                 estimated_memory_bytes,
-                            );
+                            )
+                            .await;
 
                             {
                                 let observers = lifecycle_observers
@@ -544,7 +573,7 @@ impl ThreadPool {
                             }
 
                             if let Some(shutdown) = shutdown {
-                                shutdown.run();
+                                shutdown.run_and_wait().await;
                             }
                         }
                     }
@@ -607,7 +636,8 @@ impl ThreadPool {
                 self.reset_runtime_after_load_failure(
                     &thread_id,
                     ThreadPoolEventReason::ExecutionFailed,
-                );
+                )
+                .await;
                 return Err(error);
             }
         };
@@ -629,25 +659,27 @@ impl ThreadPool {
             self.reset_runtime_after_load_failure(
                 &thread_id,
                 ThreadPoolEventReason::ExecutionFailed,
-            );
+            )
+            .await;
             return Err(error);
         }
 
         Ok(thread.observer())
     }
 
-    pub fn evict_runtime(
+    pub async fn evict_runtime(
         &self,
         thread_id: &ThreadId,
         reason: ThreadPoolEventReason,
     ) -> Option<RuntimeSummary> {
+        let _load_guard = self.lock_runtime_load(thread_id).await?;
         let (runtime, _snapshot, shutdown) = Self::evict_runtime_from_shared_store(
             &self.store,
             self.max_threads,
             thread_id,
             reason,
         )?;
-        shutdown.run();
+        shutdown.run_and_wait().await;
         self.notify_runtime_lifecycle_observers(RuntimeLifecycleChange::Evicted(runtime.clone()));
         Some(runtime)
     }
@@ -777,7 +809,7 @@ impl ThreadPool {
         }
     }
 
-    fn evict_oldest_cooling_runtime(
+    async fn evict_oldest_cooling_runtime(
         &self,
         reason: ThreadPoolEventReason,
     ) -> Option<RuntimeSummary> {
@@ -790,16 +822,25 @@ impl ThreadPool {
                 .min_by_key(|entry| entry.summary.last_active_at.clone())
                 .map(|entry| entry.summary.thread_id)
         }?;
-        self.evict_runtime(&candidate, reason)
+        self.evict_runtime(&candidate, reason).await
     }
 
-    fn cool_or_evict_after_idle(
+    async fn cool_or_evict_after_idle(
         store: &Arc<StdMutex<ThreadPoolStore>>,
         max_threads: u32,
         admission_waiters: &AtomicUsize,
         thread_id: &ThreadId,
         estimated_memory_bytes: u64,
     ) -> (RuntimeSummary, Option<RuntimeShutdown>) {
+        let load_mutex = {
+            let store_guard = store.lock().expect("thread-pool mutex poisoned");
+            let entry = store_guard
+                .runtimes
+                .get(thread_id)
+                .expect("thread must remain registered while settling idle");
+            Arc::clone(&entry.load_mutex)
+        };
+        let _load_guard = load_mutex.lock_owned().await;
         let mut store_guard = store.lock().expect("thread-pool mutex poisoned");
         let entry = store_guard
             .runtimes
@@ -825,7 +866,6 @@ impl ThreadPool {
             return (runtime, Some(shutdown));
         }
 
-        let _ = max_threads;
         (runtime, None)
     }
 
@@ -844,7 +884,6 @@ impl ThreadPool {
         entry.summary.status = ThreadRuntimeStatus::Evicted;
         entry.summary.last_reason = Some(reason);
         entry.summary.estimated_memory_bytes = 0;
-        entry.slot_permit = None;
         let runtime = entry.summary.clone();
         Self::refresh_peaks(&mut store);
         let snapshot = Self::collect_metrics_from_store(max_threads, &store);
@@ -855,6 +894,7 @@ impl ThreadPool {
         RuntimeShutdown {
             thread: entry.thread.take(),
             forwarder_abort: entry.forwarder_abort.take(),
+            slot_permit: entry.slot_permit.take(),
         }
     }
 
@@ -1229,6 +1269,7 @@ mod tests {
 
         let evicted = pool
             .evict_runtime(&thread_id, ThreadPoolEventReason::CoolingExpired)
+            .await
             .expect("cooling runtime should evict");
 
         assert_eq!(evicted.status, ThreadRuntimeStatus::Evicted);
@@ -1243,6 +1284,85 @@ mod tests {
             }),
             "eviction should notify lifecycle observers"
         );
+    }
+
+    #[tokio::test]
+    async fn emit_observer_event_rejects_owner_authored_terminal_events() {
+        let pool = ThreadPool::new();
+        let thread_id = ThreadId::new();
+        pool.register_runtime(
+            thread_id,
+            ThreadRuntimeStatus::Inactive,
+            0,
+            None,
+            true,
+            None,
+            None,
+        );
+        let _rx = pool
+            .subscribe(&thread_id)
+            .expect("registered runtime should expose an event receiver");
+
+        assert!(!pool.emit_observer_event(
+            &thread_id,
+            ThreadEvent::Idle {
+                thread_id: thread_id.to_string(),
+            }
+        ));
+        assert!(pool.emit_observer_event(
+            &thread_id,
+            ThreadEvent::ThreadPoolMetricsUpdated {
+                snapshot: pool.collect_metrics(),
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn remove_runtime_waits_for_inflight_load_to_finish_without_orphaning_owner() {
+        let pool = Arc::new(ThreadPool::new());
+        let thread_id = ThreadId::new();
+        let build_started = Arc::new(tokio::sync::Notify::new());
+        let release_build = Arc::new(tokio::sync::Notify::new());
+
+        let load_pool = Arc::clone(&pool);
+        let load_task = tokio::spawn({
+            let build_started = Arc::clone(&build_started);
+            let release_build = Arc::clone(&release_build);
+            async move {
+                load_pool
+                    .load_runtime_with_builder(thread_id, "chat runtime", false, None, true, move || {
+                        let build_started = Arc::clone(&build_started);
+                        let release_build = Arc::clone(&release_build);
+                        async move {
+                            build_started.notify_waiters();
+                            release_build.notified().await;
+                            Ok(build_thread(thread_id, "loaded after block"))
+                        }
+                    })
+                    .await
+            }
+        });
+
+        build_started.notified().await;
+        let remove_pool = Arc::clone(&pool);
+        let remove_task = tokio::spawn(async move { remove_pool.remove_runtime(&thread_id).await });
+        sleep(Duration::from_millis(20)).await;
+        assert!(
+            !remove_task.is_finished(),
+            "remove_runtime should wait for the inflight load to leave the builder phase"
+        );
+
+        release_build.notify_waiters();
+        let loaded = load_task
+            .await
+            .expect("load task should join")
+            .expect("load should complete before coordinated removal");
+        assert_eq!(loaded.id(), thread_id);
+        assert!(
+            remove_task.await.expect("remove task should join"),
+            "remove_runtime should remove the runtime once load completes"
+        );
+        assert!(pool.loaded_thread(&thread_id).is_none());
     }
 
     #[tokio::test]
@@ -1342,5 +1462,78 @@ mod tests {
                 "once removal has completed, a subsequent load may create a fresh owner"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn evict_runtime_waits_for_shutdown_before_allowing_replacement() {
+        let pool = Arc::new(ThreadPool::new());
+        let thread_id = ThreadId::new();
+        let release = Arc::new(tokio::sync::Notify::new());
+        let original = pool
+            .load_runtime_with_builder(thread_id, "chat runtime", false, None, true, {
+                let thread =
+                    build_blocked_thread(thread_id, "slow reply", Arc::clone(&release));
+                move || async move { Ok(thread) }
+            })
+            .await
+            .expect("runtime load should succeed");
+
+        pool.deliver_thread_message(
+            thread_id,
+            ThreadMessage::UserInput {
+                content: "hello".to_string(),
+                msg_override: None,
+            },
+        )
+        .await
+        .expect("message should start the runtime");
+
+        timeout(Duration::from_secs(5), async {
+            loop {
+                if original.is_turn_running() {
+                    break;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("runtime should start running before eviction");
+
+        pool.transition_runtime_to_cooling(&thread_id, Some(ThreadPool::estimate_thread_memory(&original)))
+            .expect("runtime should enter cooling before eviction");
+
+        let evicting_pool = Arc::clone(&pool);
+        let evict_task = tokio::spawn(async move {
+            evicting_pool
+                .evict_runtime(&thread_id, ThreadPoolEventReason::CoolingExpired)
+                .await
+        });
+        sleep(Duration::from_millis(20)).await;
+        let eviction_pending = !evict_task.is_finished();
+
+        let replacement_builds = Arc::new(AtomicUsize::new(0));
+        let replacement = pool
+            .load_runtime_with_builder(thread_id, "chat runtime", false, None, true, {
+                let replacement_builds = Arc::clone(&replacement_builds);
+                move || {
+                    replacement_builds.fetch_add(1, Ordering::SeqCst);
+                    let thread = build_thread(thread_id, "replacement reply");
+                    async move { Ok(thread) }
+                }
+            })
+            .await
+            .expect("concurrent load should succeed");
+
+        if eviction_pending {
+            assert!(replacement.same_runtime(&original));
+            assert_eq!(replacement_builds.load(Ordering::SeqCst), 0);
+        }
+
+        release.notify_waiters();
+        let evicted = evict_task
+            .await
+            .expect("evict task should join")
+            .expect("eviction should succeed");
+        assert_eq!(evicted.status, ThreadRuntimeStatus::Evicted);
     }
 }

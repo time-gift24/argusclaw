@@ -349,6 +349,9 @@ impl ThreadHandle {
 
     /// Send a protocol message into the thread mailbox.
     pub fn send_message(&self, message: ThreadMessage) -> Result<(), ThreadError> {
+        if matches!(message, ThreadMessage::Control(_)) {
+            return Err(ThreadError::OwnerControlRestricted);
+        }
         self.inner
             .message_tx
             .send(message)
@@ -505,6 +508,17 @@ impl ThreadOwnerHandle {
     ) -> Result<(), ThreadError> {
         self.send_owner_command(|ack| ThreadOwnerCommand::SetMcpToolResolver { resolver, ack })
             .await
+    }
+
+    /// Request shutdown of the owner loop and wait for termination.
+    pub async fn shutdown(self) -> Result<(), ThreadError> {
+        self.handle
+            .inner
+            .message_tx
+            .send(ThreadMessage::Control(ThreadControlMessage::ShutdownRuntime))
+            .map_err(|_| ThreadError::ChannelClosed)?;
+        self.handle.wait_for_termination().await;
+        Ok(())
     }
 }
 
@@ -2289,7 +2303,7 @@ mod tests {
     #[tokio::test]
     async fn shutdown_runtime_control_cancels_active_turn_and_ignores_followup_messages() {
         let captured_user_inputs = Arc::new(Mutex::new(Vec::new()));
-        let thread = ThreadBuilder::new()
+        let owner = ThreadBuilder::new()
             .provider(Arc::new(PendingStreamProvider::new(Arc::clone(
                 &captured_user_inputs,
             ))))
@@ -2299,8 +2313,8 @@ mod tests {
             .build()
             .expect("thread should build")
             .spawn_runtime()
-            .expect("runtime handle should spawn")
-            .observer();
+            .expect("runtime handle should spawn");
+        let thread = owner.observer();
 
         thread
             .send_message(ThreadMessage::UserInput {
@@ -2320,28 +2334,16 @@ mod tests {
         .await
         .expect("runtime should start the first turn");
 
-        thread
-            .send_message(ThreadMessage::Control(
-                ThreadControlMessage::ShutdownRuntime,
-            ))
+        owner
+            .shutdown()
+            .await
             .expect("shutdown control should enqueue");
         thread
             .send_message(ThreadMessage::UserInput {
                 content: "second".to_string(),
                 msg_override: None,
             })
-            .expect("post-shutdown message should still reach the channel");
-
-        timeout(Duration::from_secs(5), async {
-            loop {
-                if !thread.is_turn_running() {
-                    break;
-                }
-                sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("shutdown should cancel the active turn and stop the runtime");
+            .expect_err("observer handle should not enqueue after shutdown");
 
         sleep(Duration::from_millis(100)).await;
 
@@ -2353,6 +2355,27 @@ mod tests {
         );
         assert_eq!(thread.turn_count(), 0);
         assert_eq!(thread.state(), ThreadState::Idle);
+    }
+
+    #[tokio::test]
+    async fn observer_handle_rejects_owner_control_messages() {
+        let thread = ThreadBuilder::new()
+            .provider(Arc::new(DummyProvider))
+            .compactor(Arc::new(NoopCompactor))
+            .agent_record(test_agent_record_without_system_prompt())
+            .session_id(SessionId::new())
+            .build()
+            .expect("thread should build")
+            .spawn_runtime()
+            .expect("runtime handle should spawn")
+            .observer();
+
+        let error = thread
+            .send_message(ThreadMessage::Control(
+                ThreadControlMessage::ShutdownRuntime,
+            ))
+            .expect_err("observer handle must not accept owner-only control messages");
+        assert!(matches!(error, ThreadError::OwnerControlRestricted));
     }
 
     #[tokio::test]
