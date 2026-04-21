@@ -19,7 +19,9 @@ use argus_agent::thread_trace_store::{
     ThreadTraceKind, ThreadTraceMetadata, child_thread_base_dir, find_job_thread_base_dir,
     list_direct_child_threads, persist_thread_metadata, recover_thread_metadata,
 };
-use argus_agent::{FilePlanStore, LlmThreadCompactor, ThreadBuilder, TurnCancellation};
+use argus_agent::{
+    FilePlanStore, LlmThreadCompactor, Thread, ThreadBuilder, ThreadHandle, TurnCancellation,
+};
 use argus_protocol::llm::{ChatMessage, LlmProvider, Role};
 use argus_protocol::{
     AgentId, JobRuntimeSnapshot, JobRuntimeState, JobRuntimeSummary, MailboxMessage,
@@ -31,12 +33,10 @@ use argus_repository::types::{
     AgentId as RepoAgentId, JobId, JobRecord, JobResult, JobStatus, JobType, ThreadRecord,
 };
 use argus_template::TemplateManager;
-use argus_thread_pool::{
-    RuntimeLifecycleChange, ThreadPool, ThreadPoolError,
-};
+use argus_thread_pool::{RuntimeLifecycleChange, ThreadPool, ThreadPoolError};
 use argus_tool::ToolManager;
 use chrono::Utc;
-use tokio::sync::{RwLock, broadcast};
+use tokio::sync::broadcast;
 use uuid::Uuid;
 
 use crate::error::JobError;
@@ -1022,7 +1022,7 @@ impl JobManager {
         };
         let started_at = Utc::now().to_rfc3339();
         let estimated_memory_bytes =
-            ThreadPool::estimate_thread_memory(&thread).await + request.prompt.len() as u64;
+            ThreadPool::estimate_thread_memory(&thread) + request.prompt.len() as u64;
         self.thread_pool.mark_runtime_running(
             &execution_thread_id,
             estimated_memory_bytes,
@@ -1106,14 +1106,11 @@ impl JobManager {
                     .await
                 {
                     Ok(()) => {
-                        let cancellation_thread = Arc::clone(&thread);
+                        let cancellation_thread = thread.clone();
                         let cancellation_signal = cancellation.clone();
                         let cancellation_forwarder = tokio::spawn(async move {
                             cancellation_signal.cancelled().await;
-                            let _ = cancellation_thread
-                                .read()
-                                .await
-                                .send_message(ThreadMessage::Interrupt);
+                            let _ = cancellation_thread.send_message(ThreadMessage::Interrupt);
                         });
 
                         let result = self
@@ -1143,7 +1140,7 @@ impl JobManager {
         self.persist_job_completion(&request.job_id, &result, Some(started_at.as_str()))
             .await;
 
-        let cooling_memory = ThreadPool::estimate_thread_memory(&thread).await;
+        let cooling_memory = ThreadPool::estimate_thread_memory(&thread);
         let terminal_reason = if result.cancelled {
             Some(ThreadPoolEventReason::Cancelled)
         } else if result.success {
@@ -1182,7 +1179,7 @@ impl JobManager {
         request: &JobExecutionRequest,
         thread_id: ThreadId,
         pipe_tx: &broadcast::Sender<ThreadEvent>,
-    ) -> Result<Arc<RwLock<argus_agent::Thread>>, JobError> {
+    ) -> Result<ThreadHandle, JobError> {
         let runtime = self.upsert_job_runtime_summary(
             thread_id,
             request.job_id.clone(),
@@ -1203,23 +1200,16 @@ impl JobManager {
         } else {
             match self
                 .thread_pool
-                .load_runtime_with_builder(
-                    thread_id,
-                    "job thread",
-                    false,
-                    None,
-                    true,
-                    move || {
-                        let manager = manager.clone();
-                        let request = request_for_build.clone();
-                        async move {
-                            manager
-                                .build_job_thread(&request, thread_id)
-                                .await
-                                .map_err(|error| ThreadPoolError::ExecutionFailed(error.to_string()))
-                        }
-                    },
-                )
+                .load_runtime_with_builder(thread_id, "job thread", false, None, true, move || {
+                    let manager = manager.clone();
+                    let request = request_for_build.clone();
+                    async move {
+                        manager
+                            .build_job_thread(&request, thread_id)
+                            .await
+                            .map_err(|error| ThreadPoolError::ExecutionFailed(error.to_string()))
+                    }
+                })
                 .await
             {
                 Ok(thread) => thread,
@@ -1247,7 +1237,7 @@ impl JobManager {
         &self,
         request: &JobExecutionRequest,
         thread_id: ThreadId,
-    ) -> Result<Arc<RwLock<argus_agent::Thread>>, JobError> {
+    ) -> Result<Thread, JobError> {
         let thread_record = if let Some(thread_repository) = self.thread_repository() {
             thread_repository
                 .get_thread(&thread_id)
@@ -1312,10 +1302,9 @@ impl JobManager {
         if let Some(resolver) = self.current_mcp_tool_resolver() {
             builder = builder.mcp_tool_resolver(resolver);
         }
-        let thread = builder
+        let mut thread = builder
             .build()
             .map_err(|err| JobError::ExecutionFailed(err.to_string()))?;
-        let thread = Arc::new(RwLock::new(thread));
         self.sync_job_runtime_metadata(
             metadata.thread_id,
             metadata.job_id.clone(),
@@ -1323,7 +1312,7 @@ impl JobManager {
         );
 
         if let Some(thread_record) = thread_record {
-            hydrate_turn_log_state(&thread, &base_dir, &thread_record.updated_at)
+            hydrate_turn_log_state(&mut thread, &base_dir, &thread_record.updated_at)
                 .await
                 .map_err(|err| JobError::ExecutionFailed(err.to_string()))?;
         }
@@ -1335,18 +1324,12 @@ impl JobManager {
         SessionId(*thread_id.inner())
     }
 
-    async fn persist_thread_stats(
-        &self,
-        thread_id: &ThreadId,
-        thread: &Arc<RwLock<argus_agent::Thread>>,
-    ) {
+    async fn persist_thread_stats(&self, thread_id: &ThreadId, thread: &ThreadHandle) {
         let Some(thread_repository) = self.thread_repository() else {
             return;
         };
-        let (token_count, turn_count) = {
-            let guard = thread.read().await;
-            (guard.token_count(), guard.turn_count())
-        };
+        let token_count = thread.token_count();
+        let turn_count = thread.turn_count();
         if let Err(error) = thread_repository
             .update_thread_stats(thread_id, token_count, turn_count)
             .await
@@ -1695,7 +1678,7 @@ impl JobManager {
 
     async fn trace_base_dir_for_thread(&self, thread_id: ThreadId) -> Result<PathBuf, JobError> {
         if let Some(thread) = self.thread_pool.loaded_thread(&thread_id) {
-            return thread.read().await.trace_base_dir().ok_or_else(|| {
+            return thread.trace_base_dir().ok_or_else(|| {
                 JobError::ExecutionFailed(format!(
                     "thread {} does not expose a trace directory",
                     thread_id
@@ -1732,8 +1715,7 @@ impl JobManager {
             return format!("Thread {}", thread_id);
         };
 
-        let guard = thread.read().await;
-        guard.agent_record().display_name.clone()
+        thread.agent_display_name()
     }
 
     fn route_mailbox_message(message: MailboxMessage) -> ThreadMessage {
@@ -1760,25 +1742,21 @@ impl JobManager {
         }
     }
 
-    async fn summarize_thread_history(thread: &Arc<RwLock<argus_agent::Thread>>) -> String {
+    async fn summarize_thread_history(thread: &ThreadHandle) -> String {
         const SUMMARY_LIMIT: usize = 4000;
 
-        let summary = {
-            let guard = thread.read().await;
-            guard
-                .history_iter()
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev()
-                .find_map(|message| match message {
-                    ChatMessage {
-                        role: Role::Assistant,
-                        content,
-                        ..
-                    } if !content.is_empty() => Some(content.clone()),
-                    _ => None,
-                })
-        };
+        let summary = thread
+            .history()
+            .into_iter()
+            .rev()
+            .find_map(|message| match message {
+                ChatMessage {
+                    role: Role::Assistant,
+                    content,
+                    ..
+                } if !content.is_empty() => Some(content),
+                _ => None,
+            });
 
         match summary {
             Some(content) => {
@@ -1797,20 +1775,14 @@ impl JobManager {
     async fn await_job_turn_result(
         &self,
         execution_thread_id: ThreadId,
-        thread: &Arc<RwLock<argus_agent::Thread>>,
+        thread: &ThreadHandle,
         mut runtime_rx: broadcast::Receiver<ThreadEvent>,
         fallback_job_id: String,
         cancellation: TurnCancellation,
     ) -> ThreadJobResult {
-        let (agent_id, agent_display_name, agent_description) = {
-            let guard = thread.read().await;
-            let agent_record = guard.agent_record();
-            (
-                agent_record.id,
-                agent_record.display_name.clone(),
-                agent_record.description.clone(),
-            )
-        };
+        let agent_id = thread.agent_id();
+        let agent_display_name = thread.agent_display_name();
+        let agent_description = thread.agent_description();
 
         let mut token_usage = None;
         let mut failure = None;

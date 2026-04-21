@@ -3,10 +3,10 @@
   "current_phase": "completed",
   "iteration": 2,
   "max_iterations": 5,
-  "started_at": "2026-04-19T15:44:42Z",
-  "task_description": "Consensus-plan the Session/ThreadPool/Job boundary refactor into a new argus-thread-pool crate, using the deep-interview spec as source of truth.",
+  "started_at": "2026-04-20T15:17:30Z",
+  "task_description": "Consensus-plan the argus-agent Thread-first lock-free redesign using .omx/specs/deep-interview-argus-agent-thread-core-lock-free.md as source of truth.",
   "profile": "consensus-short",
-  "source_spec": ".omx/specs/deep-interview-session-threadpool-job-boundaries.md",
+  "source_spec": ".omx/specs/deep-interview-argus-agent-thread-core-lock-free.md",
   "current_focus": "initial_prd",
   "context_snapshot_path": ".omx/context/session-threadpool-job-boundaries-20260419T031842Z.md",
   "target_artifacts": [
@@ -24,7 +24,7 @@
     "crates/argus-session/src/session.rs:29-140"
   ],
   "critic_iterations": [],
-  "completed_at": "2026-04-19T16:05:00Z",
+  "completed_at": "2026-04-20T15:42:30Z",
   "artifacts": {
     "prd": ".omx/plans/prd-thread-pool-boundaries.md",
     "test_spec": ".omx/plans/test-spec-thread-pool-boundaries.md"
@@ -38,5 +38,42 @@
   "final_decision": "Stage the extraction: test first, invert root ownership, split helper seams and session-owned ThreadSessionIndex, introduce argus-thread-pool for pure pool-core, preserve session_id compatibility via adapter outside pool-core.",
   "recommended_next_step": "$ralph .omx/plans/prd-thread-pool-boundaries.md",
   "team_next_step": "$team .omx/plans/prd-thread-pool-boundaries.md",
-  "residual_risk": "none blocking; protocol cleanup intentionally deferred"
+  "residual_risk": "none blocking; protocol cleanup intentionally deferred",
+  "slug": "argus-agent-thread-core-lock-free",
+  "context_snapshot": ".omx/context/argus-agent-thread-core-lock-free-20260420T150100Z.md",
+  "consensus_iterations": [
+    {
+      "iteration": 0,
+      "planner_status": "drafted",
+      "architect_verdict": "ITERATE",
+      "critic_verdict": "REJECT",
+      "key_feedback": [
+        "handle contract underspecified",
+        "metadata authority not pinned",
+        "migration seams missing",
+        "plan stale vs current repo state",
+        "verification too weak"
+      ]
+    },
+    {
+      "iteration": 1,
+      "planner_status": "revised",
+      "architect_verdict": "APPROVE",
+      "critic_verdict": "APPROVE",
+      "key_feedback": [
+        "retain tradeoff note about eventual consistency vs direct-read convenience",
+        "keep mandatory verifier/code-reviewer pass because grep residue checks are heuristic"
+      ]
+    }
+  ],
+  "current_branch": "planner-revision",
+  "approved": true,
+  "approved_artifacts": {
+    "prd": ".omx/plans/prd-thread-owner-lock-free-refactor.md",
+    "test_spec": ".omx/plans/test-spec-thread-owner-lock-free-refactor.md"
+  },
+  "recommended_execution": {
+    "ralph": "preferred if one owner should execute sequentially through the defined phase gates",
+    "team": "appropriate after the owner/handle contract is fixed enough for disjoint pool/session/job lanes"
+  }
 }

@@ -1,7 +1,4 @@
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-
-use tokio::sync::RwLock;
 
 use crate::config::ThreadConfigBuilder;
 use crate::thread::Thread;
@@ -53,7 +50,7 @@ pub fn build_thread_config(
 }
 
 pub async fn hydrate_turn_log_state(
-    thread: &Arc<RwLock<Thread>>,
+    thread: &mut Thread,
     base_dir: &Path,
     updated_at: &str,
 ) -> Result<(), ThreadBootstrapError> {
@@ -64,10 +61,7 @@ pub async fn hydrate_turn_log_state(
         .await
         .map_err(|err| ThreadBootstrapError::Failed(err.to_string()))?;
     if recovered.turn_count() > 0 {
-        thread
-            .write()
-            .await
-            .hydrate_from_turn_log_state(recovered, updated_at);
+        thread.hydrate_from_turn_log_state(recovered, updated_at);
     }
     Ok(())
 }

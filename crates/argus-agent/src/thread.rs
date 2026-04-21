@@ -1,11 +1,11 @@
 //! Thread implementation.
 
 use std::collections::VecDeque;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use chrono::{DateTime, Utc};
 use derive_builder::Builder;
-use tokio::sync::{RwLock, broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio::task::{JoinError, JoinHandle};
 
 use crate::turn::{self, TurnCancellation};
@@ -29,7 +29,7 @@ use super::plan_tool::UpdatePlanTool;
 use super::turn_log_store::{
     RecoveredThreadLogState, append_turn_record, recover_thread_log_state,
 };
-use super::types::ThreadInfo;
+use super::types::{ThreadInfo, ThreadRuntimeSnapshot, ThreadState};
 /// Default broadcast channel capacity.
 const DEFAULT_CHANNEL_CAPACITY: usize = 256;
 
@@ -80,6 +80,60 @@ pub(crate) enum ThreadLoopAction {
     },
     /// No immediate action is required.
     Noop,
+}
+
+enum ThreadOwnerCommand {
+    SetTitle {
+        title: Option<String>,
+        ack: oneshot::Sender<()>,
+    },
+    SetProvider {
+        provider: Arc<dyn LlmProvider>,
+        ack: oneshot::Sender<()>,
+    },
+    SetMcpToolResolver {
+        resolver: Option<Arc<dyn McpToolResolver>>,
+        ack: oneshot::Sender<()>,
+    },
+}
+
+struct ThreadHandleInner {
+    id: ThreadId,
+    session_id: SessionId,
+    message_tx: mpsc::UnboundedSender<ThreadMessage>,
+    owner_tx: mpsc::UnboundedSender<ThreadOwnerCommand>,
+    pipe_tx: broadcast::Sender<ThreadEvent>,
+    snapshot_rx: watch::Receiver<ThreadRuntimeSnapshot>,
+}
+
+/// Cloneable observer/control handle for a loaded thread runtime.
+#[derive(Clone)]
+pub struct ThreadHandle {
+    inner: Arc<ThreadHandleInner>,
+}
+
+/// Weak handle used by session-side caches to avoid keeping runtimes resident.
+#[derive(Clone)]
+pub struct WeakThreadHandle {
+    inner: Weak<ThreadHandleInner>,
+}
+
+impl std::fmt::Debug for ThreadHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ThreadHandle")
+            .field("id", &self.id())
+            .field("session_id", &self.session_id())
+            .field("state", &self.state())
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for WeakThreadHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WeakThreadHandle")
+            .field("live", &self.inner.strong_count())
+            .finish()
+    }
 }
 
 /// Thread - multi-turn conversation session.
@@ -140,6 +194,10 @@ pub struct Thread {
     #[builder(default)]
     pipe_tx: broadcast::Sender<ThreadEvent>,
 
+    /// Eventually consistent runtime snapshot publisher for loaded-handle reads.
+    #[builder(default)]
+    snapshot_tx: Option<watch::Sender<ThreadRuntimeSnapshot>>,
+
     /// Thread ingress sender for low-volume orchestration and payload messages.
     #[builder(default)]
     message_tx: mpsc::UnboundedSender<ThreadMessage>,
@@ -151,6 +209,10 @@ pub struct Thread {
     /// FIFO payload messages owned by the thread runtime.
     #[builder(default)]
     pending_messages: VecDeque<ThreadMessage>,
+
+    /// Owner-only command receiver, taken when a runtime handle is spawned.
+    #[builder(default)]
+    owner_rx: Option<mpsc::UnboundedReceiver<ThreadOwnerCommand>>,
 
     /// Optional runtime resolver that injects ready MCP tools for this agent.
     #[builder(default, setter(strip_option))]
@@ -217,12 +279,186 @@ impl ThreadBuilder {
             runtime_state: ThreadRuntimeState::Idle,
             active_turn_cancellation: None,
             pipe_tx,
+            snapshot_tx: None,
             message_tx,
             message_rx: Some(message_rx),
             pending_messages: VecDeque::new(),
+            owner_rx: None,
             mcp_tool_resolver: self.mcp_tool_resolver.flatten(),
             plan_store,
         })
+    }
+}
+
+impl WeakThreadHandle {
+    /// Upgrade a weak runtime handle into a live handle if the runtime is still resident.
+    pub fn upgrade(&self) -> Option<ThreadHandle> {
+        self.inner.upgrade().map(|inner| ThreadHandle { inner })
+    }
+}
+
+impl ThreadHandle {
+    fn with_snapshot<T>(&self, project: impl FnOnce(&ThreadRuntimeSnapshot) -> T) -> T {
+        let snapshot = self.inner.snapshot_rx.borrow();
+        project(&snapshot)
+    }
+
+    async fn send_owner_command(
+        &self,
+        command: impl FnOnce(oneshot::Sender<()>) -> ThreadOwnerCommand,
+    ) -> Result<(), ThreadError> {
+        let (ack_tx, ack_rx) = oneshot::channel();
+        self.inner
+            .owner_tx
+            .send(command(ack_tx))
+            .map_err(|_| ThreadError::ChannelClosed)?;
+        ack_rx.await.map_err(|_| ThreadError::ChannelClosed)
+    }
+
+    /// Downgrade this runtime handle for cache-only storage.
+    pub fn downgrade(&self) -> WeakThreadHandle {
+        WeakThreadHandle {
+            inner: Arc::downgrade(&self.inner),
+        }
+    }
+
+    /// Returns true when two handles point at the same live runtime instance.
+    pub fn same_runtime(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+
+    /// Get the thread identifier.
+    pub fn id(&self) -> ThreadId {
+        self.inner.id
+    }
+
+    /// Get the session identifier.
+    pub fn session_id(&self) -> SessionId {
+        self.inner.session_id
+    }
+
+    /// Subscribe to runtime thread events.
+    pub fn subscribe(&self) -> broadcast::Receiver<ThreadEvent> {
+        self.inner.pipe_tx.subscribe()
+    }
+
+    /// Broadcast an event directly onto the thread event channel.
+    pub fn broadcast_to_self(&self, event: ThreadEvent) {
+        let _ = self.inner.pipe_tx.send(event);
+    }
+
+    /// Send a protocol message into the thread mailbox.
+    pub fn send_message(&self, message: ThreadMessage) -> Result<(), ThreadError> {
+        self.inner
+            .message_tx
+            .send(message)
+            .map_err(|_| ThreadError::ChannelClosed)
+    }
+
+    /// Return the latest eventually consistent runtime snapshot.
+    pub fn snapshot(&self) -> ThreadRuntimeSnapshot {
+        self.inner.snapshot_rx.borrow().clone()
+    }
+
+    /// Return the latest title.
+    pub fn title(&self) -> Option<String> {
+        self.with_snapshot(|snapshot| snapshot.title.clone())
+    }
+
+    /// Return the latest update timestamp.
+    pub fn updated_at(&self) -> DateTime<Utc> {
+        self.with_snapshot(|snapshot| snapshot.updated_at)
+    }
+
+    /// Return committed history from the latest snapshot.
+    pub fn history(&self) -> Vec<ChatMessage> {
+        self.with_snapshot(|snapshot| snapshot.history.clone())
+    }
+
+    /// Return the current turn count.
+    pub fn turn_count(&self) -> u32 {
+        self.with_snapshot(|snapshot| snapshot.turn_count)
+    }
+
+    /// Return the current token count.
+    pub fn token_count(&self) -> u32 {
+        self.with_snapshot(|snapshot| snapshot.token_count)
+    }
+
+    /// Return the current plan item count.
+    pub fn plan_item_count(&self) -> usize {
+        self.with_snapshot(|snapshot| snapshot.plan_item_count)
+    }
+
+    /// Return the cached provider/model label.
+    pub fn provider_model(&self) -> String {
+        self.with_snapshot(|snapshot| snapshot.provider_model.clone())
+    }
+
+    /// Return the cached agent display name.
+    pub fn agent_display_name(&self) -> String {
+        self.with_snapshot(|snapshot| snapshot.agent_display_name.clone())
+    }
+
+    /// Return the cached agent identifier.
+    pub fn agent_id(&self) -> argus_protocol::AgentId {
+        self.with_snapshot(|snapshot| snapshot.agent_id)
+    }
+
+    /// Return the cached agent description.
+    pub fn agent_description(&self) -> String {
+        self.with_snapshot(|snapshot| snapshot.agent_description.clone())
+    }
+
+    /// Return the cached frozen system prompt.
+    pub fn agent_system_prompt(&self) -> String {
+        self.with_snapshot(|snapshot| snapshot.agent_system_prompt.clone())
+    }
+
+    /// Return the cached trace base directory.
+    pub fn trace_base_dir(&self) -> Option<std::path::PathBuf> {
+        self.with_snapshot(|snapshot| snapshot.trace_base_dir.clone())
+    }
+
+    /// Return the cached estimated memory bytes.
+    pub fn estimated_memory_bytes(&self) -> u64 {
+        self.with_snapshot(|snapshot| snapshot.estimated_memory_bytes)
+    }
+
+    /// Returns true when the runtime currently reports a running turn.
+    pub fn is_turn_running(&self) -> bool {
+        self.state() != ThreadState::Idle
+    }
+
+    /// Return the cached runtime state.
+    pub fn state(&self) -> ThreadState {
+        self.with_snapshot(|snapshot| snapshot.state)
+    }
+
+    /// Returns true when the snapshot contains visible history.
+    pub fn has_non_system_history(&self) -> bool {
+        self.with_snapshot(|snapshot| !snapshot.history.is_empty())
+    }
+
+    /// Update the in-memory runtime title.
+    pub async fn set_title(&self, title: Option<String>) -> Result<(), ThreadError> {
+        self.send_owner_command(|ack| ThreadOwnerCommand::SetTitle { title, ack })
+            .await
+    }
+
+    /// Update the bound provider for subsequent turns.
+    pub async fn set_provider(&self, provider: Arc<dyn LlmProvider>) -> Result<(), ThreadError> {
+        self.send_owner_command(|ack| ThreadOwnerCommand::SetProvider { provider, ack })
+            .await
+    }
+
+    /// Update the MCP tool resolver for subsequent turns.
+    pub async fn set_mcp_tool_resolver(
+        &self,
+        resolver: Option<Arc<dyn McpToolResolver>>,
+    ) -> Result<(), ThreadError> {
+        self.send_owner_command(|ack| ThreadOwnerCommand::SetMcpToolResolver { resolver, ack })
+            .await
     }
 }
 
@@ -252,11 +488,90 @@ impl Thread {
     pub fn set_title(&mut self, title: Option<String>) {
         self.title = title.filter(|value| !value.trim().is_empty());
         self.updated_at = Utc::now();
+        self.publish_runtime_snapshot();
     }
 
     /// Get last update timestamp.
     pub fn updated_at(&self) -> DateTime<Utc> {
         self.updated_at
+    }
+
+    fn runtime_state_view(&self) -> ThreadState {
+        if self.is_turn_running() {
+            ThreadState::Processing
+        } else {
+            ThreadState::Idle
+        }
+    }
+
+    fn estimate_memory_bytes(&self) -> u64 {
+        let history_bytes = self
+            .history_iter()
+            .map(|message| message.content.len() as u64)
+            .sum::<u64>();
+        let plan_bytes = self.plan_store.store().read().unwrap().len() as u64 * 128;
+        history_bytes + plan_bytes + u64::from(self.token_count())
+    }
+
+    fn runtime_snapshot(&self) -> ThreadRuntimeSnapshot {
+        let plan_item_count = self.plan_store.store().read().unwrap().len();
+        ThreadRuntimeSnapshot {
+            id: self.id,
+            session_id: self.session_id,
+            title: self.title.clone(),
+            updated_at: self.updated_at,
+            history: self.history_iter().cloned().collect(),
+            turn_count: self.turn_count(),
+            token_count: self.token_count(),
+            plan_item_count,
+            state: self.runtime_state_view(),
+            provider_model: self.provider.model_name().to_string(),
+            agent_display_name: self.agent_record.display_name.clone(),
+            agent_id: self.agent_record.id,
+            agent_description: self.agent_record.description.clone(),
+            agent_system_prompt: self.agent_record.system_prompt.clone(),
+            trace_base_dir: self.trace_base_dir(),
+            estimated_memory_bytes: self.estimate_memory_bytes(),
+        }
+    }
+
+    fn publish_runtime_snapshot(&self) {
+        if let Some(snapshot_tx) = &self.snapshot_tx {
+            let _ = snapshot_tx.send(self.runtime_snapshot());
+        }
+    }
+
+    fn take_owner_rx(&mut self) -> Option<mpsc::UnboundedReceiver<ThreadOwnerCommand>> {
+        self.owner_rx.take()
+    }
+
+    /// Spawn a single-owner runtime task and return the cloneable observer/control handle.
+    pub fn spawn_runtime(mut self) -> Result<ThreadHandle, ThreadError> {
+        let message_rx = self.take_message_rx().ok_or(ThreadError::RuntimeActive)?;
+        let (owner_tx, owner_rx) = mpsc::unbounded_channel();
+        let (snapshot_tx, snapshot_rx) = watch::channel(self.runtime_snapshot());
+        self.snapshot_tx = Some(snapshot_tx);
+        self.owner_rx = Some(owner_rx);
+        self.reset_runtime_loop_state();
+        self.publish_runtime_snapshot();
+
+        let handle = ThreadHandle {
+            inner: Arc::new(ThreadHandleInner {
+                id: self.id,
+                session_id: self.session_id,
+                message_tx: self.message_tx.clone(),
+                owner_tx,
+                pipe_tx: self.pipe_tx.clone(),
+                snapshot_rx,
+            }),
+        };
+
+        let owner_rx = self.take_owner_rx().ok_or(ThreadError::ChannelClosed)?;
+        tokio::spawn(async move {
+            Self::run_reactor_loop(self, message_rx, owner_rx).await;
+        });
+
+        Ok(handle)
     }
 
     /// Get information about this thread.
@@ -302,6 +617,7 @@ impl Thread {
     fn reset_runtime_loop_state(&mut self) {
         self.runtime_state = ThreadRuntimeState::Idle;
         self.active_turn_cancellation = None;
+        self.publish_runtime_snapshot();
     }
 
     fn dispatch_runtime_message(&mut self, message: ThreadMessage) -> ThreadLoopAction {
@@ -319,6 +635,7 @@ impl Thread {
 
     fn complete_runtime_turn(&mut self, _committed: bool) -> ThreadLoopAction {
         self.runtime_state = ThreadRuntimeState::Idle;
+        self.publish_runtime_snapshot();
         self.try_start_next_turn()
     }
 
@@ -336,6 +653,7 @@ impl Thread {
     fn start_runtime_turn(&mut self, message: QueuedUserMessage) -> ThreadLoopAction {
         let turn_number = derive_next_user_turn_number(&self.turns);
         self.runtime_state = ThreadRuntimeState::Running { turn_number };
+        self.publish_runtime_snapshot();
 
         ThreadLoopAction::StartTurn {
             turn_number,
@@ -348,6 +666,7 @@ impl Thread {
         match self.runtime_state {
             ThreadRuntimeState::Running { turn_number } => {
                 self.runtime_state = ThreadRuntimeState::Stopping { turn_number };
+                self.publish_runtime_snapshot();
                 ThreadLoopAction::StopTurn { turn_number }
             }
             ThreadRuntimeState::Idle | ThreadRuntimeState::Stopping { .. } => {
@@ -453,6 +772,7 @@ impl Thread {
             trace_config.model = Some(model_name);
         }
         self.updated_at = Utc::now();
+        self.publish_runtime_snapshot();
     }
 
     /// Replace the runtime MCP tool resolver for subsequent turns.
@@ -469,6 +789,7 @@ impl Thread {
         self.active_turn_cancellation = None;
         self.runtime_state = ThreadRuntimeState::Idle;
         self.updated_at = updated_at;
+        self.publish_runtime_snapshot();
     }
 
     /// Append a checkpoint record to the turn history.
@@ -481,6 +802,7 @@ impl Thread {
         self.turns
             .push(TurnRecord::checkpoint(summary_messages, token_usage));
         self.updated_at = Utc::now();
+        self.publish_runtime_snapshot();
     }
 
     fn emit_mcp_notice(&self, message: String) {
@@ -569,29 +891,27 @@ impl Thread {
         Ok(())
     }
 
-    /// Spawn the thread-owned reactor loop that coordinates queued thread messages.
-    pub async fn spawn_reactor(thread: Arc<RwLock<Self>>) {
-        let message_rx = {
-            let mut guard = thread.write().await;
-            let message_rx = match guard.take_message_rx() {
-                Some(rx) => rx,
-                None => {
-                    tracing::warn!("thread message receiver already taken");
-                    return;
-                }
-            };
-            guard.reset_runtime_loop_state();
-            message_rx
-        };
-
-        tokio::spawn(async move {
-            Self::run_reactor_loop(thread, message_rx).await;
-        });
+    fn handle_owner_command(&mut self, command: ThreadOwnerCommand) {
+        match command {
+            ThreadOwnerCommand::SetTitle { title, ack } => {
+                self.set_title(title);
+                let _ = ack.send(());
+            }
+            ThreadOwnerCommand::SetProvider { provider, ack } => {
+                self.set_provider(provider);
+                let _ = ack.send(());
+            }
+            ThreadOwnerCommand::SetMcpToolResolver { resolver, ack } => {
+                self.set_mcp_tool_resolver(resolver);
+                let _ = ack.send(());
+            }
+        }
     }
 
     async fn run_reactor_loop(
-        thread: Arc<RwLock<Self>>,
+        mut thread: Self,
         mut message_rx: mpsc::UnboundedReceiver<ThreadMessage>,
+        mut owner_rx: mpsc::UnboundedReceiver<ThreadOwnerCommand>,
     ) {
         let mut active_turn: Option<JoinHandle<Result<TurnRecord, ThreadError>>> = None;
         let mut shutdown_requested = false;
@@ -606,27 +926,18 @@ impl Thread {
                     let runtime_action = match message {
                         ThreadMessage::Control(ThreadControlMessage::ShutdownRuntime) => {
                             shutdown_requested = true;
-                            let state = { thread.read().await.runtime_state };
-                            match state {
+                            match thread.runtime_state {
                                 ThreadRuntimeState::Idle => break,
-                                _ => {
-                                    let mut guard = thread.write().await;
-                                    guard.cancel_active_turn()
-                                }
+                                _ => thread.cancel_active_turn(),
                             }
                         }
-                        other => {
-                            let mut guard = thread.write().await;
-                            guard.dispatch_runtime_message(other)
-                        }
+                        other => thread.dispatch_runtime_message(other),
                     };
 
-                    Self::process_loop_action(
-                        Arc::clone(&thread),
-                        runtime_action,
-                        &mut active_turn,
-                    )
-                    .await;
+                    thread.process_loop_action(runtime_action, &mut active_turn).await;
+                }
+                Some(command) = owner_rx.recv() => {
+                    thread.handle_owner_command(command);
                 }
                 result = async {
                     match active_turn.as_mut() {
@@ -642,13 +953,9 @@ impl Thread {
                     };
                     active_turn = None;
 
-                    Self::settle_active_turn(
-                        &thread,
-                        result,
-                        &mut active_turn,
-                        shutdown_requested,
-                    )
-                    .await;
+                    thread
+                        .settle_active_turn(result, &mut active_turn, shutdown_requested)
+                        .await;
 
                     if shutdown_requested && active_turn.is_none() {
                         break;
@@ -660,7 +967,7 @@ impl Thread {
     }
 
     async fn process_loop_action(
-        thread: Arc<RwLock<Self>>,
+        &mut self,
         action: ThreadLoopAction,
         active_turn: &mut Option<JoinHandle<Result<TurnRecord, ThreadError>>>,
     ) {
@@ -671,20 +978,12 @@ impl Thread {
                 msg_override,
             } => {
                 *active_turn = Some(
-                    Self::start_turn_execution(
-                        Arc::clone(&thread),
-                        turn_number,
-                        content,
-                        msg_override,
-                    )
-                    .await,
+                    self.start_turn_execution(turn_number, content, msg_override)
+                        .await,
                 );
             }
             ThreadLoopAction::StopTurn { turn_number } => {
-                let cancellation = {
-                    let guard = thread.read().await;
-                    guard.active_turn_cancellation.clone()
-                };
+                let cancellation = self.active_turn_cancellation.clone();
                 if let Some(cancellation) = cancellation {
                     tracing::info!(turn_number, "cancelling active turn");
                     cancellation.cancel();
@@ -697,7 +996,7 @@ impl Thread {
     }
 
     async fn start_turn_execution(
-        thread: Arc<RwLock<Self>>,
+        &mut self,
         turn_number: u32,
         content: String,
         msg_override: Option<MessageOverride>,
@@ -715,20 +1014,19 @@ impl Thread {
             thread_event_tx,
             compactor,
         ) = {
-            let mut guard = thread.write().await;
-            let effective_record = guard
+            let effective_record = self
                 .prepare_turn_start(msg_override, cancellation.clone())
                 .await;
-            let mcp_tools = guard
+            let mcp_tools = self
                 .resolve_mcp_tools(&effective_record)
                 .await
                 .unwrap_or_default();
             let (thread_id, history, tools, hooks, provider, config, thread_event_tx, compactor) =
-                guard.build_turn_execution_parts(effective_record.clone(), mcp_tools);
+                self.build_turn_execution_parts(effective_record.clone(), mcp_tools);
 
             (
                 thread_id,
-                guard.id,
+                self.id,
                 history,
                 tools,
                 hooks,
@@ -805,96 +1103,50 @@ impl Thread {
     }
 
     async fn settle_active_turn(
-        thread: &Arc<RwLock<Self>>,
+        &mut self,
         result: Result<TurnRecord, ThreadError>,
         active_turn: &mut Option<JoinHandle<Result<TurnRecord, ThreadError>>>,
         shutdown_requested: bool,
     ) {
         let committed = result.is_ok();
-        let settled_turn_number = match thread.read().await.runtime_state {
+        let settled_turn_number = match self.runtime_state {
             ThreadRuntimeState::Running { turn_number }
             | ThreadRuntimeState::Stopping { turn_number } => Some(turn_number),
             ThreadRuntimeState::Idle => None,
         };
-        let thread_id = {
-            let guard = thread.read().await;
-            guard.id().inner().to_string()
-        };
+        let settled_turn_number = settled_turn_number.unwrap_or_default();
+        let thread_id = self.id().inner().to_string();
 
-        {
-            let guard = thread.read().await;
-            match &result {
-                Ok(record) => {
-                    guard.broadcast_to_self(ThreadEvent::TurnCompleted {
-                        thread_id: thread_id.clone(),
-                        turn_number: settled_turn_number.unwrap_or_default(),
-                        token_usage: record.token_usage.clone(),
-                    });
-                }
-                Err(ThreadError::TurnFailed(crate::TurnError::Cancelled)) => {}
-                Err(error) => {
-                    guard.broadcast_to_self(ThreadEvent::TurnFailed {
-                        thread_id: thread_id.clone(),
-                        turn_number: settled_turn_number.unwrap_or_default(),
-                        error: error.to_string(),
-                    });
-                }
-            }
-        }
+        self.broadcast_turn_terminal_event(settled_turn_number, &result);
 
-        let finish_result = {
-            let mut guard = thread.write().await;
-            guard.active_turn_cancellation = None;
-            guard.finish_turn(result)
-        };
+        self.active_turn_cancellation = None;
+        let finish_result = self.finish_turn(result);
 
         if let Err(error) = finish_result {
             tracing::error!("turn failed: {}", error);
         }
 
         if committed {
-            let (base_dir, turns) = {
-                let guard = thread.read().await;
-                (guard.trace_base_dir(), guard.turns.clone())
-            };
-
-            if let Some(base_dir) = base_dir
-                && let Err(error) = Self::persist_trace_turns(&base_dir, &turns).await
-            {
-                tracing::warn!(
-                    error = %error,
-                    "failed to persist committed turn records"
-                );
-            }
+            self.persist_committed_turns_if_needed().await;
         }
 
-        if let Some(turn_number) = settled_turn_number {
-            let guard = thread.read().await;
-            guard.broadcast_to_self(ThreadEvent::TurnSettled {
-                thread_id: thread_id.clone(),
-                turn_number,
-            });
-        }
+        self.broadcast_to_self(ThreadEvent::TurnSettled {
+            thread_id: thread_id.clone(),
+            turn_number: settled_turn_number,
+        });
 
         if shutdown_requested {
-            {
-                let mut guard = thread.write().await;
-                guard.reset_runtime_loop_state();
-            }
-            let guard = thread.read().await;
-            guard.broadcast_to_self(ThreadEvent::Idle { thread_id });
+            self.reset_runtime_loop_state();
+            self.broadcast_to_self(ThreadEvent::Idle { thread_id });
             return;
         }
 
-        let runtime_action = {
-            let mut thread_guard = thread.write().await;
-            thread_guard.complete_runtime_turn(committed)
-        };
-        Self::process_loop_action(Arc::clone(thread), runtime_action.clone(), active_turn).await;
+        let runtime_action = self.complete_runtime_turn(committed);
+        self.process_loop_action(runtime_action.clone(), active_turn)
+            .await;
 
         if matches!(runtime_action, ThreadLoopAction::Noop) && active_turn.is_none() {
-            let guard = thread.read().await;
-            guard.broadcast_to_self(ThreadEvent::Idle { thread_id });
+            self.broadcast_to_self(ThreadEvent::Idle { thread_id });
         }
     }
 
@@ -1038,6 +1290,7 @@ impl Thread {
         };
 
         self.active_turn_cancellation = Some(cancellation);
+        self.publish_runtime_snapshot();
         effective_record
     }
 
@@ -1052,9 +1305,13 @@ impl Thread {
             Ok(record) => {
                 self.turns.push(record);
                 self.updated_at = Utc::now();
+                self.publish_runtime_snapshot();
                 Ok(())
             }
-            Err(ThreadError::TurnFailed(crate::TurnError::Cancelled)) => Ok(()),
+            Err(ThreadError::TurnFailed(crate::TurnError::Cancelled)) => {
+                self.publish_runtime_snapshot();
+                Ok(())
+            }
             Err(error) => Err(error),
         }
     }
@@ -1983,23 +2240,19 @@ mod tests {
     #[tokio::test]
     async fn shutdown_runtime_control_cancels_active_turn_and_ignores_followup_messages() {
         let captured_user_inputs = Arc::new(Mutex::new(Vec::new()));
-        let thread = Arc::new(RwLock::new(
-            ThreadBuilder::new()
-                .provider(Arc::new(PendingStreamProvider::new(Arc::clone(
-                    &captured_user_inputs,
-                ))))
-                .compactor(Arc::new(NoopCompactor))
-                .agent_record(test_agent_record_without_system_prompt())
-                .session_id(SessionId::new())
-                .build()
-                .expect("thread should build"),
-        ));
-
-        Thread::spawn_reactor(Arc::clone(&thread)).await;
+        let thread = ThreadBuilder::new()
+            .provider(Arc::new(PendingStreamProvider::new(Arc::clone(
+                &captured_user_inputs,
+            ))))
+            .compactor(Arc::new(NoopCompactor))
+            .agent_record(test_agent_record_without_system_prompt())
+            .session_id(SessionId::new())
+            .build()
+            .expect("thread should build")
+            .spawn_runtime()
+            .expect("runtime handle should spawn");
 
         thread
-            .read()
-            .await
             .send_message(ThreadMessage::UserInput {
                 content: "first".to_string(),
                 msg_override: None,
@@ -2008,7 +2261,7 @@ mod tests {
 
         timeout(Duration::from_secs(5), async {
             loop {
-                if thread.read().await.is_turn_running() {
+                if thread.is_turn_running() {
                     break;
                 }
                 sleep(Duration::from_millis(10)).await;
@@ -2018,15 +2271,11 @@ mod tests {
         .expect("runtime should start the first turn");
 
         thread
-            .read()
-            .await
             .send_message(ThreadMessage::Control(
                 ThreadControlMessage::ShutdownRuntime,
             ))
             .expect("shutdown control should enqueue");
         thread
-            .read()
-            .await
             .send_message(ThreadMessage::UserInput {
                 content: "second".to_string(),
                 msg_override: None,
@@ -2035,7 +2284,7 @@ mod tests {
 
         timeout(Duration::from_secs(5), async {
             loop {
-                if !thread.read().await.is_turn_running() {
+                if !thread.is_turn_running() {
                     break;
                 }
                 sleep(Duration::from_millis(10)).await;
@@ -2052,9 +2301,37 @@ mod tests {
             vec!["first".to_string()],
             "shutdown should prevent any follow-up turn from starting"
         );
-        let guard = thread.read().await;
-        assert_eq!(guard.turn_count(), 0);
-        assert_eq!(guard.runtime_state, ThreadRuntimeState::Idle);
+        assert_eq!(thread.turn_count(), 0);
+        assert_eq!(thread.state(), ThreadState::Idle);
+    }
+
+    #[tokio::test]
+    async fn runtime_handles_distinguish_instances_even_with_same_thread_id() {
+        let thread_id = ThreadId::new();
+        let first = ThreadBuilder::new()
+            .id(thread_id)
+            .provider(Arc::new(DummyProvider))
+            .compactor(Arc::new(NoopCompactor))
+            .agent_record(test_agent_record_without_system_prompt())
+            .session_id(SessionId::new())
+            .build()
+            .expect("thread should build")
+            .spawn_runtime()
+            .expect("runtime handle should spawn");
+        let first_clone = first.clone();
+        let second = ThreadBuilder::new()
+            .id(thread_id)
+            .provider(Arc::new(DummyProvider))
+            .compactor(Arc::new(NoopCompactor))
+            .agent_record(test_agent_record_without_system_prompt())
+            .session_id(SessionId::new())
+            .build()
+            .expect("thread should build")
+            .spawn_runtime()
+            .expect("runtime handle should spawn");
+
+        assert!(first.same_runtime(&first_clone));
+        assert!(!first.same_runtime(&second));
     }
 
     #[tokio::test]

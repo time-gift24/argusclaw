@@ -8,8 +8,8 @@ use tokio::sync::broadcast;
 use argus_agent::history::TurnRecord;
 use argus_agent::history::TurnRecordKind;
 use argus_agent::{
-    CompactError, CompactResult, Compactor, Thread, ThreadBuilder, ThreadError, TurnCancellation,
-    TurnError,
+    CompactError, CompactResult, Compactor, Thread, ThreadBuilder, ThreadError, ThreadState,
+    TurnCancellation, TurnError,
 };
 use argus_llm::retry::{RetryConfig, RetryProvider};
 use argus_protocol::ToolExecutionContext;
@@ -728,24 +728,20 @@ async fn execute_turn_converts_panics_into_regular_thread_errors() {
 }
 
 #[tokio::test]
-async fn execute_turn_rejects_runtime_managed_threads() {
-    let thread = Arc::new(tokio::sync::RwLock::new(build_thread(
+async fn spawn_runtime_returns_idle_handle() {
+    let thread = build_thread(
         Arc::new(MockProvider::new("Hello, world!".to_string())),
         Arc::new(AgentRecord::default()),
         Vec::new(),
         None,
         None,
-    )));
+    );
+    let thread_id = thread.id();
 
-    argus_agent::Thread::spawn_reactor(Arc::clone(&thread)).await;
+    let handle = thread.spawn_runtime().expect("runtime handle should spawn");
 
-    let result = thread
-        .write()
-        .await
-        .execute_turn("Hello".to_string(), None, TurnCancellation::new())
-        .await;
-
-    assert!(matches!(result, Err(ThreadError::RuntimeActive)));
+    assert_eq!(handle.id(), thread_id);
+    assert_eq!(handle.state(), ThreadState::Idle);
 }
 
 #[tokio::test]

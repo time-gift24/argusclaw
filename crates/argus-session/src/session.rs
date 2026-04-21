@@ -1,11 +1,8 @@
-use std::sync::{Arc, Weak};
-
-use argus_agent::Thread;
+use argus_agent::{ThreadHandle, WeakThreadHandle};
 use argus_protocol::{SessionId, ThreadEvent, ThreadId, ThreadMessage};
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
-use tokio::sync::RwLock;
 
 /// Summary of a session for listing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -30,7 +27,7 @@ pub struct ThreadSummary {
 pub struct Session {
     pub id: SessionId,
     pub name: String,
-    threads: DashMap<ThreadId, Weak<RwLock<Thread>>>,
+    threads: DashMap<ThreadId, WeakThreadHandle>,
 }
 
 impl Session {
@@ -42,22 +39,18 @@ impl Session {
         }
     }
 
-    pub fn add_thread(&self, thread: Arc<RwLock<Thread>>) {
-        let thread_arc = Arc::clone(&thread);
-        let Ok(thread_guard) = thread.try_read() else {
-            return;
-        };
-        let thread_id = thread_guard.id();
-        self.threads.insert(thread_id, Arc::downgrade(&thread_arc));
+    pub fn add_thread(&self, thread: ThreadHandle) {
+        let thread_id = thread.id();
+        self.threads.insert(thread_id, thread.downgrade());
     }
 
-    pub fn remove_thread(&self, thread_id: &ThreadId) -> Option<Arc<RwLock<Thread>>> {
+    pub fn remove_thread(&self, thread_id: &ThreadId) -> Option<ThreadHandle> {
         self.threads
             .remove(thread_id)
             .and_then(|pair| pair.1.upgrade())
     }
 
-    pub fn get_thread(&self, thread_id: &ThreadId) -> Option<Arc<RwLock<Thread>>> {
+    pub fn get_thread(&self, thread_id: &ThreadId) -> Option<ThreadHandle> {
         let thread = self
             .threads
             .get(thread_id)
@@ -68,17 +61,15 @@ impl Session {
         thread
     }
 
-    async fn send_thread_message(&self, thread_id: &ThreadId, message: ThreadMessage) -> bool {
+    fn send_thread_message(&self, thread_id: &ThreadId, message: ThreadMessage) -> bool {
         let Some(thread) = self.get_thread(thread_id) else {
             return false;
         };
-        let delivered = thread.read().await.send_message(message).is_ok();
-        delivered
+        thread.send_message(message).is_ok()
     }
 
     pub async fn interrupt_thread(&self, thread_id: &ThreadId) -> bool {
         self.send_thread_message(thread_id, ThreadMessage::Interrupt)
-            .await
     }
 
     pub fn thread_ids(&self) -> Vec<ThreadId> {
@@ -93,15 +84,13 @@ impl Session {
             if let Some(thread) = thread {
                 match &event {
                     ThreadEvent::UserInterrupt { .. } => {
-                        let thread = Arc::clone(&thread);
+                        let thread = thread.clone();
                         tokio::spawn(async move {
-                            let _ = thread.read().await.send_message(ThreadMessage::Interrupt);
+                            let _ = thread.send_message(ThreadMessage::Interrupt);
                         });
                     }
                     _ => {
-                        if let Ok(t) = thread.try_read() {
-                            t.broadcast_to_self(event.clone());
-                        }
+                        thread.broadcast_to_self(event.clone());
                     }
                 }
             } else {
@@ -119,15 +108,13 @@ impl Session {
         let mut stale_thread_ids = Vec::new();
         for entry in self.threads.iter() {
             if let Some(thread) = entry.value().upgrade() {
-                if let Ok(t) = thread.try_read() {
-                    summaries.push(ThreadSummary {
-                        id: t.id(),
-                        title: t.title().map(|s| s.to_string()),
-                        turn_count: t.turn_count() as i64,
-                        token_count: t.token_count() as i64,
-                        updated_at: t.updated_at(),
-                    });
-                }
+                summaries.push(ThreadSummary {
+                    id: thread.id(),
+                    title: thread.title(),
+                    turn_count: thread.turn_count() as i64,
+                    token_count: thread.token_count() as i64,
+                    updated_at: thread.updated_at(),
+                });
             } else {
                 stale_thread_ids.push(*entry.key());
             }

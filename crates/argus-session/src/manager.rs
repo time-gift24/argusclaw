@@ -10,7 +10,7 @@ use argus_agent::thread_trace_store::{
 };
 use argus_agent::tool_context::current_agent_id;
 use argus_agent::turn_log_store::{recover_thread_log_state, RecoveredThreadLogState};
-use argus_agent::{FilePlanStore, LlmThreadCompactor, Thread, ThreadBuilder};
+use argus_agent::{FilePlanStore, LlmThreadCompactor, Thread, ThreadBuilder, ThreadHandle};
 use argus_job::{JobLookup, JobManager};
 use argus_protocol::{
     llm::{ChatMessage, CompletionRequest, CompletionResponse, LlmError, LlmEventStream},
@@ -34,7 +34,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use dashmap::DashMap;
 use rust_decimal::Decimal;
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::broadcast;
 use uuid::Uuid;
 
 use crate::session::{Session, SessionSummary, ThreadSummary};
@@ -242,8 +242,7 @@ impl SessionSchedulerBackend {
             return format!("Thread {}", thread_id);
         };
 
-        let guard = thread.read().await;
-        guard.agent_record().display_name.clone()
+        thread.agent_display_name()
     }
 
     async fn current_scheduler_agent(
@@ -401,10 +400,7 @@ impl SessionSchedulerBackend {
             let Some(thread) = thread_pool.loaded_thread(&child_thread_id) else {
                 continue;
             };
-            let display_name = {
-                let guard = thread.read().await;
-                guard.agent_record().display_name.clone()
-            };
+            let display_name = thread.agent_display_name();
             if display_name == agent_name {
                 matches.push(child_thread_id);
             }
@@ -782,9 +778,11 @@ impl SessionManager {
                         });
                     }
                 }
-                let snapshot =
-                    SessionManager::adapted_thread_pool_state(thread_pool.as_ref(), thread_sessions.as_ref())
-                        .snapshot;
+                let snapshot = SessionManager::adapted_thread_pool_state(
+                    thread_pool.as_ref(),
+                    thread_sessions.as_ref(),
+                )
+                .snapshot;
                 let _ = sender.send(ThreadEvent::ThreadPoolMetricsUpdated { snapshot });
             }));
     }
@@ -793,11 +791,10 @@ impl SessionManager {
         &self,
         session_id: SessionId,
         thread_id: ThreadId,
-    ) -> Result<Arc<RwLock<Thread>>> {
+    ) -> Result<ThreadHandle> {
         self.register_chat_thread(session_id, thread_id);
         let manager = self.clone();
-        let thread = self
-            .thread_pool
+        self.thread_pool
             .load_runtime_with_builder(
                 thread_id,
                 "chat thread",
@@ -815,12 +812,7 @@ impl SessionManager {
                 },
             )
             .await
-            .map_err(Self::map_pool_error)?;
-        thread
-            .write()
-            .await
-            .set_mcp_tool_resolver(Some(Arc::clone(&self.mcp_tool_resolver)));
-        Ok(thread)
+            .map_err(Self::map_pool_error)
     }
 
     fn chat_idle_observer(&self) -> Arc<RuntimeIdleObserver> {
@@ -828,10 +820,8 @@ impl SessionManager {
         Arc::new(move |thread_id, thread, runtime_label| {
             let thread_repo = Arc::clone(&thread_repo);
             Box::pin(async move {
-                let (token_count, turn_count) = {
-                    let guard = thread.read().await;
-                    (guard.token_count(), guard.turn_count())
-                };
+                let token_count = thread.token_count();
+                let turn_count = thread.turn_count();
                 if let Err(error) = thread_repo
                     .update_thread_stats(&thread_id, token_count, turn_count)
                     .await
@@ -875,7 +865,7 @@ impl SessionManager {
             .await?;
         session.add_thread(thread.clone());
         let estimated_memory_bytes =
-            ThreadPool::estimate_thread_memory(&thread).await + message.text.len() as u64;
+            ThreadPool::estimate_thread_memory(&thread) + message.text.len() as u64;
         self.emit_chat_runtime_started(thread_id, session_id, estimated_memory_bytes)?;
         self.thread_pool
             .deliver_thread_message(thread_id, Self::route_mailbox_message(message.clone()))
@@ -887,7 +877,7 @@ impl SessionManager {
         Ok(())
     }
 
-    fn loaded_chat_thread(&self, thread_id: &ThreadId) -> Option<Arc<RwLock<Thread>>> {
+    fn loaded_chat_thread(&self, thread_id: &ThreadId) -> Option<ThreadHandle> {
         self.session_id_for_thread(thread_id)?;
         self.thread_pool.loaded_thread(thread_id)
     }
@@ -931,8 +921,11 @@ impl SessionManager {
                 Some(Self::protocol_runtime_summary(runtime, Some(session_id)))
             })
             .collect();
-        let snapshot =
-            Self::chat_snapshot_from_runtimes(thread_pool, core_state.snapshot.max_threads, &runtimes);
+        let snapshot = Self::chat_snapshot_from_runtimes(
+            thread_pool,
+            core_state.snapshot.max_threads,
+            &runtimes,
+        );
         ThreadPoolState { snapshot, runtimes }
     }
 
@@ -1040,7 +1033,7 @@ impl SessionManager {
         &self,
         session_id: SessionId,
         thread_id: ThreadId,
-    ) -> Result<Arc<RwLock<Thread>>> {
+    ) -> Result<Thread> {
         let thread_record = self
             .thread_repo
             .get_thread_in_session(&thread_id, &session_id)
@@ -1081,7 +1074,7 @@ impl SessionManager {
 
         let config = build_thread_config(base_dir.clone(), provider.model_name().to_string())
             .map_err(Self::map_bootstrap_error)?;
-        let thread_builder = ThreadBuilder::new()
+        let mut thread_builder = ThreadBuilder::new()
             .id(thread_id)
             .session_id(session_id)
             .agent_record(Arc::new(agent_record))
@@ -1089,17 +1082,17 @@ impl SessionManager {
             .provider(provider.clone())
             .tool_manager(Arc::clone(&self.tool_manager))
             .compactor(Arc::new(LlmThreadCompactor::new(provider)));
+        thread_builder = thread_builder.mcp_tool_resolver(Arc::clone(&self.mcp_tool_resolver));
         let plan_store = FilePlanStore::new(base_dir.clone());
-        let thread = thread_builder
+        let mut thread = thread_builder
             .plan_store(plan_store)
             .config(config)
             .build()
             .map_err(|err| ArgusError::LlmError {
                 reason: err.to_string(),
             })?;
-        let thread = Arc::new(RwLock::new(thread));
 
-        hydrate_turn_log_state(&thread, &base_dir, &thread_record.updated_at)
+        hydrate_turn_log_state(&mut thread, &base_dir, &thread_record.updated_at)
             .await
             .map_err(Self::map_bootstrap_error)?;
 
@@ -1478,8 +1471,12 @@ impl SessionManager {
         }
 
         if let Some(thread) = self.loaded_chat_thread(thread_id) {
-            let mut thread = thread.write().await;
-            thread.set_title(in_memory_title);
+            thread
+                .set_title(in_memory_title)
+                .await
+                .map_err(|error| ArgusError::LlmError {
+                    reason: error.to_string(),
+                })?;
         }
 
         Ok(())
@@ -1517,8 +1514,12 @@ impl SessionManager {
         }
 
         if let Some(thread) = self.loaded_chat_thread(thread_id) {
-            let mut thread = thread.write().await;
-            thread.set_provider(provider);
+            thread
+                .set_provider(provider)
+                .await
+                .map_err(|error| ArgusError::LlmError {
+                    reason: error.to_string(),
+                })?;
         }
 
         Ok((provider_id, effective_model))
@@ -1568,7 +1569,7 @@ impl SessionManager {
             .await?;
         session.add_thread(thread.clone());
         let estimated_memory_bytes =
-            ThreadPool::estimate_thread_memory(&thread).await + message.len() as u64;
+            ThreadPool::estimate_thread_memory(&thread) + message.len() as u64;
         self.emit_chat_runtime_started(*thread_id, session_id, estimated_memory_bytes)?;
         self.thread_pool
             .deliver_thread_message(
@@ -1591,8 +1592,6 @@ impl SessionManager {
             Ok(())
         } else if let Some(thread) = self.loaded_chat_thread(thread_id) {
             thread
-                .read()
-                .await
                 .send_message(ThreadMessage::Interrupt)
                 .map_err(|error| ArgusError::LlmError {
                     reason: error.to_string(),
@@ -1611,16 +1610,15 @@ impl SessionManager {
     ) -> Result<Vec<ChatMessage>> {
         self.load(session_id).await?;
         if let Some(thread) = self.loaded_chat_thread(thread_id) {
-            let thread = thread.read().await;
             if thread.has_non_system_history() || thread.turn_count() > 0 {
-                return Ok(thread.history_iter().cloned().collect());
+                return Ok(thread.history());
             }
             let recovered =
                 recover_messages_from_trace(&self.trace_dir, &session_id, thread_id).await?;
             if !recovered.is_empty() {
                 return Ok(recovered);
             }
-            return Ok(thread.history_iter().cloned().collect());
+            return Ok(thread.history());
         }
         let _thread_record = self
             .thread_repo
@@ -1641,14 +1639,9 @@ impl SessionManager {
     ) -> Result<(Vec<ChatMessage>, u32, u32, u32)> {
         self.load(session_id).await?;
         if let Some(thread) = self.loaded_chat_thread(thread_id) {
-            let thread = thread.read().await;
             let (messages, turn_count, token_count) =
                 if thread.has_non_system_history() || thread.turn_count() > 0 {
-                    (
-                        thread.history_iter().cloned().collect(),
-                        thread.turn_count(),
-                        thread.token_count(),
-                    )
+                    (thread.history(), thread.turn_count(), thread.token_count())
                 } else {
                     let recovered =
                         recover_thread_state_from_trace(&self.trace_dir, &session_id, thread_id)
@@ -1660,18 +1653,14 @@ impl SessionManager {
                             recovered.token_count,
                         )
                     } else {
-                        (
-                            thread.history_iter().cloned().collect(),
-                            thread.turn_count(),
-                            thread.token_count(),
-                        )
+                        (thread.history(), thread.turn_count(), thread.token_count())
                     }
                 };
             return Ok((
                 messages,
                 turn_count,
                 token_count,
-                thread.plan().len() as u32,
+                thread.plan_item_count() as u32,
             ));
         }
 
@@ -1726,7 +1715,7 @@ impl SessionManager {
         self.load(session_id).await?;
         self.register_chat_thread(session_id, *thread_id);
         let effective_model = if let Some(thread) = self.loaded_chat_thread(thread_id) {
-            Some(thread.read().await.provider().model_name().to_string())
+            Some(thread.provider_model())
         } else {
             thread_record.model_override.clone()
         };
@@ -1856,14 +1845,15 @@ mod tests {
     use argus_agent::tool_context::{clear_current_agent_id, set_current_agent_id};
     use argus_agent::turn_log_store::append_turn_record;
     use argus_agent::turn_log_store::RecoveredThreadLogState;
+    use argus_agent::ThreadHandle;
     use argus_protocol::llm::ChatMessage;
     use argus_protocol::llm::{
         CompletionRequest, CompletionResponse, LlmError, LlmProvider, LlmProviderRepository,
     };
     use argus_protocol::{
         AgentId, AgentRecord, MailboxMessage, MailboxMessageType, McpToolResolver, ProviderId,
-        ResolvedMcpTools, SessionId, ThinkingConfig, ThreadEvent, ThreadId,
-        ThreadPoolEventReason, ThreadRuntimeStatus, TokenUsage, ToolError,
+        ResolvedMcpTools, SessionId, ThinkingConfig, ThreadEvent, ThreadId, ThreadPoolEventReason,
+        ThreadRuntimeStatus, TokenUsage, ToolError,
     };
     use argus_repository::migrate;
     use argus_repository::traits::JobRepository;
@@ -2100,10 +2090,10 @@ mod tests {
         .await
     }
 
-    async fn wait_until_thread_running(thread: &Arc<tokio::sync::RwLock<argus_agent::Thread>>) {
+    async fn wait_until_thread_running(thread: &ThreadHandle) {
         timeout(Duration::from_secs(5), async {
             loop {
-                if thread.read().await.is_turn_running() {
+                if thread.is_turn_running() {
                     break;
                 }
                 sleep(Duration::from_millis(10)).await;
@@ -2191,12 +2181,11 @@ mod tests {
         let thread = session
             .get_thread(&thread_id)
             .expect("session should keep the thread handle");
-        let guard = thread.read().await;
         assert!(
-            !guard.is_turn_running(),
+            !thread.is_turn_running(),
             "cancel_thread should leave an idle thread idle"
         );
-        assert_eq!(guard.turn_count(), 0);
+        assert_eq!(thread.turn_count(), 0);
     }
 
     #[tokio::test]
@@ -2319,12 +2308,11 @@ mod tests {
             .ensure_thread_runtime_with_mcp(session_id, thread_id)
             .await
             .expect("chat runtime should rebuild from trace snapshot");
-        let guard = thread.read().await;
         assert_eq!(
-            guard.agent_record().system_prompt,
+            thread.agent_system_prompt(),
             "You are a routing test agent."
         );
-        assert_eq!(guard.agent_record().display_name, "Routing Test Agent");
+        assert_eq!(thread.agent_display_name(), "Routing Test Agent");
     }
 
     #[tokio::test]
@@ -2367,7 +2355,7 @@ mod tests {
 
         timeout(Duration::from_secs(5), async {
             loop {
-                if thread.read().await.is_turn_running() {
+                if thread.is_turn_running() {
                     break;
                 }
                 sleep(Duration::from_millis(10)).await;
@@ -2383,7 +2371,7 @@ mod tests {
 
         timeout(Duration::from_secs(5), async {
             loop {
-                if !thread.read().await.is_turn_running() {
+                if !thread.is_turn_running() {
                     break;
                 }
                 sleep(Duration::from_millis(10)).await;
@@ -2412,7 +2400,7 @@ mod tests {
             .expect("thread should be present in session");
         timeout(Duration::from_secs(5), async {
             loop {
-                if thread.read().await.is_turn_running() {
+                if thread.is_turn_running() {
                     break;
                 }
                 sleep(Duration::from_millis(10)).await;
