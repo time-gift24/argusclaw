@@ -758,18 +758,15 @@ impl SessionManager {
                 else {
                     return;
                 };
-                let Some(sender) = thread_pool.event_sender(&runtime.thread_id) else {
-                    return;
-                };
                 match change {
                     RuntimeLifecycleChange::Cooling(_) => {
-                        let _ = sender.send(ThreadEvent::ThreadPoolCooling {
+                        let _ = thread_pool.emit_event(&runtime.thread_id, ThreadEvent::ThreadPoolCooling {
                             thread_id: runtime.thread_id,
                             session_id: Some(session_id),
                         });
                     }
                     RuntimeLifecycleChange::Evicted(_) => {
-                        let _ = sender.send(ThreadEvent::ThreadPoolEvicted {
+                        let _ = thread_pool.emit_event(&runtime.thread_id, ThreadEvent::ThreadPoolEvicted {
                             thread_id: runtime.thread_id,
                             session_id: Some(session_id),
                             reason: runtime
@@ -783,7 +780,8 @@ impl SessionManager {
                     thread_sessions.as_ref(),
                 )
                 .snapshot;
-                let _ = sender.send(ThreadEvent::ThreadPoolMetricsUpdated { snapshot });
+                let _ = thread_pool
+                    .emit_event(&runtime.thread_id, ThreadEvent::ThreadPoolMetricsUpdated { snapshot });
             }));
     }
 
@@ -871,9 +869,9 @@ impl SessionManager {
             .deliver_thread_message(thread_id, Self::route_mailbox_message(message.clone()))
             .await
             .map_err(Self::map_pool_error)?;
-        if let Some(sender) = self.thread_pool.event_sender(&thread_id) {
-            let _ = sender.send(ThreadEvent::MailboxMessageQueued { thread_id, message });
-        }
+        let _ = self
+            .thread_pool
+            .emit_event(&thread_id, ThreadEvent::MailboxMessageQueued { thread_id, message });
         Ok(())
     }
 
@@ -997,15 +995,14 @@ impl SessionManager {
         estimated_memory_bytes: u64,
     ) -> Result<()> {
         let started_at = Utc::now().to_rfc3339();
-        let sender = self
-            .thread_pool
+        self.thread_pool
             .mark_runtime_running(&thread_id, estimated_memory_bytes, started_at)
             .ok_or_else(|| ArgusError::ThreadNotFound(thread_id.inner().to_string()))?;
-        let _ = sender.send(ThreadEvent::ThreadPoolStarted {
+        let _ = self.thread_pool.emit_event(&thread_id, ThreadEvent::ThreadPoolStarted {
             thread_id,
             session_id: Some(session_id),
         });
-        let _ = sender.send(ThreadEvent::ThreadPoolMetricsUpdated {
+        let _ = self.thread_pool.emit_event(&thread_id, ThreadEvent::ThreadPoolMetricsUpdated {
             snapshot: self.thread_pool_snapshot(),
         });
         Ok(())
@@ -1187,7 +1184,7 @@ impl SessionManager {
         if let Some((_, session)) = self.sessions.remove(&session_id) {
             for thread_id in session.thread_ids() {
                 self.forget_thread_session(&thread_id);
-                self.thread_pool.remove_runtime(&thread_id);
+                self.thread_pool.remove_runtime(&thread_id).await;
             }
         }
         Ok(())
@@ -1239,7 +1236,7 @@ impl SessionManager {
         self.sessions.remove(&session_id);
         for thread_id in thread_ids {
             self.forget_thread_session(&thread_id);
-            self.thread_pool.remove_runtime(&thread_id);
+            self.thread_pool.remove_runtime(&thread_id).await;
         }
 
         // Clean up session trace directory
@@ -1390,7 +1387,7 @@ impl SessionManager {
         {
             Ok(thread) => thread,
             Err(error) => {
-                self.thread_pool.remove_runtime(&thread_id);
+                self.thread_pool.remove_runtime(&thread_id).await;
                 let _ = self.thread_repo.delete_thread(&thread_id).await;
                 let _ = tokio::fs::remove_dir_all(&thread_trace_dir).await;
                 return Err(ArgusError::LlmError {
@@ -1413,7 +1410,7 @@ impl SessionManager {
                 reason: e.to_string(),
             })?;
         self.forget_thread_session(thread_id);
-        self.thread_pool.remove_runtime(thread_id);
+        self.thread_pool.remove_runtime(thread_id).await;
 
         // Remove from in-memory session if loaded
         if let Some(session) = self.sessions.get(&session_id) {
@@ -1470,9 +1467,9 @@ impl SessionManager {
             return Err(ArgusError::ThreadNotFound(thread_id.inner().to_string()));
         }
 
-        if let Some(thread) = self.loaded_chat_thread(thread_id) {
-            thread
-                .set_title(in_memory_title)
+        if self.loaded_chat_thread(thread_id).is_some() {
+            self.thread_pool
+                .set_runtime_title(thread_id, in_memory_title)
                 .await
                 .map_err(|error| ArgusError::LlmError {
                     reason: error.to_string(),
@@ -1513,9 +1510,9 @@ impl SessionManager {
             return Err(ArgusError::ThreadNotFound(thread_id.inner().to_string()));
         }
 
-        if let Some(thread) = self.loaded_chat_thread(thread_id) {
-            thread
-                .set_provider(provider)
+        if self.loaded_chat_thread(thread_id).is_some() {
+            self.thread_pool
+                .set_runtime_provider(thread_id, provider)
                 .await
                 .map_err(|error| ArgusError::LlmError {
                     reason: error.to_string(),
@@ -2193,7 +2190,7 @@ mod tests {
         let (manager, _temp_dir, session_id, thread_id) = test_session_manager().await;
 
         assert!(
-            manager.thread_pool.remove_runtime(&thread_id),
+            manager.thread_pool.remove_runtime(&thread_id).await,
             "chat runtime should be evictable for the no-op cancel regression"
         );
 
@@ -2239,7 +2236,7 @@ mod tests {
 
         let session = manager.load(session_id).await.expect("session should load");
         assert!(
-            manager.thread_pool.remove_runtime(&thread_id),
+            manager.thread_pool.remove_runtime(&thread_id).await,
             "chat runtime should be removable for rehydrate coverage"
         );
 
@@ -2300,7 +2297,7 @@ mod tests {
             .expect("template upsert should succeed");
 
         assert!(
-            manager.thread_pool.remove_runtime(&thread_id),
+            manager.thread_pool.remove_runtime(&thread_id).await,
             "existing runtime should be evicted before rehydration"
         );
 

@@ -60,7 +60,7 @@ pub use compact::{CompactResult, Compactor};
 pub use config::ThreadConfig;
 pub use error::{CompactError, ThreadError};
 pub use plan_store::FilePlanStore;
-pub use thread::{Thread, ThreadBuilder, ThreadHandle, WeakThreadHandle};
+pub use thread::{Thread, ThreadBuilder, ThreadHandle, ThreadOwnerHandle, WeakThreadHandle};
 pub use types::{ThreadInfo, ThreadRuntimeSnapshot, ThreadState};
 
 // Re-export hook types from argus-protocol for convenience

@@ -738,7 +738,10 @@ async fn spawn_runtime_returns_idle_handle() {
     );
     let thread_id = thread.id();
 
-    let handle = thread.spawn_runtime().expect("runtime handle should spawn");
+    let handle = thread
+        .spawn_runtime()
+        .expect("runtime handle should spawn")
+        .observer();
 
     assert_eq!(handle.id(), thread_id);
     assert_eq!(handle.state(), ThreadState::Idle);

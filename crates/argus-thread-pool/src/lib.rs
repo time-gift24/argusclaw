@@ -7,7 +7,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
-use argus_agent::{Thread, ThreadHandle};
+use argus_agent::{Thread, ThreadHandle, ThreadOwnerHandle};
 use argus_protocol::{
     ThreadControlMessage, ThreadEvent, ThreadId, ThreadMessage, ThreadPoolEventReason,
     ThreadPoolSnapshot, ThreadRuntimeStatus,
@@ -58,7 +58,7 @@ pub struct PoolState {
 struct RuntimeEntry {
     summary: RuntimeSummary,
     sender: broadcast::Sender<ThreadEvent>,
-    thread: Option<ThreadHandle>,
+    thread: Option<ThreadOwnerHandle>,
     forwarder_abort: Option<AbortHandle>,
     slot_permit: Option<OwnedSemaphorePermit>,
     load_mutex: Arc<AsyncMutex<()>>,
@@ -73,7 +73,7 @@ struct ThreadPoolStore {
 
 #[derive(Debug, Default)]
 pub struct RuntimeShutdown {
-    thread: Option<ThreadHandle>,
+    thread: Option<ThreadOwnerHandle>,
     forwarder_abort: Option<AbortHandle>,
 }
 
@@ -94,7 +94,7 @@ impl RuntimeShutdown {
             forwarder_abort.abort();
         }
         if let Some(thread) = self.thread {
-            let _ = thread.send_message(ThreadMessage::Control(
+            let _ = thread.observer().send_message(ThreadMessage::Control(
                 ThreadControlMessage::ShutdownRuntime,
             ));
         }
@@ -166,28 +166,46 @@ impl ThreadPool {
             .map(|entry| entry.sender.subscribe())
     }
 
-    pub fn event_sender(&self, thread_id: &ThreadId) -> Option<broadcast::Sender<ThreadEvent>> {
-        self.store
+    pub fn emit_event(&self, thread_id: &ThreadId, event: ThreadEvent) -> bool {
+        let Some(sender) = self
+            .store
             .lock()
             .expect("thread-pool mutex poisoned")
             .runtimes
             .get(thread_id)
             .map(|entry| entry.sender.clone())
+        else {
+            return false;
+        };
+        sender.send(event).is_ok()
     }
 
-    pub fn remove_runtime(&self, thread_id: &ThreadId) -> bool {
+    pub async fn remove_runtime(&self, thread_id: &ThreadId) -> bool {
+        let (forwarder_abort, thread) = {
+            let mut store = self.store.lock().expect("thread-pool mutex poisoned");
+            let Some(entry) = store.runtimes.get_mut(thread_id) else {
+                return false;
+            };
+            (entry.forwarder_abort.take(), entry.thread.clone())
+        };
+
+        if let Some(forwarder_abort) = forwarder_abort {
+            forwarder_abort.abort();
+        }
+
+        if let Some(thread) = thread {
+            let observer = thread.observer();
+            let _ = observer.send_message(ThreadMessage::Control(
+                ThreadControlMessage::ShutdownRuntime,
+            ));
+            observer.wait_for_termination().await;
+        }
+
         let mut store = self.store.lock().expect("thread-pool mutex poisoned");
-        let removed_entry = store.runtimes.remove(thread_id);
-        let removed = removed_entry.is_some();
+        let removed = store.runtimes.remove(thread_id).is_some();
         if removed {
             Self::refresh_peaks(&mut store);
         }
-        drop(store);
-
-        if let Some(mut entry) = removed_entry {
-            Self::take_runtime_shutdown(&mut entry).run();
-        }
-
         removed
     }
 
@@ -197,11 +215,20 @@ impl ThreadPool {
             .expect("thread-pool mutex poisoned")
             .runtimes
             .get(thread_id)
-            .and_then(|entry| entry.thread.clone())
+            .and_then(|entry| entry.thread.as_ref().map(ThreadOwnerHandle::observer))
     }
 
     pub fn loaded_runtime(&self, thread_id: &ThreadId) -> Option<ThreadHandle> {
         self.loaded_thread(thread_id)
+    }
+
+    fn loaded_owner(&self, thread_id: &ThreadId) -> Option<ThreadOwnerHandle> {
+        self.store
+            .lock()
+            .expect("thread-pool mutex poisoned")
+            .runtimes
+            .get(thread_id)
+            .and_then(|entry| entry.thread.clone())
     }
 
     pub fn is_runtime_resident(&self, thread_id: &ThreadId) -> bool {
@@ -249,7 +276,7 @@ impl ThreadPool {
         last_active_at: Option<String>,
         recoverable: bool,
         last_reason: Option<ThreadPoolEventReason>,
-        thread: Option<ThreadHandle>,
+        thread: Option<ThreadOwnerHandle>,
     ) -> broadcast::Sender<ThreadEvent> {
         self.upsert_runtime_summary(
             thread_id,
@@ -352,6 +379,34 @@ impl ThreadPool {
         Some(sender)
     }
 
+    pub async fn set_runtime_title(
+        &self,
+        thread_id: &ThreadId,
+        title: Option<String>,
+    ) -> Result<(), ThreadPoolError> {
+        let thread = self.loaded_owner(thread_id).ok_or_else(|| {
+            ThreadPoolError::ExecutionFailed(format!("thread {} is not loaded", thread_id))
+        })?;
+        thread
+            .set_title(title)
+            .await
+            .map_err(|error| ThreadPoolError::ExecutionFailed(error.to_string()))
+    }
+
+    pub async fn set_runtime_provider(
+        &self,
+        thread_id: &ThreadId,
+        provider: Arc<dyn argus_protocol::llm::LlmProvider>,
+    ) -> Result<(), ThreadPoolError> {
+        let thread = self.loaded_owner(thread_id).ok_or_else(|| {
+            ThreadPoolError::ExecutionFailed(format!("thread {} is not loaded", thread_id))
+        })?;
+        thread
+            .set_provider(provider)
+            .await
+            .map_err(|error| ThreadPoolError::ExecutionFailed(error.to_string()))
+    }
+
     pub fn transition_runtime_to_cooling(
         &self,
         thread_id: &ThreadId,
@@ -401,13 +456,13 @@ impl ThreadPool {
     pub async fn attach_runtime(
         &self,
         thread_id: ThreadId,
-        thread: ThreadHandle,
+        thread: ThreadOwnerHandle,
         runtime_rx: &mut broadcast::Receiver<ThreadEvent>,
         runtime_label: &'static str,
         cool_on_idle: bool,
         idle_observer: Option<Arc<RuntimeIdleObserver>>,
     ) -> Result<(), ThreadPoolError> {
-        let estimated_memory_bytes = Self::estimate_thread_memory(&thread);
+        let estimated_memory_bytes = Self::estimate_thread_memory(&thread.observer());
         let (sender, replaced_runtime) = {
             let mut store = self.store.lock().expect("thread-pool mutex poisoned");
             let (sender, replaced_runtime) = {
@@ -444,7 +499,7 @@ impl ThreadPool {
         let lifecycle_observers = Arc::clone(&self.runtime_lifecycle_observers);
 
         let mut runtime_rx = runtime_rx.resubscribe();
-        let thread_for_metrics = thread.clone();
+        let thread_for_metrics = thread.observer();
         let forwarder = tokio::spawn(async move {
             loop {
                 match runtime_rx.recv().await {
@@ -559,7 +614,7 @@ impl ThreadPool {
         let thread = thread
             .spawn_runtime()
             .map_err(|error| ThreadPoolError::ExecutionFailed(error.to_string()))?;
-        let mut runtime_rx = thread.subscribe();
+        let mut runtime_rx = thread.observer().subscribe();
         if let Err(error) = self
             .attach_runtime(
                 thread_id,
@@ -578,7 +633,7 @@ impl ThreadPool {
             return Err(error);
         }
 
-        Ok(thread)
+        Ok(thread.observer())
     }
 
     pub fn evict_runtime(
@@ -619,7 +674,7 @@ impl ThreadPool {
         last_active_at: Option<String>,
         recoverable: bool,
         last_reason: Option<ThreadPoolEventReason>,
-        thread: Option<ThreadHandle>,
+        thread: Option<ThreadOwnerHandle>,
     ) -> broadcast::Sender<ThreadEvent> {
         let mut store = self.store.lock().expect("thread-pool mutex poisoned");
         let (sender, existing_thread, existing_forwarder_abort, existing_slot_permit, load_mutex) =
@@ -877,6 +932,11 @@ mod tests {
 
     struct NoopCompactor;
 
+    struct BlockedProvider {
+        response: String,
+        release: Arc<tokio::sync::Notify>,
+    }
+
     #[async_trait]
     impl Compactor for NoopCompactor {
         async fn compact(
@@ -892,9 +952,69 @@ mod tests {
         }
     }
 
+    #[async_trait]
+    impl LlmProvider for BlockedProvider {
+        fn model_name(&self) -> &str {
+            "pool-blocked-test"
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> std::result::Result<CompletionResponse, LlmError> {
+            self.release.notified().await;
+            Ok(CompletionResponse {
+                content: Some(self.response.clone()),
+                reasoning_content: None,
+                tool_calls: Vec::new(),
+                input_tokens: 4,
+                output_tokens: 2,
+                finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+        }
+
+        async fn stream_complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> std::result::Result<LlmEventStream, LlmError> {
+            Err(LlmError::UnsupportedCapability {
+                provider: self.model_name().to_string(),
+                capability: "stream_complete".to_string(),
+            })
+        }
+    }
+
     fn build_thread(thread_id: ThreadId, response: &str) -> Thread {
         let provider: Arc<dyn LlmProvider> = Arc::new(FixedProvider {
             response: response.to_string(),
+        });
+        ThreadBuilder::new()
+            .id(thread_id)
+            .provider(provider.clone())
+            .compactor(Arc::new(NoopCompactor))
+            .agent_record(Arc::new(AgentRecord {
+                model_id: Some(provider.model_name().to_string()),
+                ..AgentRecord::default()
+            }))
+            .session_id(SessionId::new())
+            .build()
+            .expect("test thread should build")
+    }
+
+    fn build_blocked_thread(
+        thread_id: ThreadId,
+        response: &str,
+        release: Arc<tokio::sync::Notify>,
+    ) -> Thread {
+        let provider: Arc<dyn LlmProvider> = Arc::new(BlockedProvider {
+            response: response.to_string(),
+            release,
         });
         ThreadBuilder::new()
             .id(thread_id)
@@ -1123,5 +1243,104 @@ mod tests {
             }),
             "eviction should notify lifecycle observers"
         );
+    }
+
+    #[tokio::test]
+    async fn remove_runtime_waits_for_shutdown_before_allowing_replacement() {
+        let pool = Arc::new(ThreadPool::new());
+        let thread_id = ThreadId::new();
+        let release = Arc::new(tokio::sync::Notify::new());
+        let original = pool
+            .load_runtime_with_builder(thread_id, "chat runtime", false, None, true, {
+                let thread =
+                    build_blocked_thread(thread_id, "slow reply", Arc::clone(&release));
+                move || async move { Ok(thread) }
+            })
+            .await
+            .expect("runtime load should succeed");
+
+        pool.deliver_thread_message(
+            thread_id,
+            ThreadMessage::UserInput {
+                content: "hello".to_string(),
+                msg_override: None,
+            },
+        )
+        .await
+        .expect("message should start the runtime");
+
+        timeout(Duration::from_secs(5), async {
+            loop {
+                if original.is_turn_running() {
+                    break;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("runtime should start running before removal");
+
+        let removing_pool = Arc::clone(&pool);
+        let remove_task = tokio::spawn(async move { removing_pool.remove_runtime(&thread_id).await });
+        sleep(Duration::from_millis(20)).await;
+        let removal_pending = !remove_task.is_finished();
+
+        let replacement_builds = Arc::new(AtomicUsize::new(0));
+        let replacement = pool
+            .load_runtime_with_builder(thread_id, "chat runtime", false, None, true, {
+                let replacement_builds = Arc::clone(&replacement_builds);
+                move || {
+                    replacement_builds.fetch_add(1, Ordering::SeqCst);
+                    let thread = build_thread(thread_id, "replacement reply");
+                    async move { Ok(thread) }
+                }
+            })
+            .await
+            .expect("concurrent load should reuse the shutting-down runtime");
+
+        if removal_pending {
+            assert!(
+                replacement.same_runtime(&original),
+                "replacement must not create a new owner while shutdown is still settling"
+            );
+            assert_eq!(
+                replacement_builds.load(Ordering::SeqCst),
+                0,
+                "builder should not run while the old runtime is still being removed"
+            );
+        }
+
+        release.notify_waiters();
+        assert!(
+            remove_task.await.expect("remove task should join"),
+            "remove_runtime should finish once the old owner settles"
+        );
+        if replacement_builds.load(Ordering::SeqCst) == 0 {
+            assert!(pool.loaded_thread(&thread_id).is_none());
+
+            let replacement = pool
+                .load_runtime_with_builder(thread_id, "chat runtime", false, None, true, {
+                    let replacement_builds = Arc::clone(&replacement_builds);
+                    move || {
+                        replacement_builds.fetch_add(1, Ordering::SeqCst);
+                        let thread = build_thread(thread_id, "replacement reply");
+                        async move { Ok(thread) }
+                    }
+                })
+                .await
+                .expect("load should succeed after removal completes");
+
+            assert_eq!(replacement_builds.load(Ordering::SeqCst), 1);
+            assert!(
+                !replacement.same_runtime(&original),
+                "a new owner should only appear after the old runtime is fully removed"
+            );
+        } else {
+            assert_eq!(replacement_builds.load(Ordering::SeqCst), 1);
+            assert!(
+                !replacement.same_runtime(&original),
+                "once removal has completed, a subsequent load may create a fresh owner"
+            );
+        }
     }
 }

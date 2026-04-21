@@ -1,5 +1,5 @@
 use argus_agent::{ThreadHandle, WeakThreadHandle};
-use argus_protocol::{SessionId, ThreadEvent, ThreadId, ThreadMessage};
+use argus_protocol::{SessionId, ThreadId, ThreadMessage};
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
@@ -74,33 +74,6 @@ impl Session {
 
     pub fn thread_ids(&self) -> Vec<ThreadId> {
         self.threads.iter().map(|e| *e.key()).collect()
-    }
-
-    /// Broadcast a ThreadEvent to all threads in this session.
-    pub fn broadcast(&self, event: ThreadEvent) {
-        let mut stale_thread_ids = Vec::new();
-        for entry in self.threads.iter() {
-            let thread = entry.value().upgrade();
-            if let Some(thread) = thread {
-                match &event {
-                    ThreadEvent::UserInterrupt { .. } => {
-                        let thread = thread.clone();
-                        tokio::spawn(async move {
-                            let _ = thread.send_message(ThreadMessage::Interrupt);
-                        });
-                    }
-                    _ => {
-                        thread.broadcast_to_self(event.clone());
-                    }
-                }
-            } else {
-                stale_thread_ids.push(*entry.key());
-            }
-        }
-
-        for thread_id in stale_thread_ids {
-            self.threads.remove(&thread_id);
-        }
     }
 
     pub async fn list_threads(&self) -> Vec<ThreadSummary> {

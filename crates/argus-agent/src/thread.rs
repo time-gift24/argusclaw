@@ -101,15 +101,22 @@ struct ThreadHandleInner {
     id: ThreadId,
     session_id: SessionId,
     message_tx: mpsc::UnboundedSender<ThreadMessage>,
-    owner_tx: mpsc::UnboundedSender<ThreadOwnerCommand>,
     pipe_tx: broadcast::Sender<ThreadEvent>,
     snapshot_rx: watch::Receiver<ThreadRuntimeSnapshot>,
+    terminated_rx: watch::Receiver<bool>,
 }
 
 /// Cloneable observer/control handle for a loaded thread runtime.
 #[derive(Clone)]
 pub struct ThreadHandle {
     inner: Arc<ThreadHandleInner>,
+}
+
+/// Cloneable owner handle for a loaded thread runtime.
+#[derive(Clone)]
+pub struct ThreadOwnerHandle {
+    handle: ThreadHandle,
+    owner_tx: mpsc::UnboundedSender<ThreadOwnerCommand>,
 }
 
 /// Weak handle used by session-side caches to avoid keeping runtimes resident.
@@ -132,6 +139,16 @@ impl std::fmt::Debug for WeakThreadHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("WeakThreadHandle")
             .field("live", &self.inner.strong_count())
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for ThreadOwnerHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ThreadOwnerHandle")
+            .field("id", &self.id())
+            .field("session_id", &self.session_id())
+            .field("state", &self.observer().state())
             .finish()
     }
 }
@@ -303,18 +320,6 @@ impl ThreadHandle {
         project(&snapshot)
     }
 
-    async fn send_owner_command(
-        &self,
-        command: impl FnOnce(oneshot::Sender<()>) -> ThreadOwnerCommand,
-    ) -> Result<(), ThreadError> {
-        let (ack_tx, ack_rx) = oneshot::channel();
-        self.inner
-            .owner_tx
-            .send(command(ack_tx))
-            .map_err(|_| ThreadError::ChannelClosed)?;
-        ack_rx.await.map_err(|_| ThreadError::ChannelClosed)
-    }
-
     /// Downgrade this runtime handle for cache-only storage.
     pub fn downgrade(&self) -> WeakThreadHandle {
         WeakThreadHandle {
@@ -340,11 +345,6 @@ impl ThreadHandle {
     /// Subscribe to runtime thread events.
     pub fn subscribe(&self) -> broadcast::Receiver<ThreadEvent> {
         self.inner.pipe_tx.subscribe()
-    }
-
-    /// Broadcast an event directly onto the thread event channel.
-    pub fn broadcast_to_self(&self, event: ThreadEvent) {
-        let _ = self.inner.pipe_tx.send(event);
     }
 
     /// Send a protocol message into the thread mailbox.
@@ -438,6 +438,52 @@ impl ThreadHandle {
     /// Returns true when the snapshot contains visible history.
     pub fn has_non_system_history(&self) -> bool {
         self.with_snapshot(|snapshot| !snapshot.history.is_empty())
+    }
+
+    /// Wait until the runtime owner loop exits.
+    pub async fn wait_for_termination(&self) {
+        let mut terminated_rx = self.inner.terminated_rx.clone();
+        if *terminated_rx.borrow() {
+            return;
+        }
+        while terminated_rx.changed().await.is_ok() {
+            if *terminated_rx.borrow() {
+                return;
+            }
+        }
+    }
+}
+
+impl ThreadOwnerHandle {
+    async fn send_owner_command(
+        &self,
+        command: impl FnOnce(oneshot::Sender<()>) -> ThreadOwnerCommand,
+    ) -> Result<(), ThreadError> {
+        let (ack_tx, ack_rx) = oneshot::channel();
+        self.owner_tx
+            .send(command(ack_tx))
+            .map_err(|_| ThreadError::ChannelClosed)?;
+        ack_rx.await.map_err(|_| ThreadError::ChannelClosed)
+    }
+
+    /// Get the thread identifier.
+    pub fn id(&self) -> ThreadId {
+        self.handle.id()
+    }
+
+    /// Get the session identifier.
+    pub fn session_id(&self) -> SessionId {
+        self.handle.session_id()
+    }
+
+    /// Return the observer/control handle exposed to non-owner callers.
+    pub fn observer(&self) -> ThreadHandle {
+        self.handle.clone()
+    }
+
+    /// Returns true when two owner handles point at the same live runtime instance.
+    pub fn same_runtime(&self, other: &Self) -> bool {
+        self.handle.same_runtime(&other.handle)
     }
 
     /// Update the in-memory runtime title.
@@ -546,10 +592,11 @@ impl Thread {
     }
 
     /// Spawn a single-owner runtime task and return the cloneable observer/control handle.
-    pub fn spawn_runtime(mut self) -> Result<ThreadHandle, ThreadError> {
+    pub fn spawn_runtime(mut self) -> Result<ThreadOwnerHandle, ThreadError> {
         let message_rx = self.take_message_rx().ok_or(ThreadError::RuntimeActive)?;
         let (owner_tx, owner_rx) = mpsc::unbounded_channel();
         let (snapshot_tx, snapshot_rx) = watch::channel(self.runtime_snapshot());
+        let (terminated_tx, terminated_rx) = watch::channel(false);
         self.snapshot_tx = Some(snapshot_tx);
         self.owner_rx = Some(owner_rx);
         self.reset_runtime_loop_state();
@@ -560,18 +607,20 @@ impl Thread {
                 id: self.id,
                 session_id: self.session_id,
                 message_tx: self.message_tx.clone(),
-                owner_tx,
                 pipe_tx: self.pipe_tx.clone(),
                 snapshot_rx,
+                terminated_rx,
             }),
         };
+        let owner_handle = ThreadOwnerHandle { handle, owner_tx };
 
         let owner_rx = self.take_owner_rx().ok_or(ThreadError::ChannelClosed)?;
         tokio::spawn(async move {
             Self::run_reactor_loop(self, message_rx, owner_rx).await;
+            let _ = terminated_tx.send(true);
         });
 
-        Ok(handle)
+        Ok(owner_handle)
     }
 
     /// Get information about this thread.
@@ -2250,7 +2299,8 @@ mod tests {
             .build()
             .expect("thread should build")
             .spawn_runtime()
-            .expect("runtime handle should spawn");
+            .expect("runtime handle should spawn")
+            .observer();
 
         thread
             .send_message(ThreadMessage::UserInput {

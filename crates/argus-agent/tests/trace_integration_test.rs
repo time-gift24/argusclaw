@@ -498,7 +498,8 @@ async fn test_thread_runtime_persists_committed_turn_messages_and_meta() {
         .build()
         .unwrap()
         .spawn_runtime()
-        .unwrap();
+        .unwrap()
+        .observer();
     let rx = thread.subscribe();
 
     enqueue_thread_message(&thread, "Hello".to_string()).await;
@@ -574,7 +575,8 @@ async fn test_thread_runtime_queues_follow_up_turn_without_emitting_idle_between
         .build()
         .unwrap()
         .spawn_runtime()
-        .unwrap();
+        .unwrap()
+        .observer();
     let rx = thread.subscribe();
 
     enqueue_thread_message(&thread, "first".to_string()).await;
@@ -705,7 +707,8 @@ async fn successful_turn_compaction_persists_turn_checkpoint() {
         .build()
         .unwrap()
         .spawn_runtime()
-        .unwrap();
+        .unwrap()
+        .observer();
     let rx = thread.subscribe();
     enqueue_thread_message(
         &thread,
@@ -796,7 +799,8 @@ async fn failed_turn_after_compaction_persists_no_turn_level_checkpoint() {
         .build()
         .unwrap()
         .spawn_runtime()
-        .unwrap();
+        .unwrap()
+        .observer();
     let rx = thread.subscribe();
     enqueue_thread_message(
         &thread,
@@ -863,7 +867,8 @@ async fn cancelled_turn_after_compaction_persists_no_turn_level_checkpoint() {
         .build()
         .unwrap()
         .spawn_runtime()
-        .unwrap();
+        .unwrap()
+        .observer();
     let rx = thread.subscribe();
     enqueue_thread_message(
         &thread,
