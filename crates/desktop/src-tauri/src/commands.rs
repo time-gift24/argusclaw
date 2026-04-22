@@ -3,10 +3,10 @@
 use std::sync::Arc;
 
 use argus_protocol::{
-    AgentId, AgentMcpBinding, AgentMcpServerBinding, AgentRecord, ChatMessage, LlmProviderId,
-    LlmProviderRecord, LlmProviderRecordJson, McpDiscoveredToolRecord, McpServerRecord,
-    McpServerStatus, ProviderId, ProviderSecretStatus, ProviderTestResult, Role, SecretString,
-    SessionId, ThreadId, ThreadPoolSnapshot, ThreadPoolState,
+    AgentId, AgentMcpBinding, AgentMcpServerBinding, AgentRecord, ChatMessage, JobRuntimeState,
+    LlmProviderId, LlmProviderRecord, LlmProviderRecordJson, McpDiscoveredToolRecord,
+    McpServerRecord, McpServerStatus, ProviderId, ProviderSecretStatus, ProviderTestResult, Role,
+    SecretString, SessionId, ThreadId, ThreadPoolSnapshot, ThreadPoolState,
 };
 use argus_wing::ArgusWing;
 use serde::{Deserialize, Serialize};
@@ -217,6 +217,13 @@ pub async fn get_thread_pool_state(
     wing: State<'_, Arc<ArgusWing>>,
 ) -> Result<ThreadPoolState, String> {
     Ok(wing.thread_pool_state())
+}
+
+#[tauri::command]
+pub async fn get_job_runtime_state(
+    wing: State<'_, Arc<ArgusWing>>,
+) -> Result<JobRuntimeState, String> {
+    Ok(wing.job_runtime_state())
 }
 
 // ============================================================================

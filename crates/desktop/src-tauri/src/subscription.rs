@@ -23,7 +23,7 @@ pub struct ThreadSubscriptions {
 
 #[derive(Default)]
 struct SubscriptionsInner {
-    subscriptions: HashMap<String, CancellationToken>,
+    subscriptions: HashMap<String, HashMap<String, CancellationToken>>,
 }
 
 impl ThreadSubscriptions {
@@ -35,7 +35,7 @@ impl ThreadSubscriptions {
 
     /// Start a forwarder for a thread.
     ///
-    /// If a forwarder already exists for this session key, it is cancelled first.
+    /// If a forwarder already exists for this session/thread pair, it is cancelled first.
     pub async fn start_forwarder(
         &self,
         session_key: String,
@@ -44,22 +44,21 @@ impl ThreadSubscriptions {
         app: AppHandle,
         wing: Arc<ArgusWing>,
     ) -> Result<(), String> {
-        let mut inner = self.inner.lock().await;
-
-        // Cancel existing subscription if any
-        if let Some(token) = inner.subscriptions.remove(&session_key) {
-            token.cancel();
-        }
-
-        // Subscribe to thread events
         let receiver = wing
             .subscribe(session_id, thread_id)
             .await
             .ok_or_else(|| "Thread not found".to_string())?;
 
+        let thread_key = thread_id.inner().to_string();
         let token = CancellationToken::new();
         let cancellation_token = token.clone();
-        inner.subscriptions.insert(session_key.clone(), token);
+        let mut inner = self.inner.lock().await;
+        let session_subscriptions = inner.subscriptions.entry(session_key.clone()).or_default();
+        if let Some(existing) = session_subscriptions.remove(&thread_key) {
+            existing.cancel();
+        }
+        session_subscriptions.insert(thread_key.clone(), token);
+        drop(inner);
 
         let session_id_str = session_id.inner().to_string();
 
@@ -71,6 +70,7 @@ impl ThreadSubscriptions {
                 app,
                 cancellation_token,
                 session_key,
+                thread_key,
             )
             .await;
         });
@@ -84,11 +84,12 @@ impl ThreadSubscriptions {
         app: AppHandle,
         cancellation_token: CancellationToken,
         session_key: String,
+        thread_key: String,
     ) {
         loop {
             tokio::select! {
                 _ = cancellation_token.cancelled() => {
-                    debug!("Subscription cancelled for session: {}", session_key);
+                    debug!("Subscription cancelled for session/thread: {session_key}/{thread_key}");
                     break;
                 }
                 result = receiver.recv() => {
@@ -104,13 +105,13 @@ impl ThreadSubscriptions {
                             }
                         }
                         Err(broadcast::error::RecvError::Closed) => {
-                            warn!("Thread event channel closed for session: {}", session_key);
+                            warn!("Thread event channel closed for session/thread: {session_key}/{thread_key}");
                             break;
                         }
                         Err(broadcast::error::RecvError::Lagged(n)) => {
                             warn!(
-                                "Thread event channel lagged by {} messages for session: {}",
-                                n, session_key
+                                "Thread event channel lagged by {} messages for session/thread: {}/{}",
+                                n, session_key, thread_key
                             );
                             // Continue receiving - the frontend will request a snapshot refresh
                         }

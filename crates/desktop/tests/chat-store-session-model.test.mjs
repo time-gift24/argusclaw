@@ -13,19 +13,25 @@ test("chat store keeps sessions keyed by template and provider preference", () =
   assert.match(storeSource, /activeSessionKey:\s*string \| null/);
   assert.match(storeSource, /sessionsByKey:\s*Record<string,\s*ChatSessionState>/);
   assert.match(storeSource, /selectedProviderPreferenceId:\s*number \| null/);
+  assert.match(storeSource, /chatThreadPoolSnapshot:\s*ThreadPoolSnapshot \| null/);
+  assert.match(storeSource, /jobRuntimeSnapshot:\s*JobRuntimeSnapshot \| null/);
   assert.match(storeSource, /threadPoolSnapshot:\s*ThreadPoolSnapshot \| null/);
   assert.match(storeSource, /threadPoolSnapshotLoading:\s*boolean/);
   assert.match(storeSource, /threadPoolError:\s*string \| null/);
   assert.match(storeSource, /threadPoolThreads:\s*ThreadPoolThreadState\[\]/);
   assert.match(storeSource, /refreshThreadPoolSnapshot:\s*\(\)\s*=>\s*Promise<void>/);
   assert.match(storeSource, /ThreadPoolRuntimeSummary/);
-  assert.match(storeSource, /ThreadPoolRuntimeKind/);
+  assert.match(storeSource, /JobRuntimeSummary/);
   assert.match(storeSource, /threadPool\.getState\(/);
-  assert.match(storeSource, /threadPool\.getState\(\)[\s\S]*threadPoolThreads:/);
-  assert.match(storeSource, /mapRuntimeSummaryToThreadState/);
-  assert.match(storeSource, /kind:\s*runtime\.runtime\.kind/);
-  assert.match(storeSource, /sessionId:\s*runtime\.runtime\.session_id/);
-  assert.match(storeSource, /jobId:\s*runtime\.runtime\.job_id/);
+  assert.match(storeSource, /jobRuntime\.getState\(/);
+  assert.match(storeSource, /const \[poolState,\s*jobState\] = await Promise\.all\(\[/);
+  assert.match(storeSource, /mapChatRuntimeSummaryToThreadState/);
+  assert.match(storeSource, /mapJobRuntimeSummaryToThreadState/);
+  assert.match(storeSource, /mergeMonitorSnapshot/);
+  assert.match(storeSource, /kind:\s*"chat"/);
+  assert.match(storeSource, /kind:\s*"job"/);
+  assert.match(storeSource, /sessionId:\s*runtime\.session_id/);
+  assert.match(storeSource, /jobId:\s*runtime\.job_id/);
   assert.match(storeSource, /refreshSnapshot:\s*\([\s\S]*sessionKey:\s*string/);
   assert.match(storeSource, /listen[\s\S]*"thread:event"/);
   assert.match(storeSource, /thread_id|threadId/);
@@ -44,9 +50,19 @@ test("chat store keeps sessions keyed by template and provider preference", () =
   assert.match(storeSource, /case "thread_pool_cooling"/);
   assert.match(storeSource, /case "thread_pool_evicted"/);
   assert.match(storeSource, /case "thread_pool_metrics_updated"/);
-  assert.match(storeSource, /payload\.runtime\.kind/);
-  assert.match(storeSource, /payload\.runtime\.session_id/);
-  assert.match(storeSource, /payload\.runtime\.job_id/);
+  assert.match(storeSource, /case "job_runtime_queued"/);
+  assert.match(storeSource, /case "job_runtime_started"/);
+  assert.match(storeSource, /case "job_runtime_cooling"/);
+  assert.match(storeSource, /case "job_runtime_evicted"/);
+  assert.match(storeSource, /case "job_runtime_updated"/);
+  assert.match(storeSource, /case "job_runtime_metrics_updated"/);
+  assert.match(storeSource, /payload\.session_id/);
+  assert.match(storeSource, /payload\.job_id/);
+  assert.doesNotMatch(storeSource, /ThreadPoolRuntimeKind/);
+  assert.doesNotMatch(storeSource, /mapRuntimeSummaryToThreadState/);
+  assert.doesNotMatch(storeSource, /payload\.kind/);
+  assert.doesNotMatch(storeSource, /runtime\.runtime/);
+  assert.doesNotMatch(typesSource, /interface ThreadPoolRuntimeRef/);
   assert.match(storeSource, /threadPoolThreads:\s*state\.threadPoolThreads\.map\(/);
   assert.match(storeSource, /void get\(\)\.refreshThreadPoolSnapshot\(\);/);
   assert.match(storeSource, /await get\(\)\.activateSession\(/);
@@ -176,7 +192,7 @@ test("chat store tracks ephemeral job status outside the transcript", () => {
   );
   assert.match(
     storeSource,
-    /case "job_result":[\s\S]*status:\s*payload\.success\s*\?\s*"completed"\s*:\s*"failed"/,
+    /case "job_result":[\s\S]*status:\s*resolveJobResultStatus\(payload\.success,\s*payload\.cancelled\)/,
     "job_result should only update job status instead of appending transcript text",
   );
   assert.match(
@@ -199,9 +215,12 @@ test("chat store tracks ephemeral job status outside the transcript", () => {
 test("desktop types expose mailbox job result payloads and detail state", () => {
   assert.match(typesSource, /export interface JobDetailPayload/);
   assert.match(typesSource, /export interface JobDetailTimelineItem/);
+  assert.match(typesSource, /export type JobLifecycleStatus =/);
   assert.match(typesSource, /type:\s*"job_result"/);
   assert.match(typesSource, /type:\s*"mailbox_message_queued"/);
   assert.match(typesSource, /type:\s*"task_assignment"/);
+  assert.match(typesSource, /status:\s*JobLifecycleStatus/);
+  assert.match(typesSource, /cancelled:\s*boolean/);
 });
 
 test("chat store keeps a separate selected job detail and detail records", () => {

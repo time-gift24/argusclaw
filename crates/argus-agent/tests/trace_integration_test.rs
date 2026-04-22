@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::Mutex;
 
-use tokio::sync::{RwLock, broadcast};
+use tokio::sync::broadcast;
 use tokio::time::{Duration, sleep, timeout};
 
 use argus_agent::thread_trace_store::chat_thread_base_dir;
@@ -12,26 +12,23 @@ use argus_agent::trace::TraceConfig;
 use argus_agent::turn_log_store::recover_thread_log_state;
 use argus_agent::{
     CompactError, CompactResult, Compactor, Thread, ThreadBuilder, ThreadConfig, ThreadError,
-    TurnCancellation, TurnConfigBuilder, TurnError,
+    ThreadHandle, TurnCancellation, TurnConfigBuilder, TurnError,
 };
 use argus_protocol::llm::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmEventStream,
     LlmProvider, LlmStreamEvent,
 };
-use argus_protocol::{AgentRecord, SessionId, ThreadEvent, ThreadId};
+use argus_protocol::{AgentRecord, SessionId, ThreadEvent, ThreadId, ThreadMessage};
 use async_trait::async_trait;
 use rust_decimal::Decimal;
 
-async fn enqueue_thread_message(thread: &Arc<RwLock<Thread>>, message: String) {
-    let mailbox = {
-        let guard = thread.read().await;
-        guard.mailbox()
-    };
-    mailbox.lock().await.enqueue_user_message(message, None);
-    let guard = thread.read().await;
-    let _ = guard
-        .control_tx()
-        .send(argus_protocol::ThreadControlEvent::MailboxUpdated);
+async fn enqueue_thread_message(thread: &ThreadHandle, message: String) {
+    thread
+        .send_message(ThreadMessage::UserInput {
+            content: message,
+            msg_override: None,
+        })
+        .expect("thread message should enqueue");
 }
 
 /// Mock provider that returns a simple response
@@ -352,16 +349,10 @@ async fn wait_for_provider_inputs(
     .expect("provider should capture user inputs");
 }
 
-async fn request_thread_stop(thread: &Arc<RwLock<Thread>>) {
-    let mailbox = {
-        let guard = thread.read().await;
-        guard.mailbox()
-    };
-    mailbox.lock().await.interrupt_stop();
-    let guard = thread.read().await;
-    let _ = guard
-        .control_tx()
-        .send(argus_protocol::ThreadControlEvent::MailboxUpdated);
+async fn request_thread_stop(thread: &ThreadHandle) {
+    thread
+        .send_message(ThreadMessage::Interrupt)
+        .expect("thread interrupt should enqueue");
 }
 
 async fn collect_terminal_events_until_final_idle(
@@ -494,23 +485,22 @@ async fn test_thread_runtime_persists_committed_turn_messages_and_meta() {
             .build()
             .unwrap(),
     };
-    let thread = Arc::new(RwLock::new(
-        ThreadBuilder::new()
-            .id(thread_id)
-            .provider(Arc::new(SimpleMockProvider::new("Hello, world!")))
-            .compactor(Arc::new(NoopCompactor))
-            .agent_record(Arc::new(AgentRecord {
-                system_prompt: "You are a test assistant.".to_string(),
-                ..AgentRecord::default()
-            }))
-            .session_id(session_id)
-            .config(thread_config)
-            .build()
-            .unwrap(),
-    ));
-    let rx = { thread.read().await.subscribe() };
-
-    Thread::spawn_reactor(Arc::clone(&thread)).await;
+    let thread = ThreadBuilder::new()
+        .id(thread_id)
+        .provider(Arc::new(SimpleMockProvider::new("Hello, world!")))
+        .compactor(Arc::new(NoopCompactor))
+        .agent_record(Arc::new(AgentRecord {
+            system_prompt: "You are a test assistant.".to_string(),
+            ..AgentRecord::default()
+        }))
+        .session_id(session_id)
+        .config(thread_config)
+        .build()
+        .unwrap()
+        .spawn_runtime()
+        .unwrap()
+        .observer();
+    let rx = thread.subscribe();
 
     enqueue_thread_message(&thread, "Hello".to_string()).await;
 
@@ -536,7 +526,7 @@ async fn test_thread_runtime_persists_committed_turn_messages_and_meta() {
     .await
     .expect("committed turn logs should be persisted");
 
-    assert_eq!(thread.read().await.turn_count(), 1);
+    assert_eq!(thread.turn_count(), 1);
 
     let recovered = recover_thread_log_state(&persisted_base_dir)
         .await
@@ -572,23 +562,22 @@ async fn test_thread_runtime_queues_follow_up_turn_without_emitting_idle_between
         Duration::from_millis(120),
         vec!["first reply", "second reply"],
     ));
-    let thread = Arc::new(RwLock::new(
-        ThreadBuilder::new()
-            .id(thread_id)
-            .provider(provider.clone())
-            .compactor(Arc::new(NoopCompactor))
-            .agent_record(Arc::new(AgentRecord {
-                system_prompt: "You are a test assistant.".to_string(),
-                ..AgentRecord::default()
-            }))
-            .session_id(session_id)
-            .config(thread_config)
-            .build()
-            .unwrap(),
-    ));
-    let rx = { thread.read().await.subscribe() };
-
-    Thread::spawn_reactor(Arc::clone(&thread)).await;
+    let thread = ThreadBuilder::new()
+        .id(thread_id)
+        .provider(provider.clone())
+        .compactor(Arc::new(NoopCompactor))
+        .agent_record(Arc::new(AgentRecord {
+            system_prompt: "You are a test assistant.".to_string(),
+            ..AgentRecord::default()
+        }))
+        .session_id(session_id)
+        .config(thread_config)
+        .build()
+        .unwrap()
+        .spawn_runtime()
+        .unwrap()
+        .observer();
+    let rx = thread.subscribe();
 
     enqueue_thread_message(&thread, "first".to_string()).await;
 
@@ -705,23 +694,22 @@ async fn successful_turn_compaction_persists_turn_checkpoint() {
         vec![Ok("final reply")],
         4,
     ));
-    let thread = Arc::new(RwLock::new(
-        ThreadBuilder::new()
-            .id(thread_id)
-            .provider(provider)
-            .compactor(Arc::new(NoopCompactor))
-            .agent_record(Arc::new(AgentRecord {
-                system_prompt: "You are a test assistant.".to_string(),
-                ..AgentRecord::default()
-            }))
-            .session_id(session_id)
-            .config(thread_config)
-            .build()
-            .unwrap(),
-    ));
-    let rx = { thread.read().await.subscribe() };
-
-    Thread::spawn_reactor(Arc::clone(&thread)).await;
+    let thread = ThreadBuilder::new()
+        .id(thread_id)
+        .provider(provider)
+        .compactor(Arc::new(NoopCompactor))
+        .agent_record(Arc::new(AgentRecord {
+            system_prompt: "You are a test assistant.".to_string(),
+            ..AgentRecord::default()
+        }))
+        .session_id(session_id)
+        .config(thread_config)
+        .build()
+        .unwrap()
+        .spawn_runtime()
+        .unwrap()
+        .observer();
+    let rx = thread.subscribe();
     enqueue_thread_message(
         &thread,
         "this message is long enough to trigger turn compaction".to_string(),
@@ -798,23 +786,22 @@ async fn failed_turn_after_compaction_persists_no_turn_level_checkpoint() {
         })],
         4,
     ));
-    let thread = Arc::new(RwLock::new(
-        ThreadBuilder::new()
-            .id(thread_id)
-            .provider(provider)
-            .compactor(Arc::new(NoopCompactor))
-            .agent_record(Arc::new(AgentRecord {
-                system_prompt: "You are a test assistant.".to_string(),
-                ..AgentRecord::default()
-            }))
-            .session_id(session_id)
-            .config(thread_config)
-            .build()
-            .unwrap(),
-    ));
-    let rx = { thread.read().await.subscribe() };
-
-    Thread::spawn_reactor(Arc::clone(&thread)).await;
+    let thread = ThreadBuilder::new()
+        .id(thread_id)
+        .provider(provider)
+        .compactor(Arc::new(NoopCompactor))
+        .agent_record(Arc::new(AgentRecord {
+            system_prompt: "You are a test assistant.".to_string(),
+            ..AgentRecord::default()
+        }))
+        .session_id(session_id)
+        .config(thread_config)
+        .build()
+        .unwrap()
+        .spawn_runtime()
+        .unwrap()
+        .observer();
+    let rx = thread.subscribe();
     enqueue_thread_message(
         &thread,
         "this message is long enough to trigger turn compaction".to_string(),
@@ -867,23 +854,22 @@ async fn cancelled_turn_after_compaction_persists_no_turn_level_checkpoint() {
         vec![Ok("slow final reply")],
         4,
     ));
-    let thread = Arc::new(RwLock::new(
-        ThreadBuilder::new()
-            .id(thread_id)
-            .provider(provider)
-            .compactor(Arc::new(NoopCompactor))
-            .agent_record(Arc::new(AgentRecord {
-                system_prompt: "You are a test assistant.".to_string(),
-                ..AgentRecord::default()
-            }))
-            .session_id(session_id)
-            .config(thread_config)
-            .build()
-            .unwrap(),
-    ));
-    let rx = { thread.read().await.subscribe() };
-
-    Thread::spawn_reactor(Arc::clone(&thread)).await;
+    let thread = ThreadBuilder::new()
+        .id(thread_id)
+        .provider(provider)
+        .compactor(Arc::new(NoopCompactor))
+        .agent_record(Arc::new(AgentRecord {
+            system_prompt: "You are a test assistant.".to_string(),
+            ..AgentRecord::default()
+        }))
+        .session_id(session_id)
+        .config(thread_config)
+        .build()
+        .unwrap()
+        .spawn_runtime()
+        .unwrap()
+        .observer();
+    let rx = thread.subscribe();
     enqueue_thread_message(
         &thread,
         "this message is long enough to trigger turn compaction".to_string(),

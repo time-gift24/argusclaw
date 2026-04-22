@@ -1,0 +1,143 @@
+{
+  "active": true,
+  "current_phase": "deep-interview",
+  "iteration": 7,
+  "max_iterations": 12,
+  "started_at": "2026-04-20T15:08:58Z",
+  "task_description": "Clarify argus-agent Thread-first and lock-free design direction, with brownfield evidence from the codex-thread-router-design worktree.",
+  "interview_id": "72FF4592-8DB8-4190-A512-1B6C45F0ED5D",
+  "profile": "standard",
+  "type": "brownfield",
+  "initial_idea": "argus-job 中还有 thread_pool.rs 的残留！那么还有其他类似的不必要的，与生产无关的代码吗",
+  "rounds": [
+    {
+      "round": 1,
+      "question": "你这次说的“其他类似的不必要、与生产无关的代码”，口径要不要包含 smoke/debug/demo 这类显式工具代码，还是只查像 thread_pool.rs 这样未参与生产库构建的历史残留/重复实现？",
+      "answer": "包含所有的 smoke/debug/demo",
+      "target_dimension": "scope",
+      "scores": {
+        "intent": 0.6,
+        "outcome": 0.45,
+        "scope": 0.7,
+        "constraints": 0.7,
+        "success": 0.35,
+        "context": 0.8
+      },
+      "ambiguity": 0.41,
+      "readiness": {
+        "non_goals": "partial",
+        "decision_boundaries": "unresolved"
+      }
+    },
+    {
+      "round": 2,
+      "question": "像 job_manager.rs 里这种“嵌在生产代码中的测试/故障注入入口”，你也希望算进“与生产无关代码”的审计范围吗？",
+      "answer": "是的",
+      "target_dimension": "decision-boundaries",
+      "scores": {
+        "intent": 0.6,
+        "outcome": 0.5,
+        "scope": 0.8,
+        "constraints": 0.75,
+        "success": 0.4,
+        "context": 0.85
+      },
+      "ambiguity": 0.36,
+      "readiness": {
+        "non_goals": "partial",
+        "decision_boundaries": "mostly_resolved"
+      }
+    },
+    {
+      "round": 3,
+      "question": "这次你明确“不想动”的东西是什么？比如 argus-job 里的 #[cfg(test)] 测试辅助、仅测试使用的 sample helper、或者仍被团队日常手动排障依赖的 dev 工具，哪些应当明确排除在“非生产代码清理”之外？",
+      "answer": "没有",
+      "target_dimension": "non-goals",
+      "scores": {
+        "intent": 0.65,
+        "outcome": 0.55,
+        "scope": 0.92,
+        "constraints": 0.8,
+        "success": 0.45,
+        "context": 0.85
+      },
+      "ambiguity": 0.29,
+      "readiness": {
+        "non_goals": "resolved-none",
+        "decision_boundaries": "resolved"
+      }
+    },
+    {
+      "round": 4,
+      "question": "你清这类代码最核心的原因是什么？是为了收紧架构边界、降低误用风险、减少维护噪音、还是为了给后续某个具体重构/上线动作扫清障碍？",
+      "answer": "减少维护噪音",
+      "target_dimension": "intent",
+      "scores": {
+        "intent": 0.9,
+        "outcome": 0.65,
+        "scope": 0.92,
+        "constraints": 0.82,
+        "success": 0.5,
+        "context": 0.85
+      },
+      "ambiguity": 0.22,
+      "readiness": {
+        "non_goals": "resolved-none",
+        "decision_boundaries": "resolved",
+        "pressure_pass": "complete"
+      }
+    }
+  ],
+  "current_ambiguity": 0.22,
+  "threshold": 0.2,
+  "max_rounds": 12,
+  "challenge_modes_used": [
+    "contrarian"
+  ],
+  "codebase_context": {
+    "evidence": [
+      "crates/argus-job/AGENTS.md requires reusing shared argus-thread-pool",
+      "crates/argus-job/src/lib.rs does not declare mod thread_pool",
+      "crates/argus-job/src/job_manager.rs imports ThreadPool from argus_thread_pool crate",
+      "crates/argus-job/Cargo.toml depends on argus-thread-pool",
+      "crates/argus-job/src/thread_pool.rs still exists as a full implementation candidate",
+      "crates/argus-job/src/bin/smoke-chat.rs exists as an explicit smoke binary",
+      "crates/argus-job/src/job_manager.rs contains __panic_thread_pool_execute_turn__ sentinel in production source"
+    ]
+  },
+  "current_stage": "feasibility",
+  "current_focus": "success-criteria",
+  "context_snapshot_path": ".omx/context/argus-job-non-production-audit-20260420T150858Z.md",
+  "readiness": {
+    "non_goals_explicit": true,
+    "decision_boundaries_explicit": true,
+    "pressure_pass_complete": true
+  },
+  "scores": {
+    "intent": 0.9,
+    "outcome": 0.93,
+    "scope": 0.91,
+    "constraints": 0.88,
+    "success": 0.76,
+    "context": 0.91
+  },
+  "pending_question": "我找到一个直接的落点分叉：当前 chat runtime 的构建/恢复在 ThreadPool 里，job runtime 的构建/恢复主要在 JobManager 里。如果新 crate 选 A，你是否要明确拍板成下面这个所有权模型：SessionManager 负责 chat runtime 的构建/恢复并把已构建 Thread 交给 ThreadPool；JobManager 负责 job runtime 的构建/恢复并把已构建 Thread 交给 ThreadPool；ThreadPool 只负责 admit/attach/deliver/cool/evict，不再持有 TemplateManager / ProviderResolver / ToolManager / repository？回答“是”或指出你要改哪一段。",
+  "last_answer": "不需要改名",
+  "assumption_updates": [
+    "crate 归属决定已改为新增独立 crate argus-thread-pool",
+    "新 crate 应为纯 runtime pool 基础设施，不感知 Session / Job",
+    "ThreadPool 负责 Thread 的用量管理与监控；Session/Job 只获取 Thread 并自行编排后续行为",
+    "ThreadPool 命名保留，不做 rename pass"
+  ],
+  "completed_at": "2026-04-20T15:16:56Z",
+  "transcript_path": ".omx/interviews/argus-agent-thread-core-lock-free-20260420T151656Z.md",
+  "spec_path": ".omx/specs/deep-interview-argus-agent-thread-core-lock-free.md",
+  "recommended_handoff": "$ralplan .omx/specs/deep-interview-argus-agent-thread-core-lock-free.md",
+  "residual_risk": "none; clarified spec ready for planning handoff",
+  "slug": "argus-agent-thread-core-lock-free",
+  "readiness_gates": {
+    "non_goals_explicit": true,
+    "decision_boundaries_explicit": true,
+    "pressure_pass_complete": true
+  }
+}

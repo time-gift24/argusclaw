@@ -20,7 +20,7 @@ import { useChatStore } from "@/lib/chat-store";
 import type { ChatStore, PendingToolCall } from "@/lib/chat-store";
 import { providers } from "@/lib/tauri";
 import { Badge } from "@/components/ui/badge";
-import type { ChatMessagePayload } from "@/lib/types/chat";
+import type { ChatMessagePayload, JobLifecycleStatus } from "@/lib/types/chat";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/components/ui/toast";
 import { cn } from "@/lib/utils";
@@ -623,27 +623,33 @@ const JobStatusArtifacts: FC = () => {
     const rightRuntimeStatus = runtimeStatusByJobId.get(right.job_id);
     const leftStatus = stoppingJobIds[left.job_id]
       ? "stopping"
-      : leftRuntimeStatus === "queued"
-        ? "queued"
+      : leftRuntimeStatus === "queued" || leftRuntimeStatus === "loading"
+        ? leftRuntimeStatus
         : left.status;
     const rightStatus = stoppingJobIds[right.job_id]
       ? "stopping"
-      : rightRuntimeStatus === "queued"
-        ? "queued"
+      : rightRuntimeStatus === "queued" || rightRuntimeStatus === "loading"
+        ? rightRuntimeStatus
         : right.status;
 
-    const priority = (status: "stopping" | "queued" | typeof left.status) => {
+    const priority = (
+      status: "stopping" | "queued" | "loading" | JobLifecycleStatus,
+    ) => {
       switch (status) {
         case "stopping":
           return 0;
-        case "running":
+        case "loading":
           return 1;
-        case "queued":
+        case "running":
           return 2;
-        case "failed":
+        case "queued":
           return 3;
-        case "completed":
+        case "failed":
           return 4;
+        case "cancelled":
+          return 5;
+        case "completed":
+          return 6;
       }
     };
 
@@ -676,6 +682,7 @@ const JobStatusArtifacts: FC = () => {
               const runtimeStatus = runtimeStatusByJobId.get(job.job_id);
               return (
                 stoppingJobIds[job.job_id] ||
+                runtimeStatus === "loading" ||
                 runtimeStatus === "queued" ||
                 job.status === "running"
               );
@@ -691,15 +698,20 @@ const JobStatusArtifacts: FC = () => {
               const runtimeStatus = runtimeStatusByJobId.get(job.job_id);
               const uiStatus = isStopping
                 ? "stopping"
-                : runtimeStatus === "queued"
-                  ? "queued"
+                : runtimeStatus === "queued" || runtimeStatus === "loading"
+                  ? runtimeStatus
                   : job.status;
+              const isLoading = uiStatus === "loading";
               const isRunning = uiStatus === "running";
               const isQueued = uiStatus === "queued";
               const isFailed = uiStatus === "failed";
+              const isCancelled = uiStatus === "cancelled";
               const isCompleted = uiStatus === "completed";
               const isActionable =
-                (job.status === "running" || isQueued) && !isStopping;
+                (uiStatus === "running" ||
+                  uiStatus === "queued" ||
+                  uiStatus === "loading") &&
+                !isStopping;
               const detailAction = (
                 <Button
                   type="button"
@@ -714,10 +726,14 @@ const JobStatusArtifacts: FC = () => {
               const statusLabel =
                 uiStatus === "stopping"
                   ? "正在停止"
+                  : uiStatus === "loading"
+                    ? "加载中"
                   : uiStatus === "queued"
                     ? "排队中"
                     : uiStatus === "running"
                       ? "运行中"
+                      : uiStatus === "cancelled"
+                        ? "已取消"
                       : uiStatus === "failed"
                         ? "失败"
                         : "已完成";
@@ -725,10 +741,14 @@ const JobStatusArtifacts: FC = () => {
               const statusBadgeClass =
                 uiStatus === "stopping"
                   ? "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300"
+                  : uiStatus === "loading"
+                    ? "border-muted-foreground/30 bg-muted/40 text-muted-foreground"
                   : uiStatus === "queued"
                     ? "border-cyan-500/30 bg-cyan-500/10 text-cyan-700 dark:text-cyan-300"
                     : uiStatus === "running"
                       ? "border-sky-500/30 bg-sky-500/10 text-sky-700 dark:text-sky-300"
+                      : uiStatus === "cancelled"
+                        ? "border-muted-foreground/30 bg-muted/40 text-muted-foreground"
                       : uiStatus === "failed"
                         ? "border-destructive/30 bg-destructive/10 text-destructive"
                         : "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300";
@@ -750,17 +770,19 @@ const JobStatusArtifacts: FC = () => {
                           "mt-0.5 rounded-xl p-2",
                           isStopping &&
                             "bg-amber-500/10 text-amber-700 dark:text-amber-300",
+                          isLoading && "bg-muted/40 text-muted-foreground",
                           isQueued &&
                             "bg-cyan-500/10 text-cyan-700 dark:text-cyan-300",
                           isRunning && "bg-primary/10 text-primary",
+                          isCancelled && "bg-muted/40 text-muted-foreground",
                           isFailed && "bg-destructive/10 text-destructive",
                           isCompleted &&
                             "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300",
                         )}
                       >
-                        {isStopping || isRunning || isQueued ? (
+                        {isStopping || isLoading || isRunning || isQueued ? (
                           <Loader2 className="size-4 animate-spin" />
-                        ) : isFailed ? (
+                        ) : isFailed || isCancelled ? (
                           <CircleAlert className="size-4" />
                         ) : (
                           <CheckIcon className="size-4" />

@@ -30,9 +30,9 @@ use super::session::{
     shutdown_child_process,
 };
 
-pub struct BackendOpenResult {
-    pub metadata: PageMetadata,
-    pub session: Arc<dyn BrowserSession>,
+pub(super) struct BackendOpenResult {
+    pub(super) metadata: PageMetadata,
+    pub(super) session: Arc<dyn BrowserSession>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,18 +42,18 @@ pub(crate) enum SessionMode {
 }
 
 #[async_trait]
-pub trait BrowserBackend: Send + Sync {
+pub(super) trait BrowserBackend: Send + Sync {
     async fn open(&self, url: &str) -> Result<BackendOpenResult, ChromeToolError>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DetectedChrome {
-    pub browser_binary: PathBuf,
-    pub browser_version: String,
+pub(super) struct DetectedChrome {
+    pub(super) browser_binary: PathBuf,
+    pub(super) browser_version: String,
 }
 
 #[async_trait]
-pub trait ChromeHost: Send + Sync {
+pub(super) trait ChromeHost: Send + Sync {
     async fn discover_chrome(&self) -> Result<DetectedChrome, ChromeToolError>;
 
     async fn open_session(
@@ -201,7 +201,7 @@ impl ChromeManager {
 
     #[cfg(test)]
     #[must_use]
-    pub(crate) fn new_with_managed_components_for_test(
+    pub(super) fn new_with_managed_components_for_test(
         host: Arc<dyn ChromeHost>,
         downloader: Arc<dyn DriverDownloader>,
         paths: ChromePaths,
@@ -227,7 +227,7 @@ impl ChromeManager {
 
     #[cfg(test)]
     #[must_use]
-    pub(crate) fn new_interactive_with_managed_components_for_test(
+    pub(super) fn new_interactive_with_managed_components_for_test(
         host: Arc<dyn ChromeHost>,
         downloader: Arc<dyn DriverDownloader>,
         paths: ChromePaths,
@@ -253,14 +253,14 @@ impl ChromeManager {
 
     #[cfg(test)]
     #[must_use]
-    pub fn new_for_test(backend: Arc<dyn BrowserBackend>) -> Self {
+    pub(super) fn new_for_test(backend: Arc<dyn BrowserBackend>) -> Self {
         static NEXT_TEST_MANAGER_ID: AtomicU64 = AtomicU64::new(0);
         let id = NEXT_TEST_MANAGER_ID.fetch_add(1, Ordering::Relaxed) + 1;
         let home = std::env::temp_dir().join(format!("arguswing-chrome-tests-{id}"));
         Self::new_with_session_limit(backend, None, ChromePaths::from_home(&home), 4)
     }
 
-    pub async fn install_driver(
+    pub(super) async fn install_driver(
         &self,
     ) -> Result<(DetectedChrome, InstalledDriver), ChromeToolError> {
         let support = self
@@ -704,7 +704,7 @@ impl Drop for ChromeManager {
 }
 
 #[derive(Debug)]
-pub struct SystemChromeHost {
+pub(super) struct SystemChromeHost {
     driver_process: RwLock<Option<Arc<ChromeDriverProcess>>>,
 }
 

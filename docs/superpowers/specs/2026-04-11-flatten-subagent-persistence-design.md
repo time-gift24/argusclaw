@@ -153,7 +153,7 @@ Test file updates:
 |-------|--------|
 | `argus-protocol` | Remove `AgentType`, update `AgentRecord`, update `lib.rs` re-exports |
 | `argus-repository` | Remove subagent methods, update SQL, add migration, update `sqlite/agent.rs` imports |
-| `argus-template` | Update TOML config, remove subagent methods, add `list_subagents_by_names`, update `CLAUDE.md`/`AGENTS.md` |
+| `argus-template` | Update TOML config, remove subagent methods, add `list_subagents_by_names`, update `AGENTS.md` |
 | `argus-tool` | Add `MAX_DISPATCH_DEPTH` constant, review `SchedulerSubagent`/`SchedulerTool` descriptions |
 | `argus-session` | Update `SchedulerBackend` impl |
 | `argus-agent` | Update `turn.rs`, `thread.rs`, update ~5 test blocks |
@@ -164,7 +164,7 @@ Test file updates:
 
 **Test code scope:** All test code constructing `AgentRecord` must be updated to remove `parent_agent_id` and `agent_type` fields. This affects approximately 20+ test blocks across `argus-agent`, `argus-job`, `argus-session`, `argus-wing`, and `argus-repository`.
 
-**Documentation sync:** Update crate-level `CLAUDE.md` and `AGENTS.md` files in `argus-template`, `argus-repository`, and any other crates that reference `AgentType`, `parent_agent_id`, or subagent methods.
+**Documentation sync:** Update crate-level `AGENTS.md` files in `argus-template`, `argus-repository`, and any other crates that reference `AgentType`, `parent_agent_id`, or subagent methods.
 
 **API breaking change:** Removing `AgentType` from `argus-protocol` public exports (`lib.rs`) will cause compile errors in all crates that import it. Remove the enum and fix all downstream compile errors in a single commit.
 

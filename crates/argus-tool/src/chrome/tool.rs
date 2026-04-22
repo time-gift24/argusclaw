@@ -106,13 +106,13 @@ impl ChromeTool {
 
     #[must_use]
     #[cfg(test)]
-    pub(crate) fn new_for_test(backend: Arc<dyn BrowserBackend>) -> Self {
+    pub(super) fn new_for_test(backend: Arc<dyn BrowserBackend>) -> Self {
         Self::new_with_backend(backend)
     }
 
     #[must_use]
     #[cfg(test)]
-    pub(crate) fn new_with_managed_components_for_test(
+    pub(super) fn new_with_managed_components_for_test(
         host: Arc<dyn ChromeHost>,
         downloader: Arc<dyn DriverDownloader>,
         paths: ChromePaths,
@@ -128,7 +128,7 @@ impl ChromeTool {
 
     #[must_use]
     #[cfg(test)]
-    pub(crate) fn new_interactive_with_managed_components_for_test(
+    pub(super) fn new_interactive_with_managed_components_for_test(
         host: Arc<dyn ChromeHost>,
         downloader: Arc<dyn DriverDownloader>,
         paths: ChromePaths,
@@ -154,7 +154,7 @@ impl ChromeTool {
     }
 
     #[cfg(test)]
-    pub(crate) fn new_interactive_with_backend(backend: Arc<dyn BrowserBackend>) -> Self {
+    pub(super) fn new_interactive_with_backend(backend: Arc<dyn BrowserBackend>) -> Self {
         Self {
             manager: Arc::new(ChromeManager::new_for_test(backend)),
             policy: ExplorePolicy::interactive(),

@@ -24,6 +24,7 @@
 mod db;
 mod resolver;
 
+use std::future::Future;
 use std::sync::Arc;
 
 use crate::db::{default_trace_dir, ensure_parent_dir, resolve_database_target, DatabaseTarget};
@@ -34,14 +35,15 @@ use argus_job::JobManager;
 use argus_llm::ProviderManager;
 use argus_mcp::{McpRuntime, McpRuntimeConfig, RmcpConnector};
 use argus_protocol::{
-    AgentId, AgentRecord, ArgusError, LlmProvider, LlmProviderId, LlmProviderRecord, ProviderId,
-    ProviderTestResult, Result, RiskLevel, SessionId, ThreadEvent, ThreadId, ThreadPoolSnapshot,
-    ThreadPoolState,
+    AgentId, AgentRecord, ArgusError, JobRuntimeState, LlmProvider, LlmProviderId,
+    LlmProviderRecord, ProviderId, ProviderTestResult, Result, RiskLevel, SessionId, ThreadEvent,
+    ThreadId, ThreadPoolSnapshot, ThreadPoolState,
 };
 use argus_repository::traits::{
     AccountRepository, AgentRepository, JobRepository, LlmProviderRepository, McpRepository,
     SessionRepository, ThreadRepository,
 };
+use argus_thread_pool::ThreadPool;
 
 use argus_repository::types::JobId;
 use argus_repository::{connect, connect_path, migrate, ArgusSqlite};
@@ -76,6 +78,27 @@ pub struct ArgusWing {
 }
 
 impl ArgusWing {
+    async fn bootstrap_template_manager(template_manager: Arc<TemplateManager>) -> Result<()> {
+        template_manager.repair_placeholder_ids().await?;
+        template_manager.seed_builtin_agents().await?;
+        Ok(())
+    }
+
+    fn run_startup_future<T>(future: impl Future<Output = T> + Send + 'static) -> T
+    where
+        T: Send + 'static,
+    {
+        std::thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("ArgusWing bootstrap runtime should build")
+                .block_on(future)
+        })
+        .join()
+        .expect("ArgusWing bootstrap task should not panic")
+    }
+
     /// Initialize ArgusWing with an optional database path.
     ///
     /// If no path is provided, defaults to `~/.arguswing/sqlite.db`.
@@ -115,10 +138,7 @@ impl ArgusWing {
             arc_sqlite.clone() as Arc<dyn AgentRepository>,
             arc_sqlite.clone(),
         ));
-        template_manager.repair_placeholder_ids().await?;
-
-        // Seed builtin agents from agents/ directory
-        template_manager.seed_builtin_agents().await?;
+        Self::bootstrap_template_manager(Arc::clone(&template_manager)).await?;
 
         // Create tool manager
         let tool_manager = Arc::new(ToolManager::new());
@@ -129,15 +149,18 @@ impl ArgusWing {
         // Create provider resolver wrapper FIRST
         let provider_resolver = Arc::new(ProviderManagerResolver::new(provider_manager.clone()));
 
+        let thread_pool = Arc::new(ThreadPool::new());
+
         // Create job manager with all dependencies
         let job_manager = Arc::new(JobManager::new_with_repositories(
+            Arc::clone(&thread_pool),
             template_manager.clone(),
             provider_resolver.clone(),
             tool_manager.clone(),
             trace_dir.clone(),
-            arc_sqlite.clone() as Arc<dyn JobRepository>,
-            arc_sqlite.clone() as Arc<dyn ThreadRepository>,
-            llm_repository.clone(),
+            Some(arc_sqlite.clone() as Arc<dyn JobRepository>),
+            Some(arc_sqlite.clone() as Arc<dyn ThreadRepository>),
+            Some(llm_repository.clone()),
         ));
 
         let mcp_runtime = Arc::new(McpRuntime::new(
@@ -160,7 +183,7 @@ impl ArgusWing {
             mcp_tool_resolver,
             tool_manager.clone(),
             trace_dir,
-            job_manager.thread_pool(),
+            thread_pool,
             job_manager.clone(),
         ));
 
@@ -198,21 +221,28 @@ impl ArgusWing {
             arc_sqlite.clone() as Arc<dyn AgentRepository>,
             arc_sqlite.clone(),
         ));
+        Self::run_startup_future(Self::bootstrap_template_manager(Arc::clone(
+            &template_manager,
+        )))
+        .expect("ArgusWing::with_pool should bootstrap templates");
         let tool_manager = Arc::new(ToolManager::new());
         let trace_dir = default_trace_dir();
         std::fs::create_dir_all(&trace_dir).ok();
         // Create provider resolver wrapper FIRST
         let provider_resolver = Arc::new(ProviderManagerResolver::new(provider_manager.clone()));
 
+        let thread_pool = Arc::new(ThreadPool::new());
+
         // Create job manager with all dependencies
         let job_manager = Arc::new(JobManager::new_with_repositories(
+            Arc::clone(&thread_pool),
             template_manager.clone(),
             provider_resolver.clone(),
             tool_manager.clone(),
             trace_dir.clone(),
-            arc_sqlite.clone() as Arc<dyn JobRepository>,
-            arc_sqlite.clone() as Arc<dyn ThreadRepository>,
-            llm_repository.clone(),
+            Some(arc_sqlite.clone() as Arc<dyn JobRepository>),
+            Some(arc_sqlite.clone() as Arc<dyn ThreadRepository>),
+            Some(llm_repository.clone()),
         ));
         let mcp_runtime = Arc::new(McpRuntime::new(
             arc_sqlite.clone(),
@@ -232,7 +262,7 @@ impl ArgusWing {
             mcp_tool_resolver,
             tool_manager.clone(),
             trace_dir,
-            job_manager.thread_pool(),
+            thread_pool,
             job_manager.clone(),
         ));
         let mcp_repo: Arc<dyn McpRepository> = arc_sqlite.clone();
@@ -287,12 +317,17 @@ impl ArgusWing {
     /// Get a point-in-time snapshot of aggregate thread-pool metrics.
     #[must_use]
     pub fn thread_pool_snapshot(&self) -> ThreadPoolSnapshot {
-        self.job_manager.thread_pool_snapshot()
+        self.session_manager.thread_pool_snapshot()
     }
 
     /// Return the authoritative thread-pool state including runtime summaries.
     pub fn thread_pool_state(&self) -> ThreadPoolState {
-        self.job_manager.thread_pool_state()
+        self.session_manager.thread_pool_state()
+    }
+
+    /// Return the authoritative job-runtime state.
+    pub fn job_runtime_state(&self) -> JobRuntimeState {
+        self.job_manager.job_runtime_state()
     }
 
     /// Resolve the persisted execution thread bound to a job ID, if available.
@@ -810,6 +845,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn with_pool_bootstraps_templates_like_init() {
+        use argus_repository::ArgusSqlite;
+
+        let temp_dir = tempfile::tempdir().expect("temp dir should exist");
+        let database_path = temp_dir.path().join("with-pool.sqlite");
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(5)
+            .connect_with(
+                sqlx::sqlite::SqliteConnectOptions::new()
+                    .filename(&database_path)
+                    .create_if_missing(true),
+            )
+            .await
+            .expect("sqlite pool should connect");
+        migrate(&pool)
+            .await
+            .expect("test migrations should succeed");
+
+        let sqlite = ArgusSqlite::new(pool.clone());
+        sqlite
+            .insert_legacy_agent_for_test()
+            .await
+            .expect("legacy zero-id agent should insert");
+
+        let wing = ArgusWing::with_pool(pool);
+        let templates = wing
+            .list_templates()
+            .await
+            .expect("template listing should succeed");
+
+        assert!(templates.iter().all(|template| template.id.inner() != 0));
+        assert!(
+            templates
+                .iter()
+                .any(|template| template.display_name == "Chrome Explore"),
+            "with_pool should seed builtin agents just like init"
+        );
+    }
+
+    #[tokio::test]
     async fn mcp_api_round_trips_servers_and_agent_bindings() {
         let temp_dir = tempfile::tempdir().expect("temp dir should exist");
         let database_path = temp_dir.path().join("mcp.sqlite");
@@ -1298,7 +1373,7 @@ mod tests {
             .thread_pool_state()
             .runtimes
             .iter()
-            .any(|runtime| runtime.runtime.thread_id == thread_id));
+            .any(|runtime| runtime.thread_id == thread_id));
 
         wing.delete_thread(session_id, thread_id)
             .await
@@ -1308,7 +1383,7 @@ mod tests {
             .thread_pool_state()
             .runtimes
             .iter()
-            .any(|runtime| runtime.runtime.thread_id == thread_id));
+            .any(|runtime| runtime.thread_id == thread_id));
     }
 
     #[tokio::test]
@@ -1355,11 +1430,11 @@ mod tests {
         assert!(before_delete
             .runtimes
             .iter()
-            .any(|runtime| runtime.runtime.thread_id == first_thread_id));
+            .any(|runtime| runtime.thread_id == first_thread_id));
         assert!(before_delete
             .runtimes
             .iter()
-            .any(|runtime| runtime.runtime.thread_id == second_thread_id));
+            .any(|runtime| runtime.thread_id == second_thread_id));
 
         wing.delete_session(session_id)
             .await
@@ -1369,11 +1444,11 @@ mod tests {
         assert!(!after_delete
             .runtimes
             .iter()
-            .any(|runtime| runtime.runtime.thread_id == first_thread_id));
+            .any(|runtime| runtime.thread_id == first_thread_id));
         assert!(!after_delete
             .runtimes
             .iter()
-            .any(|runtime| runtime.runtime.thread_id == second_thread_id));
+            .any(|runtime| runtime.thread_id == second_thread_id));
     }
 
     #[tokio::test]
@@ -1574,9 +1649,9 @@ mod tests {
             .thread_pool_state()
             .runtimes
             .into_iter()
-            .find(|runtime| runtime.runtime.thread_id == thread_id)
+            .find(|runtime| runtime.thread_id == thread_id)
             .expect("thread should be registered");
-        assert_eq!(runtime_before.runtime.session_id, Some(owning_session_id));
+        assert_eq!(runtime_before.session_id, Some(owning_session_id));
 
         let error = wing
             .send_message(foreign_session_id, thread_id, "should fail".to_string())
@@ -1591,9 +1666,9 @@ mod tests {
             .thread_pool_state()
             .runtimes
             .into_iter()
-            .find(|runtime| runtime.runtime.thread_id == thread_id)
+            .find(|runtime| runtime.thread_id == thread_id)
             .expect("thread should remain registered");
-        assert_eq!(runtime_after.runtime.session_id, Some(owning_session_id));
+        assert_eq!(runtime_after.session_id, Some(owning_session_id));
     }
 
     #[tokio::test]
@@ -1646,9 +1721,9 @@ mod tests {
             .thread_pool_state()
             .runtimes
             .into_iter()
-            .find(|runtime| runtime.runtime.thread_id == thread_id)
+            .find(|runtime| runtime.thread_id == thread_id)
             .expect("thread should remain registered");
-        assert_eq!(runtime_after.runtime.session_id, Some(owning_session_id));
+        assert_eq!(runtime_after.session_id, Some(owning_session_id));
     }
 
     #[tokio::test]
@@ -1714,12 +1789,12 @@ mod tests {
         assert_ne!(bound_thread_id, originating_thread_id);
 
         let runtime = wing
-            .thread_pool_state()
+            .job_runtime_state()
             .runtimes
             .into_iter()
-            .find(|runtime| runtime.runtime.thread_id == bound_thread_id)
+            .find(|runtime| runtime.thread_id == bound_thread_id)
             .expect("bound runtime should be tracked");
-        assert_eq!(runtime.runtime.job_id.as_deref(), Some(job_id.as_str()));
+        assert_eq!(runtime.job_id, job_id);
         assert!(matches!(
             runtime.status,
             argus_protocol::ThreadRuntimeStatus::Queued

@@ -37,7 +37,7 @@ pnpm tauri dev
 | `crates/argus-llm` | provider 管理、OpenAI-compatible provider、retry |
 | `crates/argus-tool` | 工具注册表与内置 filesystem / shell / browser / scheduler tools |
 | `crates/argus-agent` | thread-owned turn runtime、compact、trace、plan |
-| `crates/argus-job` | 后台 job 调度与统一 thread pool |
+| `crates/argus-job` | 后台 job 调度、恢复与 runtime pool 解耦 |
 | `crates/argus-session` | session 聚合、thread 恢复、scheduler backend |
 | `crates/argus-template` | agent 模板管理与 builtin agents seed |
 | `crates/argus-mcp` | MCP server runtime、supervision、tool adapter |
@@ -47,6 +47,5 @@ pnpm tauri dev
 
 ## 文档约定
 
-- 根目录与各 crate 维护本地 `CLAUDE.md`，记录职责边界与修改守则。
-- 同级 `AGENTS.md` 负责提醒代理先读最近的 `CLAUDE.md`；如果同目录还有额外规则，也放在 `AGENTS.md`。
-- 进入更深目录工作时，以更近的 `CLAUDE.md` / `AGENTS.md` 为准。
+- 根目录与各 crate 维护本地 `AGENTS.md`，记录职责边界、修改守则与补充不变量。
+- 进入更深目录工作时，以更近的 `AGENTS.md` 为准。

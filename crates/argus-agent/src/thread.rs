@@ -1,10 +1,11 @@
 //! Thread implementation.
 
-use std::sync::Arc;
+use std::collections::VecDeque;
+use std::sync::{Arc, Weak};
 
 use chrono::{DateTime, Utc};
 use derive_builder::Builder;
-use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio::task::{JoinError, JoinHandle};
 
 use crate::turn::{self, TurnCancellation};
@@ -12,8 +13,8 @@ use argus_protocol::llm::{ChatMessage, LlmProvider};
 use argus_protocol::tool::NamedTool;
 use argus_protocol::{
     AgentRecord, HookHandler, HookRegistry, McpToolResolver, MessageOverride, QueuedUserMessage,
-    SessionId, ThreadCommand, ThreadControlEvent, ThreadEvent, ThreadId, ThreadMailbox,
-    ThreadNoticeLevel, TokenUsage,
+    SessionId, ThreadControlMessage, ThreadEvent, ThreadId, ThreadMessage, ThreadNoticeLevel,
+    TokenUsage,
 };
 use argus_tool::ToolManager;
 
@@ -28,7 +29,7 @@ use super::plan_tool::UpdatePlanTool;
 use super::turn_log_store::{
     RecoveredThreadLogState, append_turn_record, recover_thread_log_state,
 };
-use super::types::{ThreadInfo, ThreadState};
+use super::types::{ThreadInfo, ThreadRuntimeSnapshot, ThreadState};
 /// Default broadcast channel capacity.
 const DEFAULT_CHANNEL_CAPACITY: usize = 256;
 
@@ -81,6 +82,77 @@ pub(crate) enum ThreadLoopAction {
     Noop,
 }
 
+enum ThreadOwnerCommand {
+    SetTitle {
+        title: Option<String>,
+        ack: oneshot::Sender<()>,
+    },
+    SetProvider {
+        provider: Arc<dyn LlmProvider>,
+        ack: oneshot::Sender<()>,
+    },
+    SetMcpToolResolver {
+        resolver: Option<Arc<dyn McpToolResolver>>,
+        ack: oneshot::Sender<()>,
+    },
+}
+
+struct ThreadHandleInner {
+    id: ThreadId,
+    session_id: SessionId,
+    message_tx: mpsc::UnboundedSender<ThreadMessage>,
+    pipe_tx: broadcast::Sender<ThreadEvent>,
+    snapshot_rx: watch::Receiver<ThreadRuntimeSnapshot>,
+    terminated_rx: watch::Receiver<bool>,
+}
+
+/// Cloneable observer/control handle for a loaded thread runtime.
+#[derive(Clone)]
+pub struct ThreadHandle {
+    inner: Arc<ThreadHandleInner>,
+}
+
+/// Cloneable owner handle for a loaded thread runtime.
+#[derive(Clone)]
+pub struct ThreadOwnerHandle {
+    handle: ThreadHandle,
+    owner_tx: mpsc::UnboundedSender<ThreadOwnerCommand>,
+}
+
+/// Weak handle used by session-side caches to avoid keeping runtimes resident.
+#[derive(Clone)]
+pub struct WeakThreadHandle {
+    inner: Weak<ThreadHandleInner>,
+}
+
+impl std::fmt::Debug for ThreadHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ThreadHandle")
+            .field("id", &self.id())
+            .field("session_id", &self.session_id())
+            .field("state", &self.state())
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for WeakThreadHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WeakThreadHandle")
+            .field("live", &self.inner.strong_count())
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for ThreadOwnerHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ThreadOwnerHandle")
+            .field("id", &self.id())
+            .field("session_id", &self.session_id())
+            .field("state", &self.observer().state())
+            .finish()
+    }
+}
+
 /// Thread - multi-turn conversation session.
 ///
 /// A Thread manages message history and executes Turns sequentially.
@@ -100,10 +172,6 @@ pub struct Thread {
     /// Optional thread title.
     #[builder(default)]
     title: Option<String>,
-
-    /// Creation timestamp.
-    #[builder(default = "Utc::now()")]
-    created_at: DateTime<Utc>,
 
     /// Last update timestamp.
     #[builder(default = "Utc::now()")]
@@ -143,17 +211,25 @@ pub struct Thread {
     #[builder(default)]
     pipe_tx: broadcast::Sender<ThreadEvent>,
 
-    /// Internal control-plane sender for low-volume orchestration messages.
+    /// Eventually consistent runtime snapshot publisher for loaded-handle reads.
     #[builder(default)]
-    control_tx: mpsc::UnboundedSender<ThreadControlEvent>,
+    snapshot_tx: Option<watch::Sender<ThreadRuntimeSnapshot>>,
 
-    /// Single-consumer control receiver, taken by the session orchestrator.
+    /// Thread ingress sender for low-volume orchestration and payload messages.
     #[builder(default)]
-    control_rx: Option<mpsc::UnboundedReceiver<ThreadControlEvent>>,
+    message_tx: mpsc::UnboundedSender<ThreadMessage>,
 
-    /// Thread-level mailbox shared between the orchestrator and active turns.
-    #[builder(default = "Arc::new(Mutex::new(ThreadMailbox::default()))")]
-    mailbox: Arc<Mutex<ThreadMailbox>>,
+    /// Single-consumer thread ingress receiver, taken by the session orchestrator.
+    #[builder(default)]
+    message_rx: Option<mpsc::UnboundedReceiver<ThreadMessage>>,
+
+    /// FIFO payload messages owned by the thread runtime.
+    #[builder(default)]
+    pending_messages: VecDeque<ThreadMessage>,
+
+    /// Owner-only command receiver, taken when a runtime handle is spawned.
+    #[builder(default)]
+    owner_rx: Option<mpsc::UnboundedReceiver<ThreadOwnerCommand>>,
 
     /// Optional runtime resolver that injects ready MCP tools for this agent.
     #[builder(default, setter(strip_option))]
@@ -195,7 +271,7 @@ impl ThreadBuilder {
     /// Returns `ThreadError` if required fields (`provider`, `compactor`, `agent_record`, `session_id`) are not set.
     pub fn build(self) -> Result<Thread, ThreadError> {
         let (pipe_tx, _) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
-        let (control_tx, control_rx) = mpsc::unbounded_channel();
+        let (message_tx, message_rx) = mpsc::unbounded_channel();
 
         let agent_record = self.agent_record.ok_or(ThreadError::AgentRecordNotSet)?;
         let session_id = self.session_id.ok_or(ThreadError::SessionIdNotSet)?;
@@ -210,7 +286,6 @@ impl ThreadBuilder {
             agent_record,
             session_id,
             title: self.title.flatten(),
-            created_at: self.created_at.unwrap_or_else(Utc::now),
             updated_at: self.updated_at.unwrap_or_else(Utc::now),
             turns,
             provider: self.provider.ok_or(ThreadError::ProviderNotConfigured)?,
@@ -221,12 +296,229 @@ impl ThreadBuilder {
             runtime_state: ThreadRuntimeState::Idle,
             active_turn_cancellation: None,
             pipe_tx,
-            control_tx,
-            control_rx: Some(control_rx),
-            mailbox: Arc::new(Mutex::new(ThreadMailbox::default())),
+            snapshot_tx: None,
+            message_tx,
+            message_rx: Some(message_rx),
+            pending_messages: VecDeque::new(),
+            owner_rx: None,
             mcp_tool_resolver: self.mcp_tool_resolver.flatten(),
             plan_store,
         })
+    }
+}
+
+impl WeakThreadHandle {
+    /// Upgrade a weak runtime handle into a live handle if the runtime is still resident.
+    pub fn upgrade(&self) -> Option<ThreadHandle> {
+        self.inner.upgrade().map(|inner| ThreadHandle { inner })
+    }
+}
+
+impl ThreadHandle {
+    fn with_snapshot<T>(&self, project: impl FnOnce(&ThreadRuntimeSnapshot) -> T) -> T {
+        let snapshot = self.inner.snapshot_rx.borrow();
+        project(&snapshot)
+    }
+
+    /// Downgrade this runtime handle for cache-only storage.
+    pub fn downgrade(&self) -> WeakThreadHandle {
+        WeakThreadHandle {
+            inner: Arc::downgrade(&self.inner),
+        }
+    }
+
+    /// Returns true when two handles point at the same live runtime instance.
+    pub fn same_runtime(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+
+    /// Get the thread identifier.
+    pub fn id(&self) -> ThreadId {
+        self.inner.id
+    }
+
+    /// Get the session identifier.
+    pub fn session_id(&self) -> SessionId {
+        self.inner.session_id
+    }
+
+    /// Subscribe to runtime thread events.
+    pub fn subscribe(&self) -> broadcast::Receiver<ThreadEvent> {
+        self.inner.pipe_tx.subscribe()
+    }
+
+    /// Send a protocol message into the thread mailbox.
+    pub fn send_message(&self, message: ThreadMessage) -> Result<(), ThreadError> {
+        if matches!(message, ThreadMessage::Control(_)) {
+            return Err(ThreadError::OwnerControlRestricted);
+        }
+        self.inner
+            .message_tx
+            .send(message)
+            .map_err(|_| ThreadError::ChannelClosed)
+    }
+
+    /// Return the latest eventually consistent runtime snapshot.
+    pub fn snapshot(&self) -> ThreadRuntimeSnapshot {
+        self.inner.snapshot_rx.borrow().clone()
+    }
+
+    /// Return the latest title.
+    pub fn title(&self) -> Option<String> {
+        self.with_snapshot(|snapshot| snapshot.title.clone())
+    }
+
+    /// Return the latest update timestamp.
+    pub fn updated_at(&self) -> DateTime<Utc> {
+        self.with_snapshot(|snapshot| snapshot.updated_at)
+    }
+
+    /// Return committed history from the latest snapshot.
+    pub fn history(&self) -> Vec<ChatMessage> {
+        self.with_snapshot(|snapshot| snapshot.history.clone())
+    }
+
+    /// Return the current turn count.
+    pub fn turn_count(&self) -> u32 {
+        self.with_snapshot(|snapshot| snapshot.turn_count)
+    }
+
+    /// Return the current token count.
+    pub fn token_count(&self) -> u32 {
+        self.with_snapshot(|snapshot| snapshot.token_count)
+    }
+
+    /// Return the current plan item count.
+    pub fn plan_item_count(&self) -> usize {
+        self.with_snapshot(|snapshot| snapshot.plan_item_count)
+    }
+
+    /// Return the cached provider/model label.
+    pub fn provider_model(&self) -> String {
+        self.with_snapshot(|snapshot| snapshot.provider_model.clone())
+    }
+
+    /// Return the cached agent display name.
+    pub fn agent_display_name(&self) -> String {
+        self.with_snapshot(|snapshot| snapshot.agent_display_name.clone())
+    }
+
+    /// Return the cached agent identifier.
+    pub fn agent_id(&self) -> argus_protocol::AgentId {
+        self.with_snapshot(|snapshot| snapshot.agent_id)
+    }
+
+    /// Return the cached agent description.
+    pub fn agent_description(&self) -> String {
+        self.with_snapshot(|snapshot| snapshot.agent_description.clone())
+    }
+
+    /// Return the cached frozen system prompt.
+    pub fn agent_system_prompt(&self) -> String {
+        self.with_snapshot(|snapshot| snapshot.agent_system_prompt.clone())
+    }
+
+    /// Return the cached trace base directory.
+    pub fn trace_base_dir(&self) -> Option<std::path::PathBuf> {
+        self.with_snapshot(|snapshot| snapshot.trace_base_dir.clone())
+    }
+
+    /// Return the cached estimated memory bytes.
+    pub fn estimated_memory_bytes(&self) -> u64 {
+        self.with_snapshot(|snapshot| snapshot.estimated_memory_bytes)
+    }
+
+    /// Returns true when the runtime currently reports a running turn.
+    pub fn is_turn_running(&self) -> bool {
+        self.state() != ThreadState::Idle
+    }
+
+    /// Return the cached runtime state.
+    pub fn state(&self) -> ThreadState {
+        self.with_snapshot(|snapshot| snapshot.state)
+    }
+
+    /// Returns true when the snapshot contains visible history.
+    pub fn has_non_system_history(&self) -> bool {
+        self.with_snapshot(|snapshot| !snapshot.history.is_empty())
+    }
+
+    /// Wait until the runtime owner loop exits.
+    pub async fn wait_for_termination(&self) {
+        let mut terminated_rx = self.inner.terminated_rx.clone();
+        if *terminated_rx.borrow() {
+            return;
+        }
+        while terminated_rx.changed().await.is_ok() {
+            if *terminated_rx.borrow() {
+                return;
+            }
+        }
+    }
+}
+
+impl ThreadOwnerHandle {
+    async fn send_owner_command(
+        &self,
+        command: impl FnOnce(oneshot::Sender<()>) -> ThreadOwnerCommand,
+    ) -> Result<(), ThreadError> {
+        let (ack_tx, ack_rx) = oneshot::channel();
+        self.owner_tx
+            .send(command(ack_tx))
+            .map_err(|_| ThreadError::ChannelClosed)?;
+        ack_rx.await.map_err(|_| ThreadError::ChannelClosed)
+    }
+
+    /// Get the thread identifier.
+    pub fn id(&self) -> ThreadId {
+        self.handle.id()
+    }
+
+    /// Get the session identifier.
+    pub fn session_id(&self) -> SessionId {
+        self.handle.session_id()
+    }
+
+    /// Return the observer/control handle exposed to non-owner callers.
+    pub fn observer(&self) -> ThreadHandle {
+        self.handle.clone()
+    }
+
+    /// Returns true when two owner handles point at the same live runtime instance.
+    pub fn same_runtime(&self, other: &Self) -> bool {
+        self.handle.same_runtime(&other.handle)
+    }
+
+    /// Update the in-memory runtime title.
+    pub async fn set_title(&self, title: Option<String>) -> Result<(), ThreadError> {
+        self.send_owner_command(|ack| ThreadOwnerCommand::SetTitle { title, ack })
+            .await
+    }
+
+    /// Update the bound provider for subsequent turns.
+    pub async fn set_provider(&self, provider: Arc<dyn LlmProvider>) -> Result<(), ThreadError> {
+        self.send_owner_command(|ack| ThreadOwnerCommand::SetProvider { provider, ack })
+            .await
+    }
+
+    /// Update the MCP tool resolver for subsequent turns.
+    pub async fn set_mcp_tool_resolver(
+        &self,
+        resolver: Option<Arc<dyn McpToolResolver>>,
+    ) -> Result<(), ThreadError> {
+        self.send_owner_command(|ack| ThreadOwnerCommand::SetMcpToolResolver { resolver, ack })
+            .await
+    }
+
+    /// Request shutdown of the owner loop and wait for termination.
+    pub async fn shutdown(self) -> Result<(), ThreadError> {
+        self.handle
+            .inner
+            .message_tx
+            .send(ThreadMessage::Control(ThreadControlMessage::ShutdownRuntime))
+            .map_err(|_| ThreadError::ChannelClosed)?;
+        self.handle.wait_for_termination().await;
+        Ok(())
     }
 }
 
@@ -256,16 +548,93 @@ impl Thread {
     pub fn set_title(&mut self, title: Option<String>) {
         self.title = title.filter(|value| !value.trim().is_empty());
         self.updated_at = Utc::now();
-    }
-
-    /// Get creation timestamp.
-    pub fn created_at(&self) -> DateTime<Utc> {
-        self.created_at
+        self.publish_runtime_snapshot();
     }
 
     /// Get last update timestamp.
     pub fn updated_at(&self) -> DateTime<Utc> {
         self.updated_at
+    }
+
+    fn runtime_state_view(&self) -> ThreadState {
+        if self.is_turn_running() {
+            ThreadState::Processing
+        } else {
+            ThreadState::Idle
+        }
+    }
+
+    fn estimate_memory_bytes(&self) -> u64 {
+        let history_bytes = self
+            .history_iter()
+            .map(|message| message.content.len() as u64)
+            .sum::<u64>();
+        let plan_bytes = self.plan_store.store().read().unwrap().len() as u64 * 128;
+        history_bytes + plan_bytes + u64::from(self.token_count())
+    }
+
+    fn runtime_snapshot(&self) -> ThreadRuntimeSnapshot {
+        let plan_item_count = self.plan_store.store().read().unwrap().len();
+        ThreadRuntimeSnapshot {
+            id: self.id,
+            session_id: self.session_id,
+            title: self.title.clone(),
+            updated_at: self.updated_at,
+            history: self.history_iter().cloned().collect(),
+            turn_count: self.turn_count(),
+            token_count: self.token_count(),
+            plan_item_count,
+            state: self.runtime_state_view(),
+            provider_model: self.provider.model_name().to_string(),
+            agent_display_name: self.agent_record.display_name.clone(),
+            agent_id: self.agent_record.id,
+            agent_description: self.agent_record.description.clone(),
+            agent_system_prompt: self.agent_record.system_prompt.clone(),
+            trace_base_dir: self.trace_base_dir(),
+            estimated_memory_bytes: self.estimate_memory_bytes(),
+        }
+    }
+
+    fn publish_runtime_snapshot(&self) {
+        if let Some(snapshot_tx) = &self.snapshot_tx {
+            let _ = snapshot_tx.send(self.runtime_snapshot());
+        }
+    }
+
+    fn take_owner_rx(&mut self) -> Option<mpsc::UnboundedReceiver<ThreadOwnerCommand>> {
+        self.owner_rx.take()
+    }
+
+    /// Spawn a single-owner runtime task and return the cloneable observer/control handle.
+    pub fn spawn_runtime(mut self) -> Result<ThreadOwnerHandle, ThreadError> {
+        let message_rx = self.take_message_rx().ok_or(ThreadError::RuntimeActive)?;
+        let (owner_tx, owner_rx) = mpsc::unbounded_channel();
+        let (snapshot_tx, snapshot_rx) = watch::channel(self.runtime_snapshot());
+        let (terminated_tx, terminated_rx) = watch::channel(false);
+        self.snapshot_tx = Some(snapshot_tx);
+        self.owner_rx = Some(owner_rx);
+        self.reset_runtime_loop_state();
+        self.publish_runtime_snapshot();
+
+        let handle = ThreadHandle {
+            inner: Arc::new(ThreadHandleInner {
+                id: self.id,
+                session_id: self.session_id,
+                message_tx: self.message_tx.clone(),
+                pipe_tx: self.pipe_tx.clone(),
+                snapshot_rx,
+                terminated_rx,
+            }),
+        };
+        let owner_handle = ThreadOwnerHandle { handle, owner_tx };
+
+        let owner_rx = self.take_owner_rx().ok_or(ThreadError::ChannelClosed)?;
+        tokio::spawn(async move {
+            Self::run_reactor_loop(self, message_rx, owner_rx).await;
+            let _ = terminated_tx.send(true);
+        });
+
+        Ok(owner_handle)
     }
 
     /// Get information about this thread.
@@ -291,24 +660,16 @@ impl Thread {
         let _ = self.pipe_tx.send(event);
     }
 
-    /// Get a reference to the broadcast sender (for creating receivers).
-    pub fn pipe_tx(&self) -> &broadcast::Sender<ThreadEvent> {
-        &self.pipe_tx
+    /// Send a message into the thread-owned runtime ingress.
+    pub fn send_message(&self, message: ThreadMessage) -> Result<(), ThreadError> {
+        self.message_tx
+            .send(message)
+            .map_err(|_| ThreadError::ChannelClosed)
     }
 
-    /// Clone the internal control sender for this thread.
-    pub fn control_tx(&self) -> mpsc::UnboundedSender<ThreadControlEvent> {
-        self.control_tx.clone()
-    }
-
-    /// Take the single control receiver owned by the session orchestrator.
-    pub fn take_control_rx(&mut self) -> Option<mpsc::UnboundedReceiver<ThreadControlEvent>> {
-        self.control_rx.take()
-    }
-
-    /// Clone the shared mailbox.
-    pub fn mailbox(&self) -> Arc<Mutex<ThreadMailbox>> {
-        Arc::clone(&self.mailbox)
+    /// Take the single thread ingress receiver owned by the session orchestrator.
+    pub fn take_message_rx(&mut self) -> Option<mpsc::UnboundedReceiver<ThreadMessage>> {
+        self.message_rx.take()
     }
 
     /// Returns true if a Turn is currently executing.
@@ -316,76 +677,37 @@ impl Thread {
         !matches!(self.runtime_state, ThreadRuntimeState::Idle)
     }
 
-    /// Get current state.
-    pub fn state(&self) -> ThreadState {
-        match self.runtime_state {
-            ThreadRuntimeState::Idle => ThreadState::Idle,
-            ThreadRuntimeState::Running { .. } | ThreadRuntimeState::Stopping { .. } => {
-                ThreadState::Processing
-            }
-        }
-    }
-
     fn reset_runtime_loop_state(&mut self) {
         self.runtime_state = ThreadRuntimeState::Idle;
         self.active_turn_cancellation = None;
+        self.publish_runtime_snapshot();
     }
 
-    fn dispatch_runtime_command(
-        &mut self,
-        command: ThreadCommand,
-        mailbox: &mut ThreadMailbox,
-    ) -> ThreadLoopAction {
-        match command {
-            ThreadCommand::EnqueueUserMessage {
-                content,
-                msg_override,
-            } => {
-                mailbox.enqueue_user_message(content, msg_override);
-                self.try_start_next_turn(mailbox)
+    fn dispatch_runtime_message(&mut self, message: ThreadMessage) -> ThreadLoopAction {
+        match message {
+            ThreadMessage::UserInput { .. }
+            | ThreadMessage::PeerMessage { .. }
+            | ThreadMessage::JobResult { .. } => {
+                self.pending_messages.push_back(message);
+                self.try_start_next_turn()
             }
-            ThreadCommand::EnqueueMailboxMessage(message) => {
-                mailbox.enqueue_mailbox_message(message);
-                self.try_start_next_turn(mailbox)
-            }
-            ThreadCommand::CancelActiveTurn => self.cancel_active_turn(),
+            ThreadMessage::Interrupt => self.cancel_active_turn(),
+            ThreadMessage::Control(ThreadControlMessage::ShutdownRuntime) => ThreadLoopAction::Noop,
         }
     }
 
-    fn complete_runtime_turn(
-        &mut self,
-        _committed: bool,
-        mailbox: &mut ThreadMailbox,
-    ) -> ThreadLoopAction {
-        // A stop request only applies to the turn that just settled; it must
-        // not spill into the next queued turn.
-        mailbox.clear_stop_signal();
+    fn complete_runtime_turn(&mut self, _committed: bool) -> ThreadLoopAction {
         self.runtime_state = ThreadRuntimeState::Idle;
-        self.try_start_next_turn(mailbox)
+        self.publish_runtime_snapshot();
+        self.try_start_next_turn()
     }
 
-    fn inspect_runtime_mailbox(&mut self, mailbox: &mut ThreadMailbox) -> ThreadLoopAction {
-        if mailbox.take_stop_signal() {
-            if matches!(self.runtime_state, ThreadRuntimeState::Running { .. }) {
-                return self.cancel_active_turn();
-            }
-
-            return ThreadLoopAction::Noop;
-        }
-
-        if matches!(self.runtime_state, ThreadRuntimeState::Idle) {
-            return self.try_start_next_turn(mailbox);
-        }
-
-        ThreadLoopAction::Noop
-    }
-
-    fn try_start_next_turn(&mut self, mailbox: &mut ThreadMailbox) -> ThreadLoopAction {
+    fn try_start_next_turn(&mut self) -> ThreadLoopAction {
         if !matches!(self.runtime_state, ThreadRuntimeState::Idle) {
             return ThreadLoopAction::Noop;
         }
 
-        match self.take_next_turn_message(mailbox) {
+        match self.take_next_turn_message() {
             Some(message) => self.start_runtime_turn(message),
             None => ThreadLoopAction::Noop,
         }
@@ -394,6 +716,7 @@ impl Thread {
     fn start_runtime_turn(&mut self, message: QueuedUserMessage) -> ThreadLoopAction {
         let turn_number = derive_next_user_turn_number(&self.turns);
         self.runtime_state = ThreadRuntimeState::Running { turn_number };
+        self.publish_runtime_snapshot();
 
         ThreadLoopAction::StartTurn {
             turn_number,
@@ -406,6 +729,7 @@ impl Thread {
         match self.runtime_state {
             ThreadRuntimeState::Running { turn_number } => {
                 self.runtime_state = ThreadRuntimeState::Stopping { turn_number };
+                self.publish_runtime_snapshot();
                 ThreadLoopAction::StopTurn { turn_number }
             }
             ThreadRuntimeState::Idle | ThreadRuntimeState::Stopping { .. } => {
@@ -414,8 +738,20 @@ impl Thread {
         }
     }
 
-    fn take_next_turn_message(&mut self, mailbox: &mut ThreadMailbox) -> Option<QueuedUserMessage> {
-        mailbox.take_next_turn_message()
+    fn take_next_turn_message(&mut self) -> Option<QueuedUserMessage> {
+        match self.pending_messages.pop_front()? {
+            ThreadMessage::UserInput {
+                content,
+                msg_override,
+            } => Some(QueuedUserMessage {
+                content,
+                msg_override,
+            }),
+            ThreadMessage::PeerMessage { message } | ThreadMessage::JobResult { message } => {
+                Some(message.into_queued_user_message())
+            }
+            ThreadMessage::Interrupt | ThreadMessage::Control(_) => None,
+        }
     }
 
     /// Returns true when committed history contains any visible transcript.
@@ -499,6 +835,7 @@ impl Thread {
             trace_config.model = Some(model_name);
         }
         self.updated_at = Utc::now();
+        self.publish_runtime_snapshot();
     }
 
     /// Replace the runtime MCP tool resolver for subsequent turns.
@@ -515,6 +852,7 @@ impl Thread {
         self.active_turn_cancellation = None;
         self.runtime_state = ThreadRuntimeState::Idle;
         self.updated_at = updated_at;
+        self.publish_runtime_snapshot();
     }
 
     /// Append a checkpoint record to the turn history.
@@ -527,6 +865,7 @@ impl Thread {
         self.turns
             .push(TurnRecord::checkpoint(summary_messages, token_usage));
         self.updated_at = Utc::now();
+        self.publish_runtime_snapshot();
     }
 
     fn emit_mcp_notice(&self, message: String) {
@@ -615,67 +954,53 @@ impl Thread {
         Ok(())
     }
 
-    /// Spawn the thread-owned reactor loop that coordinates queued control events.
-    pub async fn spawn_reactor(thread: Arc<RwLock<Self>>) {
-        let (control_rx, mailbox) = {
-            let mut guard = thread.write().await;
-            let control_rx = match guard.take_control_rx() {
-                Some(rx) => rx,
-                None => {
-                    tracing::warn!("thread control receiver already taken");
-                    return;
-                }
-            };
-            guard.reset_runtime_loop_state();
-            (control_rx, guard.mailbox())
-        };
-
-        tokio::spawn(async move {
-            Self::run_reactor_loop(thread, control_rx, mailbox).await;
-        });
+    fn handle_owner_command(&mut self, command: ThreadOwnerCommand) {
+        match command {
+            ThreadOwnerCommand::SetTitle { title, ack } => {
+                self.set_title(title);
+                let _ = ack.send(());
+            }
+            ThreadOwnerCommand::SetProvider { provider, ack } => {
+                self.set_provider(provider);
+                let _ = ack.send(());
+            }
+            ThreadOwnerCommand::SetMcpToolResolver { resolver, ack } => {
+                self.set_mcp_tool_resolver(resolver);
+                let _ = ack.send(());
+            }
+        }
     }
 
     async fn run_reactor_loop(
-        thread: Arc<RwLock<Self>>,
-        mut control_rx: mpsc::UnboundedReceiver<ThreadControlEvent>,
-        mailbox: Arc<Mutex<ThreadMailbox>>,
+        mut thread: Self,
+        mut message_rx: mpsc::UnboundedReceiver<ThreadMessage>,
+        mut owner_rx: mpsc::UnboundedReceiver<ThreadOwnerCommand>,
     ) {
         let mut active_turn: Option<JoinHandle<Result<TurnRecord, ThreadError>>> = None;
         let mut shutdown_requested = false;
 
         loop {
             tokio::select! {
-                Some(control_event) = control_rx.recv() => {
+                Some(message) = message_rx.recv() => {
                     if shutdown_requested {
                         continue;
                     }
 
-                    let runtime_action = match control_event {
-                        ThreadControlEvent::MailboxUpdated => {
-                            let mut mailbox = mailbox.lock().await;
-                            let mut guard = thread.write().await;
-                            guard.inspect_runtime_mailbox(&mut mailbox)
-                        }
-                        ThreadControlEvent::ShutdownRuntime => {
+                    let runtime_action = match message {
+                        ThreadMessage::Control(ThreadControlMessage::ShutdownRuntime) => {
                             shutdown_requested = true;
-                            let state = { thread.read().await.runtime_state };
-                            match state {
+                            match thread.runtime_state {
                                 ThreadRuntimeState::Idle => break,
-                                _ => {
-                                    let mut mailbox = mailbox.lock().await;
-                                    let mut guard = thread.write().await;
-                                    guard.dispatch_runtime_command(ThreadCommand::CancelActiveTurn, &mut mailbox)
-                                }
+                                _ => thread.cancel_active_turn(),
                             }
                         }
+                        other => thread.dispatch_runtime_message(other),
                     };
 
-                    Self::process_loop_action(
-                        Arc::clone(&thread),
-                        runtime_action,
-                        &mut active_turn,
-                    )
-                    .await;
+                    thread.process_loop_action(runtime_action, &mut active_turn).await;
+                }
+                Some(command) = owner_rx.recv() => {
+                    thread.handle_owner_command(command);
                 }
                 result = async {
                     match active_turn.as_mut() {
@@ -691,13 +1016,9 @@ impl Thread {
                     };
                     active_turn = None;
 
-                    Self::settle_active_turn(
-                        &thread,
-                        result,
-                        &mut active_turn,
-                        shutdown_requested,
-                    )
-                    .await;
+                    thread
+                        .settle_active_turn(result, &mut active_turn, shutdown_requested)
+                        .await;
 
                     if shutdown_requested && active_turn.is_none() {
                         break;
@@ -709,7 +1030,7 @@ impl Thread {
     }
 
     async fn process_loop_action(
-        thread: Arc<RwLock<Self>>,
+        &mut self,
         action: ThreadLoopAction,
         active_turn: &mut Option<JoinHandle<Result<TurnRecord, ThreadError>>>,
     ) {
@@ -720,20 +1041,12 @@ impl Thread {
                 msg_override,
             } => {
                 *active_turn = Some(
-                    Self::start_turn_execution(
-                        Arc::clone(&thread),
-                        turn_number,
-                        content,
-                        msg_override,
-                    )
-                    .await,
+                    self.start_turn_execution(turn_number, content, msg_override)
+                        .await,
                 );
             }
             ThreadLoopAction::StopTurn { turn_number } => {
-                let cancellation = {
-                    let guard = thread.read().await;
-                    guard.active_turn_cancellation.clone()
-                };
+                let cancellation = self.active_turn_cancellation.clone();
                 if let Some(cancellation) = cancellation {
                     tracing::info!(turn_number, "cancelling active turn");
                     cancellation.cancel();
@@ -746,7 +1059,7 @@ impl Thread {
     }
 
     async fn start_turn_execution(
-        thread: Arc<RwLock<Self>>,
+        &mut self,
         turn_number: u32,
         content: String,
         msg_override: Option<MessageOverride>,
@@ -764,20 +1077,19 @@ impl Thread {
             thread_event_tx,
             compactor,
         ) = {
-            let mut guard = thread.write().await;
-            let effective_record = guard
+            let effective_record = self
                 .prepare_turn_start(msg_override, cancellation.clone())
                 .await;
-            let mcp_tools = guard
+            let mcp_tools = self
                 .resolve_mcp_tools(&effective_record)
                 .await
                 .unwrap_or_default();
             let (thread_id, history, tools, hooks, provider, config, thread_event_tx, compactor) =
-                guard.build_turn_execution_parts(effective_record.clone(), mcp_tools);
+                self.build_turn_execution_parts(effective_record.clone(), mcp_tools);
 
             (
                 thread_id,
-                guard.id,
+                self.id,
                 history,
                 tools,
                 hooks,
@@ -854,95 +1166,50 @@ impl Thread {
     }
 
     async fn settle_active_turn(
-        thread: &Arc<RwLock<Self>>,
+        &mut self,
         result: Result<TurnRecord, ThreadError>,
         active_turn: &mut Option<JoinHandle<Result<TurnRecord, ThreadError>>>,
         shutdown_requested: bool,
     ) {
         let committed = result.is_ok();
-        let settled_turn_number = match thread.read().await.runtime_state {
+        let settled_turn_number = match self.runtime_state {
             ThreadRuntimeState::Running { turn_number }
             | ThreadRuntimeState::Stopping { turn_number } => Some(turn_number),
             ThreadRuntimeState::Idle => None,
         };
-        let thread_id = {
-            let guard = thread.read().await;
-            guard.id().inner().to_string()
-        };
+        let settled_turn_number = settled_turn_number.unwrap_or_default();
+        let thread_id = self.id().inner().to_string();
 
-        {
-            let guard = thread.read().await;
-            match &result {
-                Ok(record) => {
-                    guard.broadcast_to_self(ThreadEvent::TurnCompleted {
-                        thread_id: thread_id.clone(),
-                        turn_number: settled_turn_number.unwrap_or_default(),
-                        token_usage: record.token_usage.clone(),
-                    });
-                }
-                Err(ThreadError::TurnFailed(crate::TurnError::Cancelled)) => {}
-                Err(error) => {
-                    guard.broadcast_to_self(ThreadEvent::TurnFailed {
-                        thread_id: thread_id.clone(),
-                        turn_number: settled_turn_number.unwrap_or_default(),
-                        error: error.to_string(),
-                    });
-                }
-            }
-        }
+        self.broadcast_turn_terminal_event(settled_turn_number, &result);
 
-        let finish_result = {
-            let mut guard = thread.write().await;
-            guard.active_turn_cancellation = None;
-            guard.finish_turn(result)
-        };
+        self.active_turn_cancellation = None;
+        let finish_result = self.finish_turn(result);
 
         if let Err(error) = finish_result {
             tracing::error!("turn failed: {}", error);
         }
 
         if committed {
-            let (base_dir, turns) = {
-                let guard = thread.read().await;
-                (guard.trace_base_dir(), guard.turns.clone())
-            };
-
-            if let Some(base_dir) = base_dir
-                && let Err(error) = Self::persist_trace_turns(&base_dir, &turns).await
-            {
-                tracing::warn!(
-                    error = %error,
-                    "failed to persist committed turn records"
-                );
-            }
+            self.persist_committed_turns_if_needed().await;
         }
 
-        if let Some(turn_number) = settled_turn_number {
-            let guard = thread.read().await;
-            guard.broadcast_to_self(ThreadEvent::TurnSettled {
-                thread_id: thread_id.clone(),
-                turn_number,
-            });
-        }
+        self.broadcast_to_self(ThreadEvent::TurnSettled {
+            thread_id: thread_id.clone(),
+            turn_number: settled_turn_number,
+        });
 
         if shutdown_requested {
+            self.reset_runtime_loop_state();
+            self.broadcast_to_self(ThreadEvent::Idle { thread_id });
             return;
         }
 
-        let runtime_action = {
-            let mailbox = {
-                let guard = thread.read().await;
-                guard.mailbox()
-            };
-            let mut guard = mailbox.lock().await;
-            let mut thread_guard = thread.write().await;
-            thread_guard.complete_runtime_turn(committed, &mut guard)
-        };
-        Self::process_loop_action(Arc::clone(thread), runtime_action.clone(), active_turn).await;
+        let runtime_action = self.complete_runtime_turn(committed);
+        self.process_loop_action(runtime_action.clone(), active_turn)
+            .await;
 
         if matches!(runtime_action, ThreadLoopAction::Noop) && active_turn.is_none() {
-            let guard = thread.read().await;
-            guard.broadcast_to_self(ThreadEvent::Idle { thread_id });
+            self.broadcast_to_self(ThreadEvent::Idle { thread_id });
         }
     }
 
@@ -953,7 +1220,7 @@ impl Thread {
         msg_override: Option<MessageOverride>,
         cancellation: TurnCancellation,
     ) -> Result<TurnRecord, ThreadError> {
-        if self.control_rx.is_none() {
+        if self.message_rx.is_none() {
             return Err(ThreadError::RuntimeActive);
         }
 
@@ -1086,6 +1353,7 @@ impl Thread {
         };
 
         self.active_turn_cancellation = Some(cancellation);
+        self.publish_runtime_snapshot();
         effective_record
     }
 
@@ -1100,9 +1368,13 @@ impl Thread {
             Ok(record) => {
                 self.turns.push(record);
                 self.updated_at = Utc::now();
+                self.publish_runtime_snapshot();
                 Ok(())
             }
-            Err(ThreadError::TurnFailed(crate::TurnError::Cancelled)) => Ok(()),
+            Err(ThreadError::TurnFailed(crate::TurnError::Cancelled)) => {
+                self.publish_runtime_snapshot();
+                Ok(())
+            }
             Err(error) => Err(error),
         }
     }
@@ -1190,9 +1462,14 @@ mod tests {
     use crate::turn_log_store::recover_thread_log_state;
     use argus_protocol::llm::{CompletionRequest, CompletionResponse, LlmError, ToolDefinition};
     use argus_protocol::tool::{NamedTool, ToolError, ToolExecutionContext};
-    use argus_protocol::{AgentId, ProviderId, ThreadCommand};
+    use argus_protocol::{
+        AgentId, MailboxMessage, MailboxMessageType, ProviderId, ThreadControlMessage,
+        ThreadMessage,
+    };
     use async_trait::async_trait;
+    use futures_util::stream;
     use rust_decimal::Decimal;
+    use tokio::time::{Duration, sleep, timeout};
 
     fn usage(total_tokens: u32) -> TokenUsage {
         TokenUsage {
@@ -1270,6 +1547,62 @@ mod tests {
     }
 
     #[derive(Debug)]
+    struct PendingStreamProvider {
+        captured_user_inputs: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl PendingStreamProvider {
+        fn new(captured_user_inputs: Arc<Mutex<Vec<String>>>) -> Self {
+            Self {
+                captured_user_inputs,
+            }
+        }
+
+        fn capture_request(&self, request: &CompletionRequest) {
+            let last_user_input = request
+                .messages
+                .iter()
+                .rev()
+                .find(|message| message.role == argus_protocol::llm::Role::User)
+                .map(|message| message.content.clone())
+                .unwrap_or_default();
+            self.captured_user_inputs
+                .lock()
+                .unwrap()
+                .push(last_user_input);
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for PendingStreamProvider {
+        fn model_name(&self) -> &str {
+            "pending-stream"
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, LlmError> {
+            Err(LlmError::UnsupportedCapability {
+                provider: "pending-stream".to_string(),
+                capability: "complete".to_string(),
+            })
+        }
+
+        async fn stream_complete(
+            &self,
+            request: CompletionRequest,
+        ) -> Result<argus_protocol::llm::LlmEventStream, LlmError> {
+            self.capture_request(&request);
+            Ok(Box::pin(stream::pending()))
+        }
+    }
+
+    #[derive(Debug)]
     struct RecordingCompactor {
         seen_token_counts: Arc<Mutex<Vec<u32>>>,
         next_result: Arc<Mutex<VecDeque<CompactResult>>>,
@@ -1333,6 +1666,42 @@ mod tests {
             .session_id(SessionId::new())
             .build()
             .expect("thread should build")
+    }
+
+    fn plain_mailbox_message(text: &str) -> MailboxMessage {
+        MailboxMessage {
+            id: format!("msg-{text}"),
+            from_thread_id: ThreadId::new(),
+            to_thread_id: ThreadId::new(),
+            from_label: "Peer".to_string(),
+            message_type: MailboxMessageType::Plain,
+            text: text.to_string(),
+            timestamp: "2026-04-01T00:00:00Z".to_string(),
+            read: false,
+            summary: Some(format!("summary {text}")),
+        }
+    }
+
+    fn job_result_mailbox_message(job_id: &str, text: &str) -> MailboxMessage {
+        MailboxMessage {
+            id: format!("job-msg-{job_id}"),
+            from_thread_id: ThreadId::new(),
+            to_thread_id: ThreadId::new(),
+            from_label: "Worker".to_string(),
+            message_type: MailboxMessageType::JobResult {
+                job_id: job_id.to_string(),
+                success: true,
+                cancelled: false,
+                token_usage: None,
+                agent_id: AgentId::new(7),
+                agent_display_name: "Worker".to_string(),
+                agent_description: "Background worker".to_string(),
+            },
+            text: text.to_string(),
+            timestamp: "2026-04-01T00:00:00Z".to_string(),
+            read: false,
+            summary: Some(format!("summary {job_id}")),
+        }
     }
 
     #[test]
@@ -1764,28 +2133,20 @@ mod tests {
                 usage(5),
             ),
         ]);
-        let mut mailbox = ThreadMailbox::default();
-
-        thread.dispatch_runtime_command(
-            ThreadCommand::EnqueueUserMessage {
-                content: "first".to_string(),
-                msg_override: None,
-            },
-            &mut mailbox,
-        );
+        thread.dispatch_runtime_message(ThreadMessage::UserInput {
+            content: "first".to_string(),
+            msg_override: None,
+        });
         assert_eq!(
             thread.runtime_state,
             ThreadRuntimeState::Running { turn_number: 3 }
         );
 
-        thread.dispatch_runtime_command(
-            ThreadCommand::EnqueueUserMessage {
-                content: "second".to_string(),
-                msg_override: None,
-            },
-            &mut mailbox,
-        );
-        assert_eq!(mailbox.pending_len(), 1);
+        thread.dispatch_runtime_message(ThreadMessage::UserInput {
+            content: "second".to_string(),
+            msg_override: None,
+        });
+        assert_eq!(thread.pending_messages.len(), 1);
 
         let _agent = thread
             .prepare_turn_start(None, TurnCancellation::new())
@@ -1793,12 +2154,12 @@ mod tests {
         thread
             .finish_turn(Err(ThreadError::TurnFailed(crate::TurnError::Cancelled)))
             .expect("cancelled turn should settle");
-        thread.complete_runtime_turn(false, &mut mailbox);
+        thread.complete_runtime_turn(false);
         assert_eq!(
             thread.runtime_state,
             ThreadRuntimeState::Running { turn_number: 3 }
         );
-        assert_eq!(mailbox.pending_len(), 0);
+        assert_eq!(thread.pending_messages.len(), 0);
 
         let _agent = thread
             .prepare_turn_start(None, TurnCancellation::new())
@@ -1810,22 +2171,17 @@ mod tests {
                 usage(7),
             )))
             .expect("turn should settle");
-        thread.complete_runtime_turn(true, &mut mailbox);
+        thread.complete_runtime_turn(true);
         assert_eq!(thread.runtime_state, ThreadRuntimeState::Idle);
     }
 
     #[tokio::test]
     async fn thread_runtime_advances_turn_numbers_after_committed_turns() {
         let mut thread = build_test_thread_without_system_prompt();
-        let mut mailbox = ThreadMailbox::default();
-
-        thread.dispatch_runtime_command(
-            ThreadCommand::EnqueueUserMessage {
-                content: "hi".to_string(),
-                msg_override: None,
-            },
-            &mut mailbox,
-        );
+        thread.dispatch_runtime_message(ThreadMessage::UserInput {
+            content: "hi".to_string(),
+            msg_override: None,
+        });
         assert_eq!(
             thread.runtime_state,
             ThreadRuntimeState::Running { turn_number: 1 }
@@ -1841,46 +2197,94 @@ mod tests {
                 usage(4),
             )))
             .expect("turn should settle");
-        thread.complete_runtime_turn(true, &mut mailbox);
+        thread.complete_runtime_turn(true);
         assert_eq!(thread.runtime_state, ThreadRuntimeState::Idle);
 
-        thread.dispatch_runtime_command(
-            ThreadCommand::EnqueueUserMessage {
-                content: "again".to_string(),
-                msg_override: None,
-            },
-            &mut mailbox,
-        );
+        thread.dispatch_runtime_message(ThreadMessage::UserInput {
+            content: "again".to_string(),
+            msg_override: None,
+        });
         assert_eq!(
             thread.runtime_state,
             ThreadRuntimeState::Running { turn_number: 2 }
         );
     }
 
-    #[tokio::test]
-    async fn thread_stop_signal_does_not_cancel_next_turn_after_settle() {
+    #[test]
+    fn peer_message_starts_next_turn_via_thread_message_routing() {
         let mut thread = build_test_thread_without_system_prompt();
-        let mut mailbox = ThreadMailbox::default();
+        let message = plain_mailbox_message("peer hello");
 
-        thread.dispatch_runtime_command(
-            ThreadCommand::EnqueueUserMessage {
-                content: "first".to_string(),
+        let action = thread.dispatch_runtime_message(ThreadMessage::PeerMessage {
+            message: message.clone(),
+        });
+
+        assert!(matches!(
+            action,
+            ThreadLoopAction::StartTurn {
+                turn_number: 1,
+                ref content,
                 msg_override: None,
-            },
-            &mut mailbox,
+            } if content == &message.into_message_text()
+        ));
+        assert_eq!(
+            thread.runtime_state,
+            ThreadRuntimeState::Running { turn_number: 1 }
         );
-        thread.dispatch_runtime_command(
-            ThreadCommand::EnqueueUserMessage {
-                content: "second".to_string(),
+        assert!(
+            thread.pending_messages.is_empty(),
+            "idle routing should promote peer message directly into the next turn"
+        );
+    }
+
+    #[test]
+    fn job_result_starts_next_turn_via_thread_message_routing() {
+        let mut thread = build_test_thread_without_system_prompt();
+        let message = job_result_mailbox_message("job-42", "finished task");
+
+        let action = thread.dispatch_runtime_message(ThreadMessage::JobResult {
+            message: message.clone(),
+        });
+
+        let expected_content = message.into_message_text();
+        assert!(matches!(
+            action,
+            ThreadLoopAction::StartTurn {
+                turn_number: 1,
+                ref content,
                 msg_override: None,
-            },
-            &mut mailbox,
+            } if content == &expected_content
+        ));
+        assert_eq!(
+            thread.runtime_state,
+            ThreadRuntimeState::Running { turn_number: 1 }
         );
+        assert!(
+            thread.pending_messages.is_empty(),
+            "idle routing should promote job results directly into the next turn"
+        );
+    }
+
+    #[tokio::test]
+    async fn thread_interrupt_does_not_cancel_next_turn_after_settle() {
+        let mut thread = build_test_thread_without_system_prompt();
+        thread.dispatch_runtime_message(ThreadMessage::UserInput {
+            content: "first".to_string(),
+            msg_override: None,
+        });
+        thread.dispatch_runtime_message(ThreadMessage::UserInput {
+            content: "second".to_string(),
+            msg_override: None,
+        });
 
         let _agent = thread
             .prepare_turn_start(None, TurnCancellation::new())
             .await;
-        mailbox.interrupt_stop();
+        let action = thread.dispatch_runtime_message(ThreadMessage::Interrupt);
+        assert!(matches!(
+            action,
+            ThreadLoopAction::StopTurn { turn_number: 1 }
+        ));
         thread
             .finish_turn(Ok(TurnRecord::user_turn(
                 1,
@@ -1889,18 +2293,118 @@ mod tests {
             )))
             .expect("turn should settle");
 
-        thread.complete_runtime_turn(true, &mut mailbox);
+        thread.complete_runtime_turn(true);
         assert_eq!(
             thread.runtime_state,
             ThreadRuntimeState::Running { turn_number: 2 }
         );
+    }
 
-        let action = thread.inspect_runtime_mailbox(&mut mailbox);
-        assert!(matches!(action, ThreadLoopAction::Noop));
+    #[tokio::test]
+    async fn shutdown_runtime_control_cancels_active_turn_and_ignores_followup_messages() {
+        let captured_user_inputs = Arc::new(Mutex::new(Vec::new()));
+        let owner = ThreadBuilder::new()
+            .provider(Arc::new(PendingStreamProvider::new(Arc::clone(
+                &captured_user_inputs,
+            ))))
+            .compactor(Arc::new(NoopCompactor))
+            .agent_record(test_agent_record_without_system_prompt())
+            .session_id(SessionId::new())
+            .build()
+            .expect("thread should build")
+            .spawn_runtime()
+            .expect("runtime handle should spawn");
+        let thread = owner.observer();
+
+        thread
+            .send_message(ThreadMessage::UserInput {
+                content: "first".to_string(),
+                msg_override: None,
+            })
+            .expect("first message should enqueue");
+
+        timeout(Duration::from_secs(5), async {
+            loop {
+                if thread.is_turn_running() {
+                    break;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("runtime should start the first turn");
+
+        owner
+            .shutdown()
+            .await
+            .expect("shutdown control should enqueue");
+        thread
+            .send_message(ThreadMessage::UserInput {
+                content: "second".to_string(),
+                msg_override: None,
+            })
+            .expect_err("observer handle should not enqueue after shutdown");
+
+        sleep(Duration::from_millis(100)).await;
+
+        let captured = captured_user_inputs.lock().unwrap().clone();
         assert_eq!(
-            thread.runtime_state,
-            ThreadRuntimeState::Running { turn_number: 2 }
+            captured,
+            vec!["first".to_string()],
+            "shutdown should prevent any follow-up turn from starting"
         );
+        assert_eq!(thread.turn_count(), 0);
+        assert_eq!(thread.state(), ThreadState::Idle);
+    }
+
+    #[tokio::test]
+    async fn observer_handle_rejects_owner_control_messages() {
+        let thread = ThreadBuilder::new()
+            .provider(Arc::new(DummyProvider))
+            .compactor(Arc::new(NoopCompactor))
+            .agent_record(test_agent_record_without_system_prompt())
+            .session_id(SessionId::new())
+            .build()
+            .expect("thread should build")
+            .spawn_runtime()
+            .expect("runtime handle should spawn")
+            .observer();
+
+        let error = thread
+            .send_message(ThreadMessage::Control(
+                ThreadControlMessage::ShutdownRuntime,
+            ))
+            .expect_err("observer handle must not accept owner-only control messages");
+        assert!(matches!(error, ThreadError::OwnerControlRestricted));
+    }
+
+    #[tokio::test]
+    async fn runtime_handles_distinguish_instances_even_with_same_thread_id() {
+        let thread_id = ThreadId::new();
+        let first = ThreadBuilder::new()
+            .id(thread_id)
+            .provider(Arc::new(DummyProvider))
+            .compactor(Arc::new(NoopCompactor))
+            .agent_record(test_agent_record_without_system_prompt())
+            .session_id(SessionId::new())
+            .build()
+            .expect("thread should build")
+            .spawn_runtime()
+            .expect("runtime handle should spawn");
+        let first_clone = first.clone();
+        let second = ThreadBuilder::new()
+            .id(thread_id)
+            .provider(Arc::new(DummyProvider))
+            .compactor(Arc::new(NoopCompactor))
+            .agent_record(test_agent_record_without_system_prompt())
+            .session_id(SessionId::new())
+            .build()
+            .expect("thread should build")
+            .spawn_runtime()
+            .expect("runtime handle should spawn");
+
+        assert!(first.same_runtime(&first_clone));
+        assert!(!first.same_runtime(&second));
     }
 
     #[tokio::test]

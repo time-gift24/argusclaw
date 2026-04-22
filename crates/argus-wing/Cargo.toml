@@ -25,9 +25,6 @@ tracing = { workspace = true }
 
 # Utilities
 thiserror = { workspace = true }
-uuid = { workspace = true }
-chrono = { workspace = true }
-dashmap = { workspace = true }
 dirs = { workspace = true }
 
 # Internal crates
@@ -37,6 +34,7 @@ argus-template = { path = "../argus-template" }
 argus-session = { path = "../argus-session" }
 argus-tool = { path = "../argus-tool" }
 argus-agent = { path = "../argus-agent" }
+argus-thread-pool = { path = "../argus-thread-pool" }
 argus-repository = { path = "../argus-repository" }
 argus-auth = { path = "../argus-auth" }
 argus-crypto = { path = "../argus-crypto" }

@@ -33,6 +33,7 @@ pub mod plan_hook;
 pub mod plan_store;
 pub mod plan_tool;
 pub mod thread;
+pub mod thread_bootstrap;
 pub mod thread_trace_store;
 pub mod turn_log_store;
 
@@ -59,8 +60,8 @@ pub use compact::{CompactResult, Compactor};
 pub use config::ThreadConfig;
 pub use error::{CompactError, ThreadError};
 pub use plan_store::FilePlanStore;
-pub use thread::{Thread, ThreadBuilder};
-pub use types::{ThreadInfo, ThreadState};
+pub use thread::{Thread, ThreadBuilder, ThreadHandle, ThreadOwnerHandle, WeakThreadHandle};
+pub use types::{ThreadInfo, ThreadRuntimeSnapshot, ThreadState};
 
 // Re-export hook types from argus-protocol for convenience
 pub use argus_protocol::{HookAction, HookEvent, HookHandler, HookRegistry, ToolHookContext};

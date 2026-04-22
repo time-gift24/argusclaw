@@ -20,10 +20,10 @@ pub use account::{AccountCredentials, AccountRepository};
 pub use agent::AgentRecord;
 pub use error::{ArgusError, Result};
 pub use events::{
-    MailboxMessage, MailboxMessageType, QueuedUserMessage, ThreadCommand, ThreadControlEvent,
-    ThreadEvent, ThreadJobResult, ThreadMailbox, ThreadPoolEventReason, ThreadPoolRuntimeKind,
-    ThreadPoolRuntimeRef, ThreadPoolRuntimeSummary, ThreadPoolSnapshot, ThreadPoolState,
-    ThreadRuntimeSnapshot, ThreadRuntimeStatus,
+    JobRuntimeSnapshot, JobRuntimeState, JobRuntimeSummary, MailboxMessage, MailboxMessageType,
+    QueuedUserMessage, ThreadControlMessage, ThreadEvent, ThreadJobResult, ThreadMessage,
+    ThreadPoolEventReason, ThreadPoolRuntimeSummary, ThreadPoolSnapshot, ThreadPoolState,
+    ThreadRuntimeStatus,
 };
 pub use hooks::{HookAction, HookEvent, HookHandler, HookRegistry, ToolHookContext};
 pub use ids::{AgentId, ProviderId, SessionId, ThreadId};
@@ -86,4 +86,17 @@ pub use safety::{OutputWarning, SafetyConfig, sanitize_tool_output};
 #[test]
 fn thread_pool_snapshot_round_trips_through_json() {
     events::assert_thread_pool_snapshot_round_trip();
+    events::assert_thread_pool_state_round_trip();
+    events::assert_job_runtime_state_round_trip();
+}
+
+#[cfg(test)]
+#[test]
+fn crate_root_reexports_thread_message_protocol_types() {
+    let message = ThreadMessage::Control(ThreadControlMessage::ShutdownRuntime);
+
+    assert!(matches!(
+        message,
+        ThreadMessage::Control(ThreadControlMessage::ShutdownRuntime)
+    ));
 }

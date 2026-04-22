@@ -1,0 +1,16 @@
+[package]
+name = "argus-thread-pool"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+argus-agent = { path = "../argus-agent" }
+argus-protocol = { path = "../argus-protocol" }
+tokio = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+async-trait = { workspace = true }
+rust_decimal = { workspace = true }

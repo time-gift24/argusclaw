@@ -8,7 +8,7 @@ use super::error::ChromeToolError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ChromeAction {
+pub(super) enum ChromeAction {
     Install,
     Navigate,
     Close,
@@ -26,7 +26,7 @@ pub enum ChromeAction {
 
 impl ChromeAction {
     #[must_use]
-    pub fn as_str(self) -> &'static str {
+    pub(super) fn as_str(self) -> &'static str {
         match self {
             Self::Install => "install",
             Self::Navigate => "navigate",
@@ -47,24 +47,24 @@ impl ChromeAction {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ChromeToolArgs {
-    pub action: ChromeAction,
+pub(super) struct ChromeToolArgs {
+    pub(super) action: ChromeAction,
     #[serde(default)]
-    pub url: Option<String>,
+    pub(super) url: Option<String>,
     #[serde(default)]
-    pub selector: Option<String>,
+    pub(super) selector: Option<String>,
     #[serde(default)]
-    pub timeout_ms: Option<u64>,
+    pub(super) timeout_ms: Option<u64>,
     #[serde(default)]
-    pub text: Option<String>,
+    pub(super) text: Option<String>,
     #[serde(default)]
-    pub tab_id: Option<String>,
+    pub(super) tab_id: Option<String>,
     #[serde(default)]
-    pub domain: Option<String>,
+    pub(super) domain: Option<String>,
 }
 
 impl ChromeToolArgs {
-    pub fn validate(input: serde_json::Value) -> Result<Self, ChromeToolError> {
+    pub(super) fn validate(input: serde_json::Value) -> Result<Self, ChromeToolError> {
         let mut args: Self =
             serde_json::from_value(input).map_err(|e| ChromeToolError::InvalidArguments {
                 reason: e.to_string(),
