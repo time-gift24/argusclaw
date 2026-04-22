@@ -66,13 +66,33 @@ struct TrackedJobsStore {
     next_generation: u64,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct JobRuntimeStoreLimits {
+    terminal_runtime_limit: usize,
+    delivered_job_result_limit: usize,
+}
+
+impl Default for JobRuntimeStoreLimits {
+    fn default() -> Self {
+        Self {
+            terminal_runtime_limit: 1024,
+            delivered_job_result_limit: 1024,
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 struct JobRuntimeStore {
+    limits: JobRuntimeStoreLimits,
     job_bindings: HashMap<String, ThreadId>,
     parent_thread_by_child: HashMap<ThreadId, ThreadId>,
     child_jobs_by_parent: HashMap<ThreadId, Vec<RecoveredChildJob>>,
     delivered_job_results: HashMap<ThreadId, Vec<MailboxMessage>>,
+    delivered_job_result_order: VecDeque<(ThreadId, String)>,
     job_runtimes: HashMap<ThreadId, JobRuntimeSummary>,
+    runtime_generations: HashMap<ThreadId, u64>,
+    terminal_runtime_order: VecDeque<(ThreadId, u64)>,
+    next_generation: u64,
     peak_estimated_memory_bytes: u64,
 }
 
@@ -142,6 +162,7 @@ impl JobManager {
     }
 
     /// Create a new JobManager with optional repository backing.
+    #[allow(clippy::too_many_arguments)]
     pub fn new_with_persistence(
         thread_pool: Arc<ThreadPool>,
         template_manager: Arc<TemplateManager>,
@@ -419,13 +440,115 @@ impl JobManager {
         }
     }
 
+    fn next_job_runtime_generation(store: &mut JobRuntimeStore) -> u64 {
+        let generation = store.next_generation;
+        store.next_generation = store.next_generation.saturating_add(1);
+        generation
+    }
+
+    fn is_terminal_job_runtime_status(status: ThreadRuntimeStatus) -> bool {
+        matches!(
+            status,
+            ThreadRuntimeStatus::Inactive | ThreadRuntimeStatus::Evicted
+        )
+    }
+
+    fn prune_terminal_job_runtime_metadata(
+        store: &mut JobRuntimeStore,
+        thread_id: ThreadId,
+        job_id: &str,
+    ) {
+        if store.job_bindings.get(job_id) == Some(&thread_id) {
+            store.job_bindings.remove(job_id);
+        }
+        if let Some(parent_thread_id) = store.parent_thread_by_child.remove(&thread_id)
+            && let Some(children) = store.child_jobs_by_parent.get_mut(&parent_thread_id)
+        {
+            children.retain(|child| child.thread_id != thread_id);
+            if children.is_empty() {
+                store.child_jobs_by_parent.remove(&parent_thread_id);
+            }
+        }
+        store.runtime_generations.remove(&thread_id);
+    }
+
+    fn current_terminal_job_runtime_count(store: &JobRuntimeStore) -> usize {
+        store
+            .job_runtimes
+            .values()
+            .filter(|runtime| Self::is_terminal_job_runtime_status(runtime.status))
+            .count()
+    }
+
+    fn prune_terminal_job_runtimes(store: &mut JobRuntimeStore) {
+        while Self::current_terminal_job_runtime_count(store) > store.limits.terminal_runtime_limit
+        {
+            let Some((thread_id, generation)) = store.terminal_runtime_order.pop_front() else {
+                break;
+            };
+            let should_remove = store.job_runtimes.get(&thread_id).is_some_and(|runtime| {
+                store.runtime_generations.get(&thread_id) == Some(&generation)
+                    && Self::is_terminal_job_runtime_status(runtime.status)
+            });
+            if !should_remove {
+                continue;
+            }
+            if let Some(runtime) = store.job_runtimes.remove(&thread_id) {
+                Self::prune_terminal_job_runtime_metadata(store, thread_id, &runtime.job_id);
+            }
+        }
+    }
+
+    fn current_delivered_job_result_count(store: &JobRuntimeStore) -> usize {
+        store
+            .delivered_job_results
+            .values()
+            .map(Vec::len)
+            .sum::<usize>()
+    }
+
+    fn remove_delivered_job_result_by_id(
+        store: &mut JobRuntimeStore,
+        thread_id: ThreadId,
+        message_id: &str,
+    ) -> bool {
+        let Some(messages) = store.delivered_job_results.get_mut(&thread_id) else {
+            return false;
+        };
+        let original_len = messages.len();
+        messages.retain(|message| message.id != message_id);
+        let removed = messages.len() != original_len;
+        if messages.is_empty() {
+            store.delivered_job_results.remove(&thread_id);
+        }
+        removed
+    }
+
+    fn prune_delivered_job_results(store: &mut JobRuntimeStore) {
+        while Self::current_delivered_job_result_count(store)
+            > store.limits.delivered_job_result_limit
+        {
+            let Some((thread_id, message_id)) = store.delivered_job_result_order.pop_front() else {
+                break;
+            };
+            let _ = Self::remove_delivered_job_result_by_id(store, thread_id, &message_id);
+        }
+    }
+
     fn merge_job_runtime_summary(
         store: &mut JobRuntimeStore,
         runtime: JobRuntimeSummary,
     ) -> JobRuntimeSummary {
-        store
-            .job_runtimes
-            .insert(runtime.thread_id, runtime.clone());
+        let thread_id = runtime.thread_id;
+        let generation = Self::next_job_runtime_generation(store);
+        store.job_runtimes.insert(thread_id, runtime.clone());
+        store.runtime_generations.insert(thread_id, generation);
+        if Self::is_terminal_job_runtime_status(runtime.status) {
+            store
+                .terminal_runtime_order
+                .push_back((thread_id, generation));
+            Self::prune_terminal_job_runtimes(store);
+        }
         Self::refresh_job_runtime_peaks(store);
         runtime
     }
@@ -446,10 +569,19 @@ impl JobManager {
         runtime.recoverable = recoverable;
         runtime.last_reason = last_reason;
         let runtime = runtime.clone();
+        let generation = Self::next_job_runtime_generation(store);
+        store.runtime_generations.insert(thread_id, generation);
+        if Self::is_terminal_job_runtime_status(runtime.status) {
+            store
+                .terminal_runtime_order
+                .push_back((thread_id, generation));
+            Self::prune_terminal_job_runtimes(store);
+        }
         Self::refresh_job_runtime_peaks(store);
         Some(runtime)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn upsert_job_runtime_summary(
         &self,
         thread_id: ThreadId,
@@ -564,19 +696,31 @@ impl JobManager {
         );
     }
 
-    fn emit_job_runtime_updated(
-        pipe_tx: &broadcast::Sender<ThreadEvent>,
-        runtime: &JobRuntimeSummary,
-    ) {
-        let _ = pipe_tx.send(ThreadEvent::JobRuntimeUpdated {
-            runtime: runtime.clone(),
-        });
+    fn emit_job_runtime_event(&self, parent_thread_id: ThreadId, event: ThreadEvent) -> bool {
+        self.thread_pool
+            .emit_observer_event(&parent_thread_id, event)
     }
 
-    fn emit_job_runtime_metrics(&self, pipe_tx: &broadcast::Sender<ThreadEvent>) {
-        let _ = pipe_tx.send(ThreadEvent::JobRuntimeMetricsUpdated {
-            snapshot: self.job_runtime_state().snapshot,
-        });
+    fn emit_job_runtime_updated(
+        &self,
+        parent_thread_id: ThreadId,
+        runtime: &JobRuntimeSummary,
+    ) -> bool {
+        self.emit_job_runtime_event(
+            parent_thread_id,
+            ThreadEvent::JobRuntimeUpdated {
+                runtime: runtime.clone(),
+            },
+        )
+    }
+
+    fn emit_job_runtime_metrics(&self, parent_thread_id: ThreadId) {
+        let _ = self.emit_job_runtime_event(
+            parent_thread_id,
+            ThreadEvent::JobRuntimeMetricsUpdated {
+                snapshot: self.job_runtime_state().snapshot,
+            },
+        );
     }
 
     pub fn claim_delivered_job_result(
@@ -906,24 +1050,22 @@ impl JobManager {
             thread_id: execution_thread_id,
         });
         if let Some(runtime) = self.job_runtime_summary(&execution_thread_id) {
-            Self::emit_job_runtime_updated(&pipe_tx, &runtime);
+            self.emit_job_runtime_updated(originating_thread_id, &runtime);
         }
-        let _ = pipe_tx.send(ThreadEvent::JobRuntimeQueued {
-            thread_id: execution_thread_id,
-            job_id: job_id.clone(),
-        });
-        self.emit_job_runtime_metrics(&pipe_tx);
+        let _ = self.emit_job_runtime_event(
+            originating_thread_id,
+            ThreadEvent::JobRuntimeQueued {
+                thread_id: execution_thread_id,
+                job_id: job_id.clone(),
+            },
+        );
+        self.emit_job_runtime_metrics(originating_thread_id);
 
         let pipe_tx_clone = pipe_tx.clone();
 
         tokio::spawn(async move {
             let result = manager
-                .execute_job_runtime(
-                    request,
-                    execution_thread_id,
-                    pipe_tx_clone.clone(),
-                    spawn_cancellation,
-                )
+                .execute_job_runtime(request, execution_thread_id, spawn_cancellation)
                 .await;
 
             manager
@@ -982,16 +1124,12 @@ impl JobManager {
         &self,
         request: JobExecutionRequest,
         execution_thread_id: ThreadId,
-        pipe_tx: broadcast::Sender<ThreadEvent>,
         cancellation: TurnCancellation,
     ) -> ThreadJobResult {
         let fallback_job_id = request.job_id.clone();
         let fallback_agent_id = request.agent_id;
         let fallback_display_name = format!("Agent {}", fallback_agent_id.inner());
-        let thread = match self
-            .ensure_job_runtime(&request, execution_thread_id, &pipe_tx)
-            .await
-        {
+        let thread = match self.ensure_job_runtime(&request, execution_thread_id).await {
             Ok(thread) => thread,
             Err(error) => {
                 let result = Self::failure_result(
@@ -1056,12 +1194,15 @@ impl JobManager {
             true,
             None,
         );
-        Self::emit_job_runtime_updated(&pipe_tx, &runtime);
-        let _ = pipe_tx.send(ThreadEvent::JobRuntimeStarted {
-            thread_id: execution_thread_id,
-            job_id: request.job_id.clone(),
-        });
-        self.emit_job_runtime_metrics(&pipe_tx);
+        self.emit_job_runtime_updated(request.originating_thread_id, &runtime);
+        let _ = self.emit_job_runtime_event(
+            request.originating_thread_id,
+            ThreadEvent::JobRuntimeStarted {
+                thread_id: execution_thread_id,
+                job_id: request.job_id.clone(),
+            },
+        );
+        self.emit_job_runtime_metrics(request.originating_thread_id);
 
         let cancellation_for_wait = cancellation.clone();
 
@@ -1167,12 +1308,15 @@ impl JobManager {
                 true,
                 terminal_reason,
             );
-            Self::emit_job_runtime_updated(&pipe_tx, &runtime);
-            let _ = pipe_tx.send(ThreadEvent::JobRuntimeCooling {
-                thread_id: execution_thread_id,
-                job_id: request.job_id.clone(),
-            });
-            self.emit_job_runtime_metrics(&pipe_tx);
+            self.emit_job_runtime_updated(request.originating_thread_id, &runtime);
+            let _ = self.emit_job_runtime_event(
+                request.originating_thread_id,
+                ThreadEvent::JobRuntimeCooling {
+                    thread_id: execution_thread_id,
+                    job_id: request.job_id.clone(),
+                },
+            );
+            self.emit_job_runtime_metrics(request.originating_thread_id);
         }
 
         result
@@ -1182,7 +1326,6 @@ impl JobManager {
         &self,
         request: &JobExecutionRequest,
         thread_id: ThreadId,
-        pipe_tx: &broadcast::Sender<ThreadEvent>,
     ) -> Result<ThreadHandle, JobError> {
         let runtime = self.upsert_job_runtime_summary(
             thread_id,
@@ -1193,8 +1336,8 @@ impl JobManager {
             true,
             None,
         );
-        Self::emit_job_runtime_updated(pipe_tx, &runtime);
-        self.emit_job_runtime_metrics(pipe_tx);
+        self.emit_job_runtime_updated(request.originating_thread_id, &runtime);
+        self.emit_job_runtime_metrics(request.originating_thread_id);
 
         let manager = self.clone();
         let request_for_build = request.clone();
@@ -1228,8 +1371,8 @@ impl JobManager {
                         true,
                         Some(ThreadPoolEventReason::ExecutionFailed),
                     );
-                    Self::emit_job_runtime_updated(pipe_tx, &runtime);
-                    self.emit_job_runtime_metrics(pipe_tx);
+                    self.emit_job_runtime_updated(request.originating_thread_id, &runtime);
+                    self.emit_job_runtime_metrics(request.originating_thread_id);
                     return Err(error);
                 }
             }
@@ -2246,13 +2389,20 @@ impl JobManager {
     }
 
     fn record_delivered_job_result(&self, thread_id: ThreadId, message: MailboxMessage) {
-        self.job_runtime_store
+        let message_id = message.id.clone();
+        let mut store = self
+            .job_runtime_store
             .lock()
-            .expect("job runtime mutex poisoned")
+            .expect("job runtime mutex poisoned");
+        store
             .delivered_job_results
             .entry(thread_id)
             .or_default()
             .push(message);
+        store
+            .delivered_job_result_order
+            .push_back((thread_id, message_id));
+        Self::prune_delivered_job_results(&mut store);
     }
 }
 
@@ -2539,6 +2689,55 @@ mod tests {
         }
     }
 
+    fn set_job_runtime_store_limits(manager: &JobManager, limits: JobRuntimeStoreLimits) {
+        manager
+            .job_runtime_store
+            .lock()
+            .expect("job runtime mutex poisoned")
+            .limits = limits;
+    }
+
+    fn job_result_mailbox_message(
+        originating_thread_id: ThreadId,
+        result: &ThreadJobResult,
+    ) -> MailboxMessage {
+        MailboxMessage {
+            id: Uuid::new_v4().to_string(),
+            from_thread_id: ThreadId::new(),
+            to_thread_id: originating_thread_id,
+            from_label: result.agent_display_name.clone(),
+            message_type: MailboxMessageType::JobResult {
+                job_id: result.job_id.clone(),
+                success: result.success,
+                cancelled: result.cancelled,
+                token_usage: result.token_usage.clone(),
+                agent_id: result.agent_id,
+                agent_display_name: result.agent_display_name.clone(),
+                agent_description: result.agent_description.clone(),
+            },
+            text: result.message.clone(),
+            timestamp: Utc::now().to_rfc3339(),
+            read: false,
+            summary: Some("shadow copy".to_string()),
+        }
+    }
+
+    fn assert_event_subsequence(events: &[String], expected: &[&str]) {
+        let mut next_expected = 0;
+        for event in events {
+            if next_expected < expected.len() && event == expected[next_expected] {
+                next_expected += 1;
+            }
+        }
+        assert_eq!(
+            next_expected,
+            expected.len(),
+            "expected subsequence {:?} in {:?}",
+            expected,
+            events
+        );
+    }
+
     #[test]
     fn summarize_output_handles_unicode_boundaries() {
         let content = format!("{}数{}", "a".repeat(498), "b".repeat(5000));
@@ -2704,70 +2903,144 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn alpha_dispatch_job_emits_binding_queue_metrics_and_result_events() {
-        let manager = test_job_manager();
-        let originating_thread_id = ThreadId::new();
+    async fn dispatch_job_publishes_runtime_lifecycle_through_parent_thread_subscription() {
+        let provider = Arc::new(CapturingProvider::new(
+            "done",
+            Duration::from_millis(10),
+            24,
+        ));
+        let (manager, agent_id, originating_thread_id) =
+            test_job_manager_with_provider(provider).await;
+        manager.thread_pool().register_runtime(
+            originating_thread_id,
+            ThreadRuntimeStatus::Inactive,
+            0,
+            None,
+            true,
+            None,
+            None,
+        );
+        let mut parent_rx = manager
+            .thread_pool()
+            .subscribe(&originating_thread_id)
+            .expect("parent runtime should expose an event receiver");
         let (pipe_tx, mut pipe_rx) = broadcast::channel(32);
-        let job_id = "alpha-job-event-flow".to_string();
+        let job_id = "job-runtime-parent-sequence".to_string();
 
         manager
             .dispatch_job(
                 originating_thread_id,
                 job_id.clone(),
-                AgentId::new(99),
-                "run alpha event flow".to_string(),
+                agent_id,
+                "finish quickly".to_string(),
                 None,
                 pipe_tx,
             )
             .await
-            .expect("job should enqueue even if execution later fails");
+            .expect("dispatch should succeed");
 
-        let mut bound_thread_id = None;
-        let mut saw_queued = false;
-        let mut saw_failure_update = false;
+        let execution_thread_id = timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(thread_id) = manager.thread_binding(&job_id) {
+                    break thread_id;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("job should bind to an execution thread");
+
+        let mut parent_events = Vec::new();
         let mut saw_metrics = false;
-        let mut saw_result = false;
-
         timeout(Duration::from_secs(5), async {
-            while !saw_result {
-                match pipe_rx.recv().await {
-                    Ok(ThreadEvent::ThreadBoundToJob {
-                        job_id: event_job_id,
-                        thread_id: execution_thread_id,
-                    }) if event_job_id == job_id => {
-                        assert_ne!(execution_thread_id, originating_thread_id);
-                        bound_thread_id = Some(execution_thread_id);
+            while parent_events.len() < 6 || !saw_metrics {
+                match parent_rx.recv().await {
+                    Ok(ThreadEvent::JobRuntimeUpdated { runtime })
+                        if runtime.job_id == job_id && runtime.thread_id == execution_thread_id =>
+                    {
+                        match runtime.status {
+                            ThreadRuntimeStatus::Queued => {
+                                parent_events.push("updated:queued".to_string())
+                            }
+                            ThreadRuntimeStatus::Running => {
+                                parent_events.push("updated:running".to_string())
+                            }
+                            ThreadRuntimeStatus::Cooling => {
+                                assert_eq!(
+                                    runtime.last_reason, None,
+                                    "successful runtime should cool without a failure reason"
+                                );
+                                parent_events.push("updated:cooling".to_string());
+                            }
+                            _ => {}
+                        }
                     }
                     Ok(ThreadEvent::JobRuntimeQueued {
                         thread_id,
                         job_id: event_job_id,
-                    }) if event_job_id == job_id => {
-                        if let Some(execution_thread_id) = bound_thread_id {
-                            assert_eq!(thread_id, execution_thread_id);
-                        }
-                        saw_queued = true;
+                    }) if event_job_id == job_id && thread_id == execution_thread_id => {
+                        parent_events.push("queued".to_string());
+                    }
+                    Ok(ThreadEvent::JobRuntimeStarted {
+                        thread_id,
+                        job_id: event_job_id,
+                    }) if event_job_id == job_id && thread_id == execution_thread_id => {
+                        parent_events.push("started".to_string());
+                    }
+                    Ok(ThreadEvent::JobRuntimeCooling {
+                        thread_id,
+                        job_id: event_job_id,
+                    }) if event_job_id == job_id && thread_id == execution_thread_id => {
+                        parent_events.push("cooling".to_string());
                     }
                     Ok(ThreadEvent::JobRuntimeMetricsUpdated { .. }) => {
                         saw_metrics = true;
                     }
-                    Ok(ThreadEvent::JobRuntimeUpdated { runtime })
-                        if runtime.job_id == job_id
-                            && runtime.status == ThreadRuntimeStatus::Inactive
-                            && runtime.last_reason == Some(ThreadPoolEventReason::ExecutionFailed) =>
-                    {
-                        saw_failure_update = true;
+                    Ok(_) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        panic!("parent thread event channel should remain open");
+                    }
+                }
+            }
+        })
+        .await
+        .expect("parent thread should observe runtime lifecycle events");
+
+        assert_event_subsequence(
+            &parent_events,
+            &[
+                "updated:queued",
+                "queued",
+                "updated:running",
+                "started",
+                "updated:cooling",
+                "cooling",
+            ],
+        );
+
+        let mut saw_bound = false;
+        let mut saw_result = false;
+        timeout(Duration::from_secs(5), async {
+            while !(saw_bound && saw_result) {
+                match pipe_rx.recv().await {
+                    Ok(ThreadEvent::ThreadBoundToJob {
+                        job_id: event_job_id,
+                        thread_id,
+                    }) if event_job_id == job_id => {
+                        assert_eq!(thread_id, execution_thread_id);
+                        saw_bound = true;
                     }
                     Ok(ThreadEvent::JobResult {
                         thread_id,
                         job_id: event_job_id,
                         success,
+                        cancelled,
                         ..
                     }) if event_job_id == job_id => {
                         assert_eq!(thread_id, originating_thread_id);
-                        assert!(
-                            !success,
-                            "alpha flow should surface execution failure when the agent record is missing"
-                        );
+                        assert!(success, "capturing provider should complete successfully");
+                        assert!(!cancelled, "successful job should not be cancelled");
                         saw_result = true;
                     }
                     Ok(_) => {}
@@ -2780,15 +3053,6 @@ mod tests {
         })
         .await
         .expect("job result event should arrive");
-
-        let execution_thread_id = bound_thread_id.expect("job should bind to an execution thread");
-        assert_eq!(manager.thread_binding(&job_id), Some(execution_thread_id));
-        assert!(saw_queued, "queued event should be observed");
-        assert!(
-            saw_failure_update,
-            "load failure should publish a runtime update"
-        );
-        assert!(saw_metrics, "metrics update should be observed");
     }
 
     #[tokio::test]
@@ -2884,6 +3148,192 @@ mod tests {
         })
         .await
         .expect("parent thread should observe job runtime eviction");
+    }
+
+    #[tokio::test]
+    async fn pruned_terminal_runtime_metadata_recovers_from_persistence() {
+        let provider = Arc::new(CapturingProvider::new("done", Duration::from_millis(1), 8));
+        let (manager, agent_id, parent_thread_id) = test_job_manager_with_provider(provider).await;
+        set_job_runtime_store_limits(
+            &manager,
+            JobRuntimeStoreLimits {
+                terminal_runtime_limit: 1,
+                delivered_job_result_limit: 1024,
+            },
+        );
+
+        let active_thread_id = ThreadId::new();
+        manager.sync_job_runtime_metadata(
+            active_thread_id,
+            Some("job-active-retained".to_string()),
+            Some(parent_thread_id),
+        );
+        manager.upsert_job_runtime_summary(
+            active_thread_id,
+            "job-active-retained".to_string(),
+            ThreadRuntimeStatus::Running,
+            64,
+            Some(Utc::now().to_rfc3339()),
+            true,
+            None,
+        );
+
+        let first_request = JobExecutionRequest {
+            originating_thread_id: parent_thread_id,
+            job_id: "job-runtime-prune-first".to_string(),
+            agent_id,
+            prompt: "first".to_string(),
+            context: None,
+        };
+        let first_thread_id = manager
+            .persist_binding(&first_request, &Utc::now().to_rfc3339())
+            .await
+            .expect("first binding should persist");
+        manager.sync_job_runtime_metadata(
+            first_thread_id,
+            Some(first_request.job_id.clone()),
+            Some(parent_thread_id),
+        );
+        manager.upsert_job_runtime_summary(
+            first_thread_id,
+            first_request.job_id.clone(),
+            ThreadRuntimeStatus::Evicted,
+            0,
+            Some(Utc::now().to_rfc3339()),
+            true,
+            Some(ThreadPoolEventReason::CoolingExpired),
+        );
+
+        let second_request = JobExecutionRequest {
+            originating_thread_id: parent_thread_id,
+            job_id: "job-runtime-prune-second".to_string(),
+            agent_id,
+            prompt: "second".to_string(),
+            context: None,
+        };
+        let second_thread_id = manager
+            .persist_binding(&second_request, &Utc::now().to_rfc3339())
+            .await
+            .expect("second binding should persist");
+        manager.sync_job_runtime_metadata(
+            second_thread_id,
+            Some(second_request.job_id.clone()),
+            Some(parent_thread_id),
+        );
+        manager.upsert_job_runtime_summary(
+            second_thread_id,
+            second_request.job_id.clone(),
+            ThreadRuntimeStatus::Evicted,
+            0,
+            Some(Utc::now().to_rfc3339()),
+            true,
+            Some(ThreadPoolEventReason::CoolingExpired),
+        );
+
+        assert_eq!(
+            manager
+                .job_runtime_summary(&active_thread_id)
+                .map(|runtime| runtime.status),
+            Some(ThreadRuntimeStatus::Running),
+            "active runtimes should stay resident while terminal projections are pruned"
+        );
+        assert_eq!(
+            manager.thread_binding(&first_request.job_id),
+            None,
+            "pruned terminal runtime should release its in-memory job binding"
+        );
+        assert_eq!(
+            manager.parent_job_thread_id(&first_thread_id),
+            None,
+            "pruned terminal runtime should release its in-memory parent mapping"
+        );
+        {
+            let store = manager
+                .job_runtime_store
+                .lock()
+                .expect("job runtime mutex poisoned");
+            let children = store
+                .child_jobs_by_parent
+                .get(&parent_thread_id)
+                .cloned()
+                .unwrap_or_default();
+            assert!(
+                !children
+                    .iter()
+                    .any(|child| child.thread_id == first_thread_id),
+                "pruned terminal runtime should be removed from the cached child index"
+            );
+        }
+
+        let recovered_thread_id = manager
+            .recover_job_execution_thread_id(&first_request.job_id)
+            .await
+            .expect("persisted job binding should recover after cache pruning");
+        assert_eq!(recovered_thread_id, Some(first_thread_id));
+
+        let recovered_parent = manager
+            .recover_parent_job_thread_id(&first_thread_id)
+            .await
+            .expect("persisted parent binding should recover after cache pruning");
+        assert_eq!(recovered_parent, Some(parent_thread_id));
+
+        manager
+            .job_runtime_store
+            .lock()
+            .expect("job runtime mutex poisoned")
+            .child_jobs_by_parent
+            .remove(&parent_thread_id);
+        let recovered_children = manager
+            .recover_child_jobs_for_thread(parent_thread_id)
+            .await
+            .expect("persisted child list should recover after cache pruning");
+        assert!(
+            recovered_children.iter().any(|child| {
+                child.thread_id == first_thread_id && child.job_id == first_request.job_id
+            }),
+            "persisted child metadata should repopulate the adapter cache"
+        );
+    }
+
+    #[tokio::test]
+    async fn delivered_job_result_shadow_prunes_without_affecting_tracked_lookup() {
+        let manager = test_job_manager();
+        set_job_runtime_store_limits(
+            &manager,
+            JobRuntimeStoreLimits {
+                terminal_runtime_limit: 1024,
+                delivered_job_result_limit: 1,
+            },
+        );
+        let originating_thread_id = ThreadId::new();
+        let oldest = sample_job_result("job-shadow-oldest");
+        let newest = sample_job_result("job-shadow-newest");
+
+        manager.record_completed_job_result(originating_thread_id, oldest.clone());
+        manager.record_completed_job_result(originating_thread_id, newest.clone());
+        manager.record_delivered_job_result(
+            originating_thread_id,
+            job_result_mailbox_message(originating_thread_id, &oldest),
+        );
+        manager.record_delivered_job_result(
+            originating_thread_id,
+            job_result_mailbox_message(originating_thread_id, &newest),
+        );
+
+        assert!(
+            manager
+                .claim_delivered_job_result(originating_thread_id, &oldest.job_id)
+                .is_none(),
+            "oldest shadow result should be reclaimed once the shadow retention limit is exceeded"
+        );
+        let newest_shadow = manager
+            .claim_delivered_job_result(originating_thread_id, &newest.job_id)
+            .expect("newest shadow result should remain claimable");
+        assert_eq!(newest_shadow.job_id(), Some(newest.job_id.as_str()));
+        assert!(matches!(
+            manager.get_job_result_status(originating_thread_id, &oldest.job_id, false),
+            JobLookup::Completed(found) if found.job_id == oldest.job_id
+        ));
     }
 
     #[tokio::test]
@@ -3096,11 +3546,7 @@ mod tests {
 
     #[tokio::test]
     async fn recover_parent_then_children_keeps_persisted_job_id_authoritative() {
-        let provider = Arc::new(CapturingProvider::new(
-            "done",
-            Duration::from_millis(1),
-            8,
-        ));
+        let provider = Arc::new(CapturingProvider::new("done", Duration::from_millis(1), 8));
         let (manager, agent_id, parent_thread_id) = test_job_manager_with_provider(provider).await;
         let child_thread_id = ThreadId::new();
         let child_job_id = "job-cache-authority".to_string();

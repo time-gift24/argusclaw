@@ -632,6 +632,10 @@ pub struct SessionManager {
     thread_repo: Arc<dyn ThreadRepository>,
     llm_provider_repo: Arc<dyn LlmProviderRepository>,
     sessions: Arc<DashMap<SessionId, Arc<Session>>>,
+    /// Adapter/index from chat thread IDs to session IDs.
+    ///
+    /// This map is only used to adapt pool-core state into session-scoped views and
+    /// lifecycle routing. It is not an authority source for thread existence.
     thread_sessions: Arc<DashMap<ThreadId, SessionId>>,
     template_manager: Arc<TemplateManager>,
     provider_resolver: Arc<dyn ProviderResolver>,
@@ -760,19 +764,25 @@ impl SessionManager {
                 };
                 match change {
                     RuntimeLifecycleChange::Cooling(_) => {
-                        let _ = thread_pool.emit_observer_event(&runtime.thread_id, ThreadEvent::ThreadPoolCooling {
-                            thread_id: runtime.thread_id,
-                            session_id: Some(session_id),
-                        });
+                        let _ = thread_pool.emit_observer_event(
+                            &runtime.thread_id,
+                            ThreadEvent::ThreadPoolCooling {
+                                thread_id: runtime.thread_id,
+                                session_id: Some(session_id),
+                            },
+                        );
                     }
                     RuntimeLifecycleChange::Evicted(_) => {
-                        let _ = thread_pool.emit_observer_event(&runtime.thread_id, ThreadEvent::ThreadPoolEvicted {
-                            thread_id: runtime.thread_id,
-                            session_id: Some(session_id),
-                            reason: runtime
-                                .last_reason
-                                .unwrap_or(ThreadPoolEventReason::MemoryPressure),
-                        });
+                        let _ = thread_pool.emit_observer_event(
+                            &runtime.thread_id,
+                            ThreadEvent::ThreadPoolEvicted {
+                                thread_id: runtime.thread_id,
+                                session_id: Some(session_id),
+                                reason: runtime
+                                    .last_reason
+                                    .unwrap_or(ThreadPoolEventReason::MemoryPressure),
+                            },
+                        );
                     }
                 }
                 let snapshot = SessionManager::adapted_thread_pool_state(
@@ -780,8 +790,10 @@ impl SessionManager {
                     thread_sessions.as_ref(),
                 )
                 .snapshot;
-                let _ = thread_pool
-                    .emit_observer_event(&runtime.thread_id, ThreadEvent::ThreadPoolMetricsUpdated { snapshot });
+                let _ = thread_pool.emit_observer_event(
+                    &runtime.thread_id,
+                    ThreadEvent::ThreadPoolMetricsUpdated { snapshot },
+                );
             }));
     }
 
@@ -869,9 +881,10 @@ impl SessionManager {
             .deliver_thread_message(thread_id, Self::route_mailbox_message(message.clone()))
             .await
             .map_err(Self::map_pool_error)?;
-        let _ = self
-            .thread_pool
-            .emit_observer_event(&thread_id, ThreadEvent::MailboxMessageQueued { thread_id, message });
+        let _ = self.thread_pool.emit_observer_event(
+            &thread_id,
+            ThreadEvent::MailboxMessageQueued { thread_id, message },
+        );
         Ok(())
     }
 
@@ -909,6 +922,9 @@ impl SessionManager {
         thread_sessions: &DashMap<ThreadId, SessionId>,
     ) -> ThreadPoolState {
         let core_state: CoreThreadPoolState = thread_pool.collect_state();
+        // thread_sessions is only a session-layer adapter over pool authority.
+        // Missing entries hide runtimes from the session view, but do not mutate
+        // or replace ThreadPool's authoritative runtime state.
         let runtimes: Vec<_> = core_state
             .runtimes
             .into_iter()
@@ -998,13 +1014,19 @@ impl SessionManager {
         self.thread_pool
             .mark_runtime_running(&thread_id, estimated_memory_bytes, started_at)
             .ok_or_else(|| ArgusError::ThreadNotFound(thread_id.inner().to_string()))?;
-        let _ = self.thread_pool.emit_observer_event(&thread_id, ThreadEvent::ThreadPoolStarted {
-            thread_id,
-            session_id: Some(session_id),
-        });
-        let _ = self.thread_pool.emit_observer_event(&thread_id, ThreadEvent::ThreadPoolMetricsUpdated {
-            snapshot: self.thread_pool_snapshot(),
-        });
+        let _ = self.thread_pool.emit_observer_event(
+            &thread_id,
+            ThreadEvent::ThreadPoolStarted {
+                thread_id,
+                session_id: Some(session_id),
+            },
+        );
+        let _ = self.thread_pool.emit_observer_event(
+            &thread_id,
+            ThreadEvent::ThreadPoolMetricsUpdated {
+                snapshot: self.thread_pool_snapshot(),
+            },
+        );
         Ok(())
     }
 
@@ -2329,6 +2351,213 @@ mod tests {
         assert!(
             manager.loaded_chat_thread(&thread_id).is_none(),
             "unload should evict loaded chat runtimes alongside the session"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_thread_registers_thread_session_adapter_entry() {
+        let harness = test_session_manager_harness_with_provider(Arc::new(FixedProvider {
+            model_name: "routing-test".to_string(),
+        }))
+        .await;
+
+        assert_eq!(
+            harness.manager.session_id_for_thread(&harness.thread_id),
+            Some(harness.session_id)
+        );
+        assert!(
+            harness
+                .manager
+                .thread_pool_state()
+                .runtimes
+                .iter()
+                .any(|runtime| {
+                    runtime.thread_id == harness.thread_id
+                        && runtime.session_id == Some(harness.session_id)
+                }),
+            "create_thread should register the adapter entry used for session-scoped pool views"
+        );
+    }
+
+    #[tokio::test]
+    async fn thread_pool_state_uses_thread_sessions_as_adapter_index_only() {
+        let harness = test_session_manager_harness_with_provider(Arc::new(FixedProvider {
+            model_name: "routing-test".to_string(),
+        }))
+        .await;
+
+        assert!(
+            harness
+                .manager
+                .thread_pool
+                .runtime_summary(&harness.thread_id)
+                .is_some(),
+            "core pool state should already track the runtime"
+        );
+
+        harness.manager.forget_thread_session(&harness.thread_id);
+
+        assert_eq!(
+            harness.manager.session_id_for_thread(&harness.thread_id),
+            None,
+            "adapter index should be clear after forgetting the mapping"
+        );
+        assert!(
+            harness
+                .manager
+                .thread_pool
+                .runtime_summary(&harness.thread_id)
+                .is_some(),
+            "forgetting the adapter entry must not erase authoritative pool state"
+        );
+        assert!(
+            harness
+                .manager
+                .thread_pool_state()
+                .runtimes
+                .iter()
+                .all(|runtime| runtime.thread_id != harness.thread_id),
+            "session-scoped pool view should hide runtimes without adapter entries"
+        );
+
+        harness
+            .manager
+            .remember_thread_session(harness.thread_id, harness.session_id);
+        assert!(
+            harness
+                .manager
+                .thread_pool_state()
+                .runtimes
+                .iter()
+                .any(|runtime| runtime.thread_id == harness.thread_id),
+            "restoring the adapter entry should make the runtime visible again"
+        );
+    }
+
+    #[tokio::test]
+    async fn load_recovers_thread_session_adapter_entries_after_unload() {
+        let harness = test_session_manager_harness_with_provider(Arc::new(FixedProvider {
+            model_name: "routing-test".to_string(),
+        }))
+        .await;
+
+        harness
+            .manager
+            .unload(harness.session_id)
+            .await
+            .expect("session unload should succeed");
+        assert_eq!(
+            harness.manager.session_id_for_thread(&harness.thread_id),
+            None,
+            "unload should clear adapter entries for the session"
+        );
+
+        harness
+            .manager
+            .load(harness.session_id)
+            .await
+            .expect("session load should rebuild adapter entries");
+        assert_eq!(
+            harness.manager.session_id_for_thread(&harness.thread_id),
+            Some(harness.session_id)
+        );
+    }
+
+    #[tokio::test]
+    async fn subscribe_recovers_thread_session_adapter_entry_when_runtime_slot_is_missing() {
+        let harness = test_session_manager_harness_with_provider(Arc::new(FixedProvider {
+            model_name: "routing-test".to_string(),
+        }))
+        .await;
+
+        harness.manager.forget_thread_session(&harness.thread_id);
+        assert!(
+            harness
+                .manager
+                .thread_pool
+                .remove_runtime(&harness.thread_id)
+                .await,
+            "test setup should allow the runtime slot to be removed"
+        );
+        assert!(
+            harness
+                .manager
+                .thread_pool
+                .subscribe(&harness.thread_id)
+                .is_none(),
+            "removed runtime should no longer expose a subscription handle"
+        );
+
+        let _rx = harness
+            .manager
+            .subscribe(harness.session_id, &harness.thread_id)
+            .await
+            .expect("subscribe should recover the adapter entry and runtime slot");
+
+        assert_eq!(
+            harness.manager.session_id_for_thread(&harness.thread_id),
+            Some(harness.session_id)
+        );
+        assert!(
+            harness
+                .manager
+                .thread_pool
+                .runtime_summary(&harness.thread_id)
+                .is_some(),
+            "subscribe recovery should rebuild the runtime slot through register_chat_thread"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_thread_forgets_thread_session_adapter_entry() {
+        let harness = test_session_manager_harness_with_provider(Arc::new(FixedProvider {
+            model_name: "routing-test".to_string(),
+        }))
+        .await;
+
+        harness
+            .manager
+            .delete_thread(harness.session_id, &harness.thread_id)
+            .await
+            .expect("thread delete should succeed");
+
+        assert_eq!(
+            harness.manager.session_id_for_thread(&harness.thread_id),
+            None,
+            "delete_thread should clear the adapter entry"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_session_forgets_all_thread_session_adapter_entries() {
+        let harness = test_session_manager_harness_with_provider(Arc::new(FixedProvider {
+            model_name: "routing-test".to_string(),
+        }))
+        .await;
+        let second_thread_id = harness
+            .manager
+            .create_thread(
+                harness.session_id,
+                harness.agent_id,
+                Some(ProviderId::new(1)),
+                None,
+            )
+            .await
+            .expect("second thread should create");
+
+        harness
+            .manager
+            .delete(harness.session_id)
+            .await
+            .expect("session delete should succeed");
+
+        assert_eq!(
+            harness.manager.session_id_for_thread(&harness.thread_id),
+            None
+        );
+        assert_eq!(
+            harness.manager.session_id_for_thread(&second_thread_id),
+            None
         );
     }
 
