@@ -168,9 +168,9 @@ onMounted(() => {
 <style scoped>
 .page-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 400px);
   gap: var(--space-5);
   align-items: start;
+  width: 100%;
 }
 
 .form-panel,
@@ -179,9 +179,11 @@ onMounted(() => {
   border: 1px solid var(--border-default);
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-xs);
+  transition: border-color var(--transition-base);
 }
 
 .form-panel {
+  width: 100%;
   padding: var(--space-5);
   display: grid;
   gap: var(--space-5);
@@ -228,22 +230,30 @@ onMounted(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: var(--space-4);
   padding: var(--space-4);
-  background: var(--app-bg);
+  background: var(--surface-raised);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
-  transition: border-color 120ms ease;
+  transition:
+    border-color var(--transition-base),
+    transform var(--transition-fast);
 }
 
 .provider-card:hover {
   border-color: var(--border-default);
 }
 
+.provider-card:active {
+  transform: scale(0.99);
+}
+
 .provider-info {
   display: flex;
   flex-direction: column;
   gap: var(--space-1);
+  flex: 1 1 320px;
   min-width: 0;
 }
 
