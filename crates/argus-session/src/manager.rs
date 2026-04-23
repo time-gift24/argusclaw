@@ -2464,7 +2464,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn subscribe_recovers_thread_session_adapter_entry_when_runtime_slot_is_missing() {
+    async fn subscribe_recovers_thread_session_adapter_entry_and_runtime_slot() {
         let harness = test_session_manager_harness_with_provider(Arc::new(FixedProvider {
             model_name: "routing-test".to_string(),
         }))
@@ -2504,8 +2504,49 @@ mod tests {
                 .thread_pool
                 .runtime_summary(&harness.thread_id)
                 .is_some(),
-            "subscribe recovery should rebuild the runtime slot through register_chat_thread"
+            "subscribe recovery should rebuild the observable runtime slot through register_chat_thread"
         );
+    }
+
+    #[tokio::test]
+    async fn subscribe_recovery_keeps_thread_ready_for_later_runtime_rehydration() {
+        let harness =
+            test_session_manager_harness_with_provider(Arc::new(HangingStreamingProvider {
+                model_name: "routing-hanging".to_string(),
+            }))
+            .await;
+
+        harness.manager.forget_thread_session(&harness.thread_id);
+        assert!(
+            harness
+                .manager
+                .thread_pool
+                .remove_runtime(&harness.thread_id)
+                .await,
+            "test setup should allow the runtime slot to be removed"
+        );
+
+        let _rx = harness
+            .manager
+            .subscribe(harness.session_id, &harness.thread_id)
+            .await
+            .expect("subscribe should restore the observable runtime slot");
+
+        harness
+            .manager
+            .send_message(harness.session_id, &harness.thread_id, "hello".to_string())
+            .await
+            .expect("send_message should still rehydrate the runtime after subscribe recovery");
+
+        let session = harness
+            .manager
+            .load(harness.session_id)
+            .await
+            .expect("session should load");
+        let thread = session
+            .get_thread(&harness.thread_id)
+            .expect("session should refresh the thread handle after runtime reload");
+        wait_until_thread_running(&thread).await;
     }
 
     #[tokio::test]

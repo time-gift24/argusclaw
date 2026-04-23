@@ -524,6 +524,18 @@ impl JobManager {
         removed
     }
 
+    fn remove_delivered_job_result_order_entry(
+        store: &mut JobRuntimeStore,
+        thread_id: ThreadId,
+        message_id: &str,
+    ) {
+        store
+            .delivered_job_result_order
+            .retain(|(entry_thread_id, entry_message_id)| {
+                *entry_thread_id != thread_id || entry_message_id != message_id
+            });
+    }
+
     fn prune_delivered_job_results(store: &mut JobRuntimeStore) {
         while Self::current_delivered_job_result_count(store)
             > store.limits.delivered_job_result_limit
@@ -732,14 +744,21 @@ impl JobManager {
             .job_runtime_store
             .lock()
             .expect("job runtime mutex poisoned");
-        let messages = store.delivered_job_results.get_mut(&thread_id)?;
-        let index = messages
-            .iter()
-            .position(|message| message.job_id() == Some(job_id))?;
-        let claimed = messages.remove(index);
-        if messages.is_empty() {
+        let claimed = {
+            let messages = store.delivered_job_results.get_mut(&thread_id)?;
+            let index = messages
+                .iter()
+                .position(|message| message.job_id() == Some(job_id))?;
+            messages.remove(index)
+        };
+        if store
+            .delivered_job_results
+            .get(&thread_id)
+            .is_some_and(Vec::is_empty)
+        {
             store.delivered_job_results.remove(&thread_id);
         }
+        Self::remove_delivered_job_result_order_entry(&mut store, thread_id, &claimed.id);
         Some(claimed)
     }
 
@@ -3334,6 +3353,49 @@ mod tests {
             manager.get_job_result_status(originating_thread_id, &oldest.job_id, false),
             JobLookup::Completed(found) if found.job_id == oldest.job_id
         ));
+    }
+
+    #[tokio::test]
+    async fn claiming_delivered_job_result_releases_shadow_order_entry() {
+        let manager = test_job_manager();
+        let originating_thread_id = ThreadId::new();
+        let result = sample_job_result("job-shadow-claim");
+
+        manager.record_delivered_job_result(
+            originating_thread_id,
+            job_result_mailbox_message(originating_thread_id, &result),
+        );
+        {
+            let store = manager
+                .job_runtime_store
+                .lock()
+                .expect("job runtime mutex poisoned");
+            assert_eq!(
+                store.delivered_job_result_order.len(),
+                1,
+                "recording a delivered result should index it for bounded retention"
+            );
+        }
+
+        let claimed = manager
+            .claim_delivered_job_result(originating_thread_id, &result.job_id)
+            .expect("delivered result shadow should stay claimable");
+        assert_eq!(claimed.job_id(), Some(result.job_id.as_str()));
+
+        let store = manager
+            .job_runtime_store
+            .lock()
+            .expect("job runtime mutex poisoned");
+        assert!(
+            !store
+                .delivered_job_results
+                .contains_key(&originating_thread_id),
+            "claiming the only delivered shadow should remove the live shadow entry"
+        );
+        assert!(
+            store.delivered_job_result_order.is_empty(),
+            "claiming a delivered shadow should also release its retention order index"
+        );
     }
 
     #[tokio::test]
