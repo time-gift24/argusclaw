@@ -125,7 +125,7 @@ async function saveSettings() {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: var(--space-4);
   padding: var(--space-4);
-  background: var(--app-bg);
+  background: var(--surface-raised);
   border-radius: var(--radius-md);
 }
 
@@ -137,7 +137,7 @@ async function saveSettings() {
 
 .summary-label {
   font-size: var(--text-xs);
-  font-weight: 500;
+  font-weight: 510;
   color: var(--text-muted);
   text-transform: uppercase;
   letter-spacing: 0.04em;
