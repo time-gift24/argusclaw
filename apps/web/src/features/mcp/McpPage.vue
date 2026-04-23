@@ -105,6 +105,17 @@ onMounted(async () => {
   border: 1px solid var(--border-default);
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-xs);
+  transition:
+    border-color var(--transition-base),
+    transform var(--transition-fast);
+}
+
+.server-card:hover {
+  border-color: var(--border-strong);
+}
+
+.server-card:active {
+  transform: scale(0.99);
 }
 
 .server-info {
