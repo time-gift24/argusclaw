@@ -2,11 +2,11 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** Deliver a usable web management console on top of a new Rust `argus-server` without rewiring desktop, extracting a shared frontend core, or migrating chat in the first phase.
+**Goal:** Deliver a usable `Vue + OpenTiny` web management console on top of a new Rust `argus-server` without rewiring desktop, extracting a shared frontend core, or migrating chat in the first phase.
 
-**Architecture:** Keep `ArgusWing` as the only business facade. Add `crates/argus-server` as an `axum` REST transport for instance management, and add a standalone `apps/web` Vite app with a new admin information architecture. Defer `SSE`, chat/thread APIs, desktop rewiring, and `packages/app-core` until a later phase.
+**Architecture:** Keep `ArgusWing` as the only business facade. Add `crates/argus-server` as an `axum` REST transport for instance management, and add a standalone `apps/web` `Vue 3 + OpenTiny Vue + Vite` app with a new admin information architecture. Treat `apps/web/DESIGN.md` as the visual contract for tokens, typography, and component overrides. Defer `SSE`, chat/thread APIs, desktop rewiring, and `packages/app-core` until a later phase.
 
-**Tech Stack:** Rust, `axum`, `tokio`, `serde`, React 19, Vite 8, TypeScript, React Router, Testing Library, `tsx --test`
+**Tech Stack:** Rust, `axum`, `tokio`, `serde`, Vue 3, OpenTiny Vue, Vite 8, TypeScript, Vue Router, Vitest, Vue Test Utils
 
 ---
 
@@ -242,57 +242,59 @@ git commit -m "feat: add template and mcp management api"
 
 **Files:**
 - Create: `apps/web/package.json`
+- Create: `apps/web/DESIGN.md`
 - Create: `apps/web/tsconfig.json`
 - Create: `apps/web/vite.config.ts`
 - Create: `apps/web/index.html`
-- Create: `apps/web/src/main.tsx`
-- Create: `apps/web/src/app/router.tsx`
-- Create: `apps/web/src/app/layout.tsx`
+- Create: `apps/web/src/main.ts`
+- Create: `apps/web/src/App.vue`
+- Create: `apps/web/src/router/index.ts`
+- Create: `apps/web/src/layouts/AdminLayout.vue`
 - Create: `apps/web/src/app/nav.ts`
+- Create: `apps/web/src/styles/tokens.css`
 - Create: `apps/web/src/lib/api.ts`
-- Create: `apps/web/src/app/layout.test.tsx`
+- Create: `apps/web/src/layouts/admin-layout.test.ts`
 
 **Step 1: Write the failing test**
 
-```tsx
-import test from "node:test";
-import assert from "node:assert/strict";
-import { render, screen } from "@testing-library/react";
+```ts
+import { describe, expect, it } from "vitest";
+import { mount } from "@vue/test-utils";
 
-import { AppLayout } from "./layout";
+import AdminLayout from "./AdminLayout.vue";
 
-test("admin shell renders management navigation", () => {
-  render(<AppLayout />);
-  assert.equal(screen.getByText("Providers").textContent, "Providers");
+describe("AdminLayout", () => {
+  it("renders management navigation", () => {
+    const wrapper = mount(AdminLayout);
+    expect(wrapper.text()).toContain("Providers");
+  });
 });
 ```
 
 **Step 2: Run test to verify it fails**
 
-Run: `cd apps/web && pnpm exec tsx --test src/app/layout.test.tsx`
+Run: `cd apps/web && pnpm exec vitest run src/layouts/admin-layout.test.ts`
 Expected: FAIL because the web app does not exist yet.
 
 **Step 3: Write minimal implementation**
 
-```tsx
-export function AppLayout() {
-  return (
-    <div>
-      <nav>
-        <a href="/providers">Providers</a>
-      </nav>
-      <main />
-    </div>
-  );
-}
+```vue
+<template>
+  <div class="admin-layout">
+    <nav>
+      <a href="/providers">Providers</a>
+    </nav>
+    <main />
+  </div>
+</template>
 ```
 
-Set up `apps/web` as a standalone app. Do not pull in `crates/desktop` code, do not create `packages/app-core`, and do not change desktop build configuration in this task.
+Set up `apps/web` as a standalone `Vue 3 + OpenTiny Vue` app. Create `apps/web/DESIGN.md` from the approved Linear-inspired design brief and wire `src/styles/tokens.css` to start mapping that brief into CSS variables and OpenTiny theme overrides. Do not pull in `crates/desktop` code, do not create `packages/app-core`, and do not change desktop build configuration in this task.
 
 **Step 4: Run test to verify it passes**
 
 Run: `cd apps/web && pnpm install`
-Run: `cd apps/web && pnpm exec tsx --test src/app/layout.test.tsx`
+Run: `cd apps/web && pnpm exec vitest run src/layouts/admin-layout.test.ts`
 Expected: PASS
 
 **Step 5: Commit**
@@ -305,174 +307,190 @@ git commit -m "feat: scaffold web admin shell"
 ### Task 6: Implement the first real admin flow with provider management
 
 **Files:**
-- Create: `apps/web/src/features/providers/providers-page.tsx`
-- Create: `apps/web/src/features/providers/provider-form.tsx`
-- Create: `apps/web/src/features/providers/providers-page.test.tsx`
-- Modify: `apps/web/src/app/router.tsx`
+- Create: `apps/web/src/features/providers/ProvidersPage.vue`
+- Create: `apps/web/src/features/providers/ProviderForm.vue`
+- Create: `apps/web/src/features/providers/providers-page.test.ts`
+- Modify: `apps/web/src/router/index.ts`
 - Modify: `apps/web/src/lib/api.ts`
 
 **Step 1: Write the failing test**
 
-```tsx
-import test from "node:test";
-import assert from "node:assert/strict";
-import { render, screen } from "@testing-library/react";
+```ts
+import { describe, expect, it } from "vitest";
+import { mount, flushPromises } from "@vue/test-utils";
 
-import { ProvidersPage } from "./providers-page";
+import ProvidersPage from "./ProvidersPage.vue";
 
-test("providers page loads provider rows from the server", async () => {
-  render(<ProvidersPage />);
-  assert.ok(await screen.findByText("OpenAI"));
+describe("ProvidersPage", () => {
+  it("loads provider rows from the server", async () => {
+    const wrapper = mount(ProvidersPage);
+    await flushPromises();
+    expect(wrapper.text()).toContain("OpenAI");
+  });
 });
 ```
 
 **Step 2: Run test to verify it fails**
 
-Run: `cd apps/web && pnpm exec tsx --test src/features/providers/providers-page.test.tsx`
+Run: `cd apps/web && pnpm exec vitest run src/features/providers/providers-page.test.ts`
 Expected: FAIL because the providers page is not implemented yet.
 
 **Step 3: Write minimal implementation**
 
-```tsx
-export function ProvidersPage() {
-  const [providers, setProviders] = useState<ProviderSummary[]>([]);
+```vue
+<script setup lang="ts">
+import { onMounted, ref } from "vue";
 
-  useEffect(() => {
-    api.listProviders().then(setProviders);
-  }, []);
+const providers = ref<ProviderSummary[]>([]);
 
-  return <div>{providers.map((provider) => <div key={provider.id}>{provider.name}</div>)}</div>;
-}
+onMounted(async () => {
+  providers.value = await api.listProviders();
+});
+</script>
+
+<template>
+  <div>
+    <div v-for="provider in providers" :key="provider.id">{{ provider.name }}</div>
+  </div>
+</template>
 ```
 
-This is the first required real management loop. Make sure the page can read provider data and persist at least one edit or create path back to the server.
+This is the first required real management loop. Use OpenTiny form and table primitives rather than bespoke controls, and make sure the page can read provider data and persist at least one edit or create path back to the server.
 
 **Step 4: Run test to verify it passes**
 
-Run: `cd apps/web && pnpm exec tsx --test src/features/providers/providers-page.test.tsx`
+Run: `cd apps/web && pnpm exec vitest run src/features/providers/providers-page.test.ts`
 Expected: PASS
 
 **Step 5: Commit**
 
 ```bash
-git add apps/web/src/features/providers apps/web/src/app/router.tsx apps/web/src/lib/api.ts
+git add apps/web/src/features/providers apps/web/src/router/index.ts apps/web/src/lib/api.ts
 git commit -m "feat: add provider management flow to web admin"
 ```
 
 ### Task 7: Implement templates, MCP, settings, and health pages
 
 **Files:**
-- Create: `apps/web/src/features/templates/templates-page.tsx`
-- Create: `apps/web/src/features/templates/templates-page.test.tsx`
-- Create: `apps/web/src/features/mcp/mcp-page.tsx`
-- Create: `apps/web/src/features/mcp/mcp-page.test.tsx`
-- Create: `apps/web/src/features/settings/settings-page.tsx`
-- Create: `apps/web/src/features/settings/settings-page.test.tsx`
-- Create: `apps/web/src/features/health/health-page.tsx`
-- Create: `apps/web/src/features/health/health-page.test.tsx`
-- Modify: `apps/web/src/app/router.tsx`
+- Create: `apps/web/src/features/templates/TemplatesPage.vue`
+- Create: `apps/web/src/features/templates/templates-page.test.ts`
+- Create: `apps/web/src/features/mcp/McpPage.vue`
+- Create: `apps/web/src/features/mcp/mcp-page.test.ts`
+- Create: `apps/web/src/features/settings/SettingsPage.vue`
+- Create: `apps/web/src/features/settings/settings-page.test.ts`
+- Create: `apps/web/src/features/health/HealthPage.vue`
+- Create: `apps/web/src/features/health/health-page.test.ts`
+- Modify: `apps/web/src/router/index.ts`
 - Modify: `apps/web/src/lib/api.ts`
 
 **Step 1: Write the failing test**
 
-```tsx
-import test from "node:test";
-import assert from "node:assert/strict";
-import { render, screen } from "@testing-library/react";
+```ts
+import { describe, expect, it } from "vitest";
+import { mount, flushPromises } from "@vue/test-utils";
 
-import { HealthPage } from "./health-page";
+import HealthPage from "./HealthPage.vue";
 
-test("health page shows service status", async () => {
-  render(<HealthPage />);
-  assert.ok(await screen.findByText("Healthy"));
+describe("HealthPage", () => {
+  it("shows service status", async () => {
+    const wrapper = mount(HealthPage);
+    await flushPromises();
+    expect(wrapper.text()).toContain("Healthy");
+  });
 });
 ```
 
 **Step 2: Run test to verify it fails**
 
-Run: `cd apps/web && pnpm exec tsx --test src/features/health/health-page.test.tsx`
+Run: `cd apps/web && pnpm exec vitest run src/features/health/health-page.test.ts`
 Expected: FAIL because the health and remaining admin pages do not exist yet.
 
 **Step 3: Write minimal implementation**
 
-```tsx
-export function HealthPage() {
-  const [status, setStatus] = useState("Loading");
+```vue
+<script setup lang="ts">
+import { onMounted, ref } from "vue";
 
-  useEffect(() => {
-    api.getHealth().then((result) => setStatus(result.status));
-  }, []);
+const status = ref("Loading");
 
-  return <div>{status}</div>;
-}
+onMounted(async () => {
+  const result = await api.getHealth();
+  status.value = result.status;
+});
+</script>
+
+<template>
+  <div>{{ status }}</div>
+</template>
 ```
 
-Complete the remaining management pages using the REST routes added in earlier tasks. Keep the UI focused on instance administration; do not add chat routes or runtime event subscriptions.
+Complete the remaining management pages using the REST routes added in earlier tasks. Keep the UI focused on instance administration, and express the DESIGN.md rules through OpenTiny theme overrides plus local token CSS rather than ad-hoc inline styling. Do not add chat routes or runtime event subscriptions.
 
 **Step 4: Run test to verify it passes**
 
-Run: `cd apps/web && pnpm exec tsx --test src/features/templates/templates-page.test.tsx`
-Run: `cd apps/web && pnpm exec tsx --test src/features/mcp/mcp-page.test.tsx`
-Run: `cd apps/web && pnpm exec tsx --test src/features/settings/settings-page.test.tsx`
-Run: `cd apps/web && pnpm exec tsx --test src/features/health/health-page.test.tsx`
+Run: `cd apps/web && pnpm exec vitest run src/features/templates/templates-page.test.ts`
+Run: `cd apps/web && pnpm exec vitest run src/features/mcp/mcp-page.test.ts`
+Run: `cd apps/web && pnpm exec vitest run src/features/settings/settings-page.test.ts`
+Run: `cd apps/web && pnpm exec vitest run src/features/health/health-page.test.ts`
 Expected: PASS
 
 **Step 5: Commit**
 
 ```bash
-git add apps/web/src/features/templates apps/web/src/features/mcp apps/web/src/features/settings apps/web/src/features/health apps/web/src/app/router.tsx apps/web/src/lib/api.ts
+git add apps/web/src/features/templates apps/web/src/features/mcp apps/web/src/features/settings apps/web/src/features/health apps/web/src/router/index.ts apps/web/src/lib/api.ts apps/web/src/styles/tokens.css
 git commit -m "feat: add remaining admin console pages"
 ```
 
 ### Task 8: Add a usable-console smoke path and document deferred work
 
 **Files:**
-- Create: `apps/web/src/app/admin-console.smoke.test.tsx`
+- Create: `apps/web/src/app/admin-console.smoke.test.ts`
 - Modify: `docs/plans/2026-04-23-desktop-server-web-design.md`
 - Modify: `README.md`
 
 **Step 1: Write the failing test**
 
-```tsx
-import test from "node:test";
-import assert from "node:assert/strict";
-import { render, screen } from "@testing-library/react";
+```ts
+import { describe, expect, it } from "vitest";
+import { mount } from "@vue/test-utils";
 
-import { AppRouter } from "./router";
+import App from "../App.vue";
 
-test("admin console exposes core management entry points", async () => {
-  render(<AppRouter />);
-  assert.ok(await screen.findByText("Providers"));
-  assert.ok(await screen.findByText("Templates"));
-  assert.ok(await screen.findByText("MCP Servers"));
-  assert.ok(await screen.findByText("Settings"));
+describe("admin console", () => {
+  it("exposes core management entry points", () => {
+    const wrapper = mount(App);
+    expect(wrapper.text()).toContain("Providers");
+    expect(wrapper.text()).toContain("Templates");
+    expect(wrapper.text()).toContain("MCP Servers");
+    expect(wrapper.text()).toContain("Settings");
+  });
 });
 ```
 
 **Step 2: Run test to verify it fails**
 
-Run: `cd apps/web && pnpm exec tsx --test src/app/admin-console.smoke.test.tsx`
+Run: `cd apps/web && pnpm exec vitest run src/app/admin-console.smoke.test.ts`
 Expected: FAIL until the full admin shell is wired together.
 
 **Step 3: Write minimal implementation**
 
-```tsx
-export function AppRouter() {
-  return <RouterProvider router={router} />;
-}
+```vue
+<template>
+  <RouterView />
+</template>
 ```
 
-Then update the docs to explicitly record what was deferred from phase 1: `SSE`, `thread monitor`, chat routes, shared frontend core, and desktop rewiring.
+Then update the docs to explicitly record what was deferred from phase 1: `SSE`, `thread monitor`, chat routes, shared frontend core, and desktop rewiring. Also keep `apps/web/DESIGN.md` in sync if implementation constraints change.
 
 **Step 4: Run test to verify it passes**
 
-Run: `cd apps/web && pnpm exec tsx --test src/app/admin-console.smoke.test.tsx`
+Run: `cd apps/web && pnpm exec vitest run src/app/admin-console.smoke.test.ts`
 Run: `cargo test -p argus-server -- --nocapture`
 Expected: PASS
 
 **Step 5: Commit**
 
 ```bash
-git add apps/web/src/app/admin-console.smoke.test.tsx docs/plans/2026-04-23-desktop-server-web-design.md README.md
+git add apps/web/src/app/admin-console.smoke.test.ts docs/plans/2026-04-23-desktop-server-web-design.md README.md apps/web/DESIGN.md
 git commit -m "test: lock usable admin console phase one scope"
 ```

@@ -8,14 +8,14 @@
 
 - 保留现有 `crates/desktop`，首阶段不重接、不改壳、不去登录
 - 新增基于 `axum` 的 `crates/argus-server`
-- 新增一个基于 `React + Vite` 的 `apps/web`
+- 新增一个基于 `Vue 3 + OpenTiny Vue + Vite` 的 `apps/web`
 - 先把 web 做成一个**基本可用的管理台**
 - 首阶段不再以 `chat`、`thread monitor`、shared frontend core 为主线
 
 已确认约束：
 
 - Rust 继续作为核心服务端实现，复用现有 workspace crate
-- web 继续沿用 `React + Vite`，不引入 `Next.js`
+- web 使用 `Vue 3 + OpenTiny Vue + Vite`
 - `v1` 不做多用户，不做登录，按单实例单操作者环境设计
 - tool 执行仍是混合模式，但不并入首阶段管理台范围
 - 用户端长期可以采用 `REST + SSE`，但**首阶段只要求 `REST`**
@@ -135,6 +135,17 @@ web 管理台应该按新的信息架构组织，建议至少包含：
 - 能看到真实服务状态
 - 至少核心配置对象能完成真实的读取与修改闭环
 
+实现层面再加两条约束：
+
+- 组件基础统一采用 `OpenTiny Vue`
+- `apps/web/DESIGN.md` 作为前端视觉与交互实现的唯一设计入口
+
+也就是说，首阶段 web 不是“先随便搭个后台再慢慢美化”，而是：
+
+- 用 `Vue 3 + OpenTiny Vue` 组织页面与表单交互
+- 用 `DESIGN.md` 约束暗色主题、字体、层级、组件样式和布局语义
+- 在 OpenTiny 组件之上做 token、变量和样式覆盖，而不是重新发明整套组件基础
+
 ### 5. 首阶段不抽 `packages/app-core`
 
 shared frontend core 仍然可能是正确方向，但不应作为第一阶段前提。
@@ -201,7 +212,8 @@ desktop 在这轮里继续按原有方式工作：
 其中：
 
 - `crates/desktop` 保持独立，不并入新的前端共享层
-- `apps/web` 可以先作为独立 Vite app 存在
+- `apps/web` 作为独立的 `Vue + Vite` 前端存在
+- `apps/web/DESIGN.md` 保存管理台的设计系统约束
 - 如果后续再需要前端 workspace 或 `packages/app-core`，应在第二阶段以后再评估
 
 换句话说，这一版刻意避免为了“未来也许会共享”而先做大规模目录重组。
@@ -257,7 +269,7 @@ desktop 在这轮里继续按原有方式工作：
    覆盖 `health`、`bootstrap`、providers、templates、MCP、settings 的 REST 行为和错误 envelope。
 
 2. Web 管理台页面测试
-   覆盖页面渲染、导航、表单提交、错误展示、成功回显。
+   覆盖 `Vue` 页面渲染、导航、表单提交、错误展示、成功回显。
 
 3. 冒烟测试
    验证“打开管理台 -> 读取实例状态 -> 修改一项真实配置 -> 刷新后仍可见”的闭环。
@@ -295,7 +307,7 @@ desktop 在这轮里继续按原有方式工作：
 这次 desktop -> server + web 的合理切法，不是“先把 desktop 的核心抽共享，再接 server”，而是：
 
 1. 先做 `argus-server`
-2. 先做新的 web 管理台
+2. 先做新的 `Vue + OpenTiny` web 管理台
 3. 先把管理能力跑通
 4. 再决定哪些前端逻辑值得共享、哪些 desktop 能力值得后续迁移
 
