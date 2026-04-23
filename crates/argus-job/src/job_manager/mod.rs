@@ -47,6 +47,7 @@ mod execution;
 mod mailbox_result;
 mod persistence;
 mod runtime_state;
+mod support;
 mod tracking;
 
 /// Result of looking up a background job for a specific thread.

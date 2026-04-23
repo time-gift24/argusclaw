@@ -1,3 +1,4 @@
+use super::support::JobExecutionContext;
 use super::*;
 
 impl JobManager {
@@ -37,18 +38,7 @@ impl JobManager {
             job_id.clone(),
             cancellation,
         );
-        let _ = pipe_tx.send(ThreadEvent::ThreadBoundToJob {
-            job_id: job_id.clone(),
-            thread_id: execution_thread_id,
-        });
-        if let Some(runtime) = self.job_runtime_summary(&execution_thread_id) {
-            Self::emit_job_runtime_updated(&pipe_tx, &runtime);
-        }
-        let _ = pipe_tx.send(ThreadEvent::JobRuntimeQueued {
-            thread_id: execution_thread_id,
-            job_id: job_id.clone(),
-        });
-        self.emit_job_runtime_metrics(&pipe_tx);
+        self.emit_dispatched_job_events(job_id.as_str(), execution_thread_id, &pipe_tx);
 
         let pipe_tx_clone = pipe_tx.clone();
 
@@ -142,62 +132,26 @@ impl JobManager {
                 return result;
             }
         };
-        let runtime_rx = match self.thread_pool.subscribe(&execution_thread_id) {
-            Some(rx) => rx,
-            None => {
-                let result = Self::failure_result(
-                    fallback_job_id,
-                    fallback_agent_id,
-                    fallback_display_name,
-                    String::new(),
-                    format!(
-                        "job runtime {} is missing a runtime event stream",
-                        execution_thread_id
-                    ),
-                );
-                self.persist_job_completion(&request.job_id, &result, None)
-                    .await;
-                return result;
-            }
-        };
-        let started_at = Utc::now().to_rfc3339();
-        let estimated_memory_bytes =
-            ThreadPool::estimate_thread_memory(&thread) + request.prompt.len() as u64;
-        self.thread_pool.mark_runtime_running(
-            &execution_thread_id,
-            estimated_memory_bytes,
-            started_at.clone(),
-        );
-        if let Err(error) = self
-            .persist_job_status(
-                &request.job_id,
-                JobStatus::Running,
-                Some(started_at.as_str()),
-                None,
+        let runtime_rx = match self
+            .subscribe_or_complete_with_failure(
+                &request,
+                execution_thread_id,
+                fallback_agent_id,
+                &fallback_display_name,
             )
             .await
         {
-            tracing::warn!(
-                job_id = %request.job_id,
-                error = %error,
-                "Failed to persist running job status"
-            );
-        }
-        let runtime = self.upsert_job_runtime_summary(
+            Ok(rx) => rx,
+            Err(result) => return result,
+        };
+        let execution_context = JobExecutionContext {
+            request: &request,
             execution_thread_id,
-            request.job_id.clone(),
-            ThreadRuntimeStatus::Running,
-            estimated_memory_bytes,
-            Some(started_at.clone()),
-            true,
-            None,
-        );
-        Self::emit_job_runtime_updated(&pipe_tx, &runtime);
-        let _ = pipe_tx.send(ThreadEvent::JobRuntimeStarted {
-            thread_id: execution_thread_id,
-            job_id: request.job_id.clone(),
-        });
-        self.emit_job_runtime_metrics(&pipe_tx);
+            pipe_tx: &pipe_tx,
+        };
+        let started_at = self
+            .mark_job_runtime_running(&execution_context, &thread)
+            .await;
 
         let cancellation_for_wait = cancellation.clone();
 
@@ -210,23 +164,13 @@ impl JobManager {
                 "job executor panicked: thread pool panic test hook".to_string(),
             )
         } else {
-            let task_assignment = MailboxMessage {
-                id: Uuid::new_v4().to_string(),
-                from_thread_id: request.originating_thread_id,
-                to_thread_id: execution_thread_id,
-                from_label: self
-                    .thread_display_label(&request.originating_thread_id)
+            let task_assignment = self.build_task_assignment(
+                &request,
+                execution_thread_id,
+                &started_at,
+                self.thread_display_label(&request.originating_thread_id)
                     .await,
-                message_type: MailboxMessageType::TaskAssignment {
-                    task_id: request.job_id.clone(),
-                    subject: Self::task_subject(&request.prompt),
-                    description: request.prompt.clone(),
-                },
-                text: request.prompt.clone(),
-                timestamp: started_at.clone(),
-                read: false,
-                summary: request.context.as_ref().map(|context| context.to_string()),
-            };
+            );
 
             if cancellation_for_wait.is_cancelled() {
                 Self::cancelled_result(
@@ -279,37 +223,7 @@ impl JobManager {
             .await;
         self.persist_job_completion(&request.job_id, &result, Some(started_at.as_str()))
             .await;
-
-        let cooling_memory = ThreadPool::estimate_thread_memory(&thread);
-        let terminal_reason = if result.cancelled {
-            Some(ThreadPoolEventReason::Cancelled)
-        } else if result.success {
-            None
-        } else {
-            Some(ThreadPoolEventReason::ExecutionFailed)
-        };
-
-        if self
-            .thread_pool
-            .transition_runtime_to_cooling(&execution_thread_id, Some(cooling_memory))
-            .is_some()
-        {
-            let runtime = self.upsert_job_runtime_summary(
-                execution_thread_id,
-                request.job_id.clone(),
-                ThreadRuntimeStatus::Cooling,
-                cooling_memory,
-                Some(Utc::now().to_rfc3339()),
-                true,
-                terminal_reason,
-            );
-            Self::emit_job_runtime_updated(&pipe_tx, &runtime);
-            let _ = pipe_tx.send(ThreadEvent::JobRuntimeCooling {
-                thread_id: execution_thread_id,
-                job_id: request.job_id.clone(),
-            });
-            self.emit_job_runtime_metrics(&pipe_tx);
-        }
+        self.maybe_transition_job_runtime_to_cooling(&execution_context, &result, &thread);
 
         result
     }
@@ -612,7 +526,7 @@ impl JobManager {
         }
     }
 
-    fn failure_result(
+    pub(super) fn failure_result(
         job_id: String,
         agent_id: AgentId,
         agent_display_name: String,
