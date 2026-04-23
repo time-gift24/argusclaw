@@ -38,7 +38,7 @@ Response bodies use existing shared types where practical:
 Create/send request bodies stay minimal and JSON-first:
 
 - Create session: `{ "name": "..." }`
-- Create thread: `{ "template_id": 1, "provider_id": "...", "model": "..." }`
+- Create thread: `{ "template_id": 1, "provider_id": 1, "model": "..." }`
 - Send message: `{ "message": "..." }`
 
 `provider_id` and `model` are optional on create thread. The existing `SessionManager` resolution rules remain authoritative.

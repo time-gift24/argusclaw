@@ -5,10 +5,11 @@ use argus_crypto::{Cipher, FileKeySource};
 use argus_job::JobManager;
 use argus_llm::ProviderManager;
 use argus_mcp::{McpRuntime, McpRuntimeConfig, RmcpConnector};
+use argus_protocol::llm::ChatMessage;
 use argus_protocol::{
     AgentId, AgentRecord, ArgusError, JobRuntimeState, LlmProviderId, LlmProviderRecord,
-    McpDiscoveredToolRecord, McpServerRecord, McpServerStatus, McpToolResolver, ProviderResolver,
-    ProviderTestResult, Result, RiskLevel, ThreadPoolState,
+    McpDiscoveredToolRecord, McpServerRecord, McpServerStatus, McpToolResolver, ProviderId,
+    ProviderResolver, ProviderTestResult, Result, RiskLevel, SessionId, ThreadId, ThreadPoolState,
 };
 use argus_repository::traits::{
     AccountRepository, AdminSettingsRepository, AgentRepository, JobRepository,
@@ -16,7 +17,7 @@ use argus_repository::traits::{
 };
 use argus_repository::types::AdminSettingsRecord;
 use argus_repository::{ArgusSqlite, connect, connect_path, migrate};
-use argus_session::SessionManager;
+use argus_session::{SessionManager, SessionSummary, ThreadSummary};
 use argus_template::TemplateManager;
 use argus_thread_pool::ThreadPool;
 use argus_tool::ToolManager;
@@ -402,11 +403,97 @@ impl ServerCore {
     pub fn job_runtime_state(&self) -> JobRuntimeState {
         self.job_manager.job_runtime_state()
     }
+
+    pub async fn list_chat_sessions(&self) -> Result<Vec<SessionSummary>> {
+        self.session_manager.list_sessions().await
+    }
+
+    pub async fn create_chat_session(&self, name: String) -> Result<SessionSummary> {
+        let session_id = self.session_manager.create(name).await?;
+        self.list_chat_sessions()
+            .await?
+            .into_iter()
+            .find(|session| session.id == session_id)
+            .ok_or_else(|| missing_after_mutation("session", session_id))
+    }
+
+    pub async fn delete_chat_session(&self, session_id: SessionId) -> Result<()> {
+        self.session_manager.delete(session_id).await
+    }
+
+    pub async fn list_chat_threads(&self, session_id: SessionId) -> Result<Vec<ThreadSummary>> {
+        self.session_manager.list_threads(session_id).await
+    }
+
+    pub async fn create_chat_thread(
+        &self,
+        session_id: SessionId,
+        template_id: AgentId,
+        provider_id: Option<ProviderId>,
+        model: Option<String>,
+    ) -> Result<ThreadSummary> {
+        let thread_id = self
+            .session_manager
+            .create_thread(session_id, template_id, provider_id, model.as_deref())
+            .await?;
+        self.list_chat_threads(session_id)
+            .await?
+            .into_iter()
+            .find(|thread| thread.id == thread_id)
+            .ok_or_else(|| missing_after_mutation("thread", thread_id))
+    }
+
+    pub async fn delete_chat_thread(
+        &self,
+        session_id: SessionId,
+        thread_id: ThreadId,
+    ) -> Result<()> {
+        self.session_manager
+            .delete_thread(session_id, &thread_id)
+            .await
+    }
+
+    pub async fn get_chat_messages(
+        &self,
+        session_id: SessionId,
+        thread_id: ThreadId,
+    ) -> Result<Vec<ChatMessage>> {
+        self.session_manager
+            .get_thread_messages(session_id, &thread_id)
+            .await
+    }
+
+    pub async fn send_chat_message(
+        &self,
+        session_id: SessionId,
+        thread_id: ThreadId,
+        message: String,
+    ) -> Result<()> {
+        self.session_manager
+            .send_message(session_id, &thread_id, message)
+            .await
+    }
+
+    pub async fn cancel_chat_thread(
+        &self,
+        session_id: SessionId,
+        thread_id: ThreadId,
+    ) -> Result<()> {
+        self.session_manager
+            .cancel_thread(session_id, &thread_id)
+            .await
+    }
 }
 
 fn database_error(error: impl std::fmt::Display) -> ArgusError {
     ArgusError::DatabaseError {
         reason: error.to_string(),
+    }
+}
+
+fn missing_after_mutation(kind: &str, id: impl std::fmt::Display) -> ArgusError {
+    ArgusError::DatabaseError {
+        reason: format!("{kind} not found after mutation: {id}"),
     }
 }
 

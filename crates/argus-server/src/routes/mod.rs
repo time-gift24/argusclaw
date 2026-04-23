@@ -1,4 +1,5 @@
 pub mod bootstrap;
+pub mod chat;
 pub mod health;
 pub mod mcp;
 pub mod providers;
@@ -7,7 +8,7 @@ pub mod settings;
 pub mod templates;
 pub mod tools;
 
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Router, routing::patch};
 
 use crate::app_state::AppState;
@@ -19,6 +20,30 @@ pub fn router() -> Router<AppState> {
         .route("/api/v1/runtime", get(runtime::get_runtime_state))
         .route("/api/v1/runtime/events", get(runtime::runtime_events))
         .route("/api/v1/tools", get(tools::list_tools))
+        .route(
+            "/api/v1/chat/sessions",
+            get(chat::list_sessions).post(chat::create_session),
+        )
+        .route(
+            "/api/v1/chat/sessions/{session_id}",
+            delete(chat::delete_session),
+        )
+        .route(
+            "/api/v1/chat/sessions/{session_id}/threads",
+            get(chat::list_threads).post(chat::create_thread),
+        )
+        .route(
+            "/api/v1/chat/sessions/{session_id}/threads/{thread_id}",
+            delete(chat::delete_thread),
+        )
+        .route(
+            "/api/v1/chat/sessions/{session_id}/threads/{thread_id}/messages",
+            get(chat::list_messages).post(chat::send_message),
+        )
+        .route(
+            "/api/v1/chat/sessions/{session_id}/threads/{thread_id}/cancel",
+            post(chat::cancel_thread),
+        )
         .route(
             "/api/v1/settings",
             get(settings::get_settings).put(settings::update_settings),

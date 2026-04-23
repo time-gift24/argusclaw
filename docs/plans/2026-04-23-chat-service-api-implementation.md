@@ -88,7 +88,7 @@ Each method should call the corresponding `SessionManager` method. Do not access
 Request bodies:
 
 - `CreateSessionRequest { name: String }`
-- `CreateThreadRequest { template_id: i64, provider_id: Option<String>, model: Option<String> }`
+- `CreateThreadRequest { template_id: i64, provider_id: Option<i64>, model: Option<String> }`
 - `SendMessageRequest { message: String }`
 
 **Step 2: Implement handlers**
