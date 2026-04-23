@@ -515,7 +515,9 @@ impl ThreadOwnerHandle {
         self.handle
             .inner
             .message_tx
-            .send(ThreadMessage::Control(ThreadControlMessage::ShutdownRuntime))
+            .send(ThreadMessage::Control(
+                ThreadControlMessage::ShutdownRuntime,
+            ))
             .map_err(|_| ThreadError::ChannelClosed)?;
         self.handle.wait_for_termination().await;
         Ok(())
