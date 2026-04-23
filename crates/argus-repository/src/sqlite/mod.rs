@@ -12,6 +12,7 @@ use argus_crypto::{Cipher, FileKeySource, KeyMaterialSource, StaticKeySource};
 use argus_protocol::llm::SecretString;
 
 mod account;
+mod admin_settings;
 mod agent;
 mod job;
 mod llm_provider;

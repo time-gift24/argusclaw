@@ -2,10 +2,11 @@ pub mod bootstrap;
 pub mod health;
 pub mod mcp;
 pub mod providers;
+pub mod runtime;
 pub mod settings;
 pub mod templates;
 
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Router, routing::patch};
 
 use crate::app_state::AppState;
@@ -14,6 +15,8 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/v1/health", get(health::get_health))
         .route("/api/v1/bootstrap", get(bootstrap::get_bootstrap))
+        .route("/api/v1/runtime", get(runtime::get_runtime_state))
+        .route("/api/v1/runtime/events", get(runtime::runtime_events))
         .route(
             "/api/v1/settings",
             get(settings::get_settings).put(settings::update_settings),
@@ -23,8 +26,16 @@ pub fn router() -> Router<AppState> {
             get(providers::list_providers).post(providers::create_provider),
         )
         .route(
+            "/api/v1/providers/test",
+            post(providers::test_provider_record),
+        )
+        .route(
+            "/api/v1/providers/{provider_id}/test",
+            post(providers::test_provider_connection),
+        )
+        .route(
             "/api/v1/providers/{provider_id}",
-            patch(providers::update_provider),
+            patch(providers::update_provider).delete(providers::delete_provider),
         )
         .route(
             "/api/v1/agents/templates",
@@ -32,14 +43,23 @@ pub fn router() -> Router<AppState> {
         )
         .route(
             "/api/v1/agents/templates/{template_id}",
-            patch(templates::update_template),
+            patch(templates::update_template).delete(templates::delete_template),
         )
         .route(
             "/api/v1/mcp/servers",
             get(mcp::list_mcp_servers).post(mcp::create_mcp_server),
         )
+        .route("/api/v1/mcp/servers/test", post(mcp::test_mcp_server_input))
+        .route(
+            "/api/v1/mcp/servers/{server_id}/test",
+            post(mcp::test_mcp_server_connection),
+        )
+        .route(
+            "/api/v1/mcp/servers/{server_id}/tools",
+            get(mcp::list_mcp_server_tools),
+        )
         .route(
             "/api/v1/mcp/servers/{server_id}",
-            patch(mcp::update_mcp_server),
+            patch(mcp::update_mcp_server).delete(mcp::delete_mcp_server),
         )
 }

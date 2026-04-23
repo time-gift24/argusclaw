@@ -14,7 +14,7 @@ use argus_server::routes::settings::{SettingsResponse, UpdateSettingsRequest};
 async fn settings_get_and_put_round_trip() {
     let ctx = support::TestContext::new().await;
     let provider_id = ctx
-        .wing
+        .core
         .upsert_provider(LlmProviderRecord {
             id: LlmProviderId::new(0),
             kind: LlmProviderKind::OpenAiCompatible,

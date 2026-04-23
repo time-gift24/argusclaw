@@ -1,6 +1,6 @@
 # Argus-Server
 
-> 特性：基于 axum 的实例级管理面 transport，只通过 ArgusWing facade 暴露 phase 1 REST API。
+> 特性：基于 axum 的实例级管理面与运行状态 transport，在 server 内私有装配 ServerCore。
 
 ## 作用域
 
@@ -8,12 +8,15 @@
 
 ## 核心职责
 
-- 启动并持有 `ArgusWing`
-- 暴露 health / bootstrap / providers / templates / mcp / settings 的 REST API
+- 启动并持有 `ServerCore`
+- 在 `ServerCore` 内装配 provider、template、MCP、session、job、thread-pool、tool、auth 等 server 运行组件
+- 暴露 health / bootstrap / providers / templates / mcp / settings / runtime / runtime/events 管理 API
 - 负责 HTTP 请求校验、序列化与错误映射
 
 ## 修改守则
 
-- 不要绕过 `ArgusWing` 直接访问下层 manager 或 repository
-- 首阶段只做实例级管理 API，不扩展 chat / thread / SSE
+- `argus-server` 不依赖 `argus-wing`；两者是平等的应用入口
+- 下层 manager / repository 的直接装配只允许集中在 `ServerCore`，route handler 只调用 `ServerCore` 暴露的窄方法
+- 不扩展 chat / thread / message API，不改 desktop 主流程
+- settings 由 `ServerCore` 通过 repository 持久化，默认 `instance_name = "ArgusWing"`
 - 路由保持窄接口，避免把 desktop 命令面直接平移成大而全的 server surface

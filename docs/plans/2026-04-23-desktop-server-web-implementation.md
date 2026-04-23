@@ -4,7 +4,9 @@
 
 **Goal:** Deliver a usable `Vue + OpenTiny` web management console on top of a new Rust `argus-server` without rewiring desktop, extracting a shared frontend core, or migrating chat in the first phase.
 
-**Architecture:** Keep `ArgusWing` as the only business facade. Add `crates/argus-server` as an `axum` REST transport for instance management, and add a standalone `apps/web` `Vue 3 + OpenTiny Vue + Vite` app with a new admin information architecture. Treat `apps/web/DESIGN.md` as the visual contract for tokens, typography, and component overrides. Defer `SSE`, chat/thread APIs, desktop rewiring, and `packages/app-core` until a later phase.
+**Architecture:** Phase 3A supersedes the earlier “server only through `ArgusWing`” rule. `argus-server` and `argus-wing` are peer application entries: desktop continues to use `ArgusWing`, while `argus-server` owns a private `ServerCore` assembly layer over the required lower crates. Add/maintain `crates/argus-server` as an `axum` management transport, and keep `apps/web` as a standalone `Vue 3 + OpenTiny Vue + Vite` admin app. Treat `apps/web/DESIGN.md` as the visual contract for tokens, typography, and component overrides. Defer chat/thread APIs, desktop rewiring, and `packages/app-core` until a later phase.
+
+**Phase 3A boundary update:** Existing Phase 1 / Phase 2 endpoints remain wire-compatible. Do not reintroduce `argus-wing` as an `argus-server` dependency. Route handlers should call narrow `ServerCore` methods; direct lower manager/repository composition belongs only in `ServerCore`.
 
 **Tech Stack:** Rust, `axum`, `tokio`, `serde`, Vue 3, OpenTiny Vue, Vite 8, TypeScript, Vue Router, Vitest, Vue Test Utils
 
@@ -55,7 +57,7 @@ pub fn router(state: AppState) -> Router {
 }
 ```
 
-Create the crate-local `AGENTS.md` with the required `> 特性：...` sentence, register `crates/argus-server` in the workspace, add a shared JSON error envelope, and wire `main.rs` to boot the server with an `AppState` built from `ArgusWing`.
+Create the crate-local `AGENTS.md` with the required `> 特性：...` sentence, register `crates/argus-server` in the workspace, add a shared JSON error envelope, and wire `main.rs` to boot the server with an `AppState` built from `ServerCore`.
 
 **Step 4: Run test to verify it passes**
 
@@ -166,7 +168,7 @@ pub fn router(state: AppState) -> Router {
 }
 ```
 
-Map provider CRUD through `ArgusWing`. If the facade is missing exactly the right entry points, add the smallest missing facade methods there instead of bypassing into lower-level managers from `argus-server`.
+Map provider CRUD through `ServerCore`. If the route needs a new management operation, add the smallest narrow method to `ServerCore` instead of letting route handlers reach directly into lower-level managers or repositories.
 
 **Step 4: Run test to verify it passes**
 
@@ -494,3 +496,115 @@ Expected: PASS
 git add apps/web/src/app/admin-console.smoke.test.ts docs/plans/2026-04-23-desktop-server-web-design.md README.md apps/web/DESIGN.md
 git commit -m "test: lock usable admin console phase one scope"
 ```
+
+### Phase 2A: Add runtime snapshot monitoring without SSE
+
+**Intent:** Start phase 2 by exposing existing runtime telemetry through a narrow REST surface and a web monitor page. Keep `SSE`, timeline streaming, and thread-level drilldown for a later batch.
+
+**Files (expected):**
+- Create: `crates/argus-server/src/routes/runtime.rs`
+- Create: `crates/argus-server/tests/runtime_api.rs`
+- Create: `apps/web/src/features/runtime/RuntimePage.vue`
+- Create: `apps/web/src/features/runtime/runtime-page.test.ts`
+- Modify: `crates/argus-server/src/routes/mod.rs`
+- Modify: `apps/web/src/lib/api.ts`
+- Modify: `apps/web/src/router/index.ts`
+- Modify: `apps/web/src/app/nav.ts`
+
+**Expected API shape:**
+
+```text
+GET /api/v1/runtime
+```
+
+Response should contain:
+
+- `thread_pool`: `ServerCore::thread_pool_state()`
+- `job_runtime`: `ServerCore::job_runtime_state()`
+
+**Expected UI shape:**
+
+- New “运行状态”页面
+- Summary cards for active / queued / running / cooling / evicted counts
+- A runtime list for thread pool entries
+- A runtime list for background job entries
+- Client-side polling for refresh, without `SSE`
+
+### Phase 2B: Add runtime SSE updates with polling fallback
+
+**Intent:** Replace always-on polling with an event-stream-first runtime monitor. Keep the stream narrow by emitting runtime snapshots through `ServerCore`; defer per-thread timelines and chat event subscriptions.
+
+### Phase 3A: Decouple argus-server from ArgusWing
+
+**Intent:** Make `argus-server` a peer application entry with private assembly, while keeping the existing management HTTP/SSE contract stable.
+
+**Expected server shape:**
+
+- `AppState` holds `Arc<ServerCore>`
+- `ServerCore::init(database_path)` resolves database path, connects, migrates, assembles managers/runtimes, and seeds builtin templates
+- `ServerCore::with_pool(pool)` supports in-memory SQLite tests
+- `argus-server` depends directly on the required lower crates and does not depend on `argus-wing`
+- Phase 3B supersedes the initial settings note: `AdminSettings` is persisted through repository-backed SQLite storage with default `instance_name = "ArgusWing"`
+
+**Expected validation:**
+
+- `cargo test -p argus-server -- --nocapture`
+- `cargo tree -p argus-server | rg argus-wing` has no matches
+- `rg 'argus_wing|ArgusWing' crates/argus-server` only shows architecture assertions or user-visible brand/default test text
+
+**Files (expected):**
+- Modify: `crates/argus-server/Cargo.toml`
+- Modify: `crates/argus-server/src/routes/runtime.rs`
+- Modify: `crates/argus-server/src/routes/mod.rs`
+- Modify: `crates/argus-server/tests/runtime_api.rs`
+- Modify: `apps/web/src/lib/api.ts`
+- Modify: `apps/web/src/features/runtime/RuntimePage.vue`
+- Modify: `apps/web/src/features/runtime/runtime-page.test.ts`
+
+**Expected API shape:**
+
+```text
+GET /api/v1/runtime/events
+```
+
+The endpoint should return `text/event-stream` and emit `runtime.snapshot` events whose payload matches `GET /api/v1/runtime`.
+
+**Expected UI shape:**
+
+- The “运行状态” page uses `EventSource` when available
+- The page shows the event-stream connection state
+- Incoming `runtime.snapshot` events update the summary cards and runtime lists
+- Stream errors fall back to 5-second REST polling
+
+### Phase 3B: Productize admin management loops
+
+**Intent:** Keep web and desktop independent while making the standalone management console usable for real instance administration.
+
+**Expected server shape:**
+
+- `argus-repository` owns SQLite-backed single-row admin settings storage
+- `ServerCore` loads settings on startup and persists `PUT /settings`
+- Providers, templates, and MCP expose delete operations through narrow `ServerCore` methods
+- Providers and MCP expose connection test routes
+- MCP exposes discovered tools for an existing server
+- Server bind address reads `ARGUS_SERVER_ADDR`, defaulting to `127.0.0.1:3000`
+
+**Expected API shape:**
+
+```text
+DELETE /api/v1/providers/{provider_id}
+POST /api/v1/providers/{provider_id}/test
+POST /api/v1/providers/test
+DELETE /api/v1/agents/templates/{template_id}
+DELETE /api/v1/mcp/servers/{server_id}
+POST /api/v1/mcp/servers/{server_id}/test
+POST /api/v1/mcp/servers/test
+GET /api/v1/mcp/servers/{server_id}/tools
+```
+
+**Expected UI shape:**
+
+- Chinese light-mode admin pages show delete, test, save, error, empty, and refresh feedback
+- Provider management has a complete add/edit/test/delete loop
+- MCP management can test servers and inspect discovered tools
+- Templates can be removed from the admin console

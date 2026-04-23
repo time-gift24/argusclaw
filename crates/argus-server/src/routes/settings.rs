@@ -3,11 +3,11 @@ use axum::extract::State;
 use serde::{Deserialize, Serialize};
 
 use argus_protocol::LlmProviderId;
-use argus_wing::AdminSettings;
 
 use crate::app_state::AppState;
 use crate::error::ApiError;
 use crate::response::MutationResponse;
+use crate::server_core::AdminSettings;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SettingsResponse {
@@ -33,22 +33,22 @@ pub async fn update_settings(
     Json(request): Json<UpdateSettingsRequest>,
 ) -> Result<Json<MutationResponse<SettingsResponse>>, ApiError> {
     state
-        .wing()
+        .core()
         .set_default_provider(LlmProviderId::new(request.default_provider_id))
         .await?;
     state
-        .wing()
+        .core()
         .update_admin_settings(AdminSettings {
             instance_name: request.instance_name,
         })
-        .await;
+        .await?;
 
     Ok(Json(MutationResponse::new(read_settings(&state).await?)))
 }
 
 async fn read_settings(state: &AppState) -> Result<SettingsResponse, ApiError> {
-    let settings = state.wing().admin_settings().await;
-    let default_provider = state.wing().get_default_provider_record().await?;
+    let settings = state.core().admin_settings().await;
+    let default_provider = state.core().get_default_provider_record().await?;
 
     Ok(SettingsResponse {
         instance_name: settings.instance_name,

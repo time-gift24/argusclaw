@@ -3,6 +3,7 @@ import { createRouter, createWebHistory } from "vue-router";
 import AdminLayout from "@/layouts/AdminLayout.vue";
 import BootstrapPage from "@/features/bootstrap/BootstrapPage.vue";
 import HealthPage from "@/features/health/HealthPage.vue";
+import RuntimePage from "@/features/runtime/RuntimePage.vue";
 import ProvidersPage from "@/features/providers/ProvidersPage.vue";
 import TemplatesPage from "@/features/templates/TemplatesPage.vue";
 import McpPage from "@/features/mcp/McpPage.vue";
@@ -24,6 +25,11 @@ export const router = createRouter({
           path: "health",
           name: "health",
           component: HealthPage,
+        },
+        {
+          path: "runtime",
+          name: "runtime",
+          component: RuntimePage,
         },
         {
           path: "providers",

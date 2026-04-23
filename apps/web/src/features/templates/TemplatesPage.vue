@@ -2,15 +2,51 @@
 import { onMounted, ref } from "vue";
 
 import { getApiClient, type AgentRecord } from "@/lib/api";
-import { TinyTag } from "@/lib/opentiny";
+import { TinyButton, TinyTag } from "@/lib/opentiny";
 
 const api = getApiClient();
 const templates = ref<AgentRecord[]>([]);
 const loading = ref(true);
+const error = ref("");
+const actionMessage = ref("");
+const deletingTemplateId = ref<number | null>(null);
 
-onMounted(async () => {
-  templates.value = await api.listTemplates();
-  loading.value = false;
+async function loadTemplates() {
+  loading.value = true;
+  error.value = "";
+
+  try {
+    templates.value = await api.listTemplates();
+  } catch (reason) {
+    error.value = reason instanceof Error ? reason.message : "加载模板失败。";
+  } finally {
+    loading.value = false;
+  }
+}
+
+async function deleteTemplate(template: AgentRecord) {
+  if (!api.deleteTemplate) {
+    error.value = "当前 API 客户端不支持删除模板。";
+    return;
+  }
+
+  deletingTemplateId.value = template.id;
+  error.value = "";
+  actionMessage.value = "";
+
+  try {
+    await api.deleteTemplate(template.id);
+    actionMessage.value = "模板已删除。";
+    await loadTemplates();
+  } catch (reason) {
+    error.value = reason instanceof Error ? reason.message : "删除模板失败。";
+  } finally {
+    deletingTemplateId.value = null;
+  }
+}
+
+onMounted(() => {
+  void loadTemplates();
 });
 </script>
 
@@ -32,15 +68,29 @@ onMounted(async () => {
       加载中...
     </div>
 
+    <p
+      v-if="error"
+      class="error-message"
+    >
+      {{ error }}
+    </p>
+
+    <p
+      v-if="actionMessage"
+      class="success-message"
+    >
+      {{ actionMessage }}
+    </p>
+
     <div
-      v-else-if="templates.length === 0"
+      v-if="!loading && templates.length === 0"
       class="empty-state"
     >
       <p>暂无可用的模板</p>
     </div>
 
     <div
-      v-else
+      v-if="!loading && templates.length > 0"
       class="template-grid"
     >
       <article
@@ -53,6 +103,16 @@ onMounted(async () => {
           <span class="template-version">v{{ template.version }}</span>
         </div>
         <p class="template-description">{{ template.description }}</p>
+        <div class="template-actions">
+          <TinyButton
+            :data-testid="`delete-template-${template.id}`"
+            type="default"
+            :disabled="deletingTemplateId === template.id"
+            @click="deleteTemplate(template)"
+          >
+            {{ deletingTemplateId === template.id ? "删除中" : "删除模板" }}
+          </TinyButton>
+        </div>
       </article>
     </div>
   </section>
@@ -137,6 +197,32 @@ onMounted(async () => {
   font-size: var(--text-sm);
   color: var(--text-muted);
   line-height: 1.5;
+}
+
+.template-actions {
+  display: flex;
+  justify-content: flex-end;
+  padding-top: var(--space-2);
+}
+
+.error-message,
+.success-message {
+  margin: 0;
+  padding: var(--space-3);
+  border-radius: var(--radius-md);
+  font-size: var(--text-sm);
+}
+
+.error-message {
+  background: var(--danger-bg);
+  border: 1px solid var(--danger-border);
+  color: var(--danger);
+}
+
+.success-message {
+  background: var(--success-bg);
+  border: 1px solid var(--success-border);
+  color: var(--success);
 }
 
 .loading-state,

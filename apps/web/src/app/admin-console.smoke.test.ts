@@ -20,6 +20,44 @@ describe("admin console", () => {
         default_template_id: 2,
         mcp_ready_count: 1,
       }),
+      getRuntimeState: async () => ({
+        thread_pool: {
+          snapshot: {
+            max_threads: 8,
+            active_threads: 0,
+            queued_threads: 0,
+            running_threads: 0,
+            cooling_threads: 0,
+            evicted_threads: 0,
+            estimated_memory_bytes: 0,
+            peak_estimated_memory_bytes: 0,
+            process_memory_bytes: null,
+            peak_process_memory_bytes: null,
+            resident_thread_count: 0,
+            avg_thread_memory_bytes: 0,
+            captured_at: "2026-04-23T12:00:00Z",
+          },
+          runtimes: [],
+        },
+        job_runtime: {
+          snapshot: {
+            max_threads: 8,
+            active_threads: 0,
+            queued_threads: 0,
+            running_threads: 0,
+            cooling_threads: 0,
+            evicted_threads: 0,
+            estimated_memory_bytes: 0,
+            peak_estimated_memory_bytes: 0,
+            process_memory_bytes: null,
+            peak_process_memory_bytes: null,
+            resident_thread_count: 0,
+            avg_thread_memory_bytes: 0,
+            captured_at: "2026-04-23T12:00:00Z",
+          },
+          runtimes: [],
+        },
+      }),
       getSettings: async () => ({
         instance_name: "Workspace Admin",
         default_provider_id: 1,
@@ -51,6 +89,7 @@ describe("admin console", () => {
     await flushPromises();
     expect(wrapper.text()).toContain("概览");
     expect(wrapper.text()).toContain("健康检查");
+    expect(wrapper.text()).toContain("运行状态");
     expect(wrapper.text()).toContain("模型提供方");
     expect(wrapper.text()).toContain("智能体模板");
     expect(wrapper.text()).toContain("MCP 服务");

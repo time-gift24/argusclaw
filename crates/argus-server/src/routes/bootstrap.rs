@@ -19,13 +19,13 @@ pub struct BootstrapResponse {
 pub async fn get_bootstrap(
     State(state): State<AppState>,
 ) -> Result<Json<BootstrapResponse>, ApiError> {
-    let providers = state.wing().list_providers().await?;
-    let templates = state.wing().list_templates().await?;
-    let mcp_servers = state.wing().list_mcp_servers().await?;
-    let settings = state.wing().admin_settings().await;
-    let default_provider = state.wing().get_default_provider_record().await?;
+    let providers = state.core().list_providers().await?;
+    let templates = state.core().list_templates().await?;
+    let mcp_servers = state.core().list_mcp_servers().await?;
+    let settings = state.core().admin_settings().await;
+    let default_provider = state.core().get_default_provider_record().await?;
     let default_template_id = state
-        .wing()
+        .core()
         .get_default_template()
         .await?
         .map(|template| template.id.inner());

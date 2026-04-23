@@ -1,6 +1,7 @@
 //! Repository traits for data access abstraction.
 
 mod account;
+mod admin_settings;
 mod agent;
 mod job;
 mod mcp;
@@ -8,6 +9,7 @@ mod session;
 mod thread;
 
 pub use account::AccountRepository;
+pub use admin_settings::AdminSettingsRepository;
 pub use agent::AgentRepository;
 pub use job::JobRepository;
 pub use mcp::McpRepository;

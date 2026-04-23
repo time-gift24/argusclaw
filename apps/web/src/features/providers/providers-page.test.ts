@@ -13,6 +13,7 @@ import {
   type HealthResponse,
   type LlmProviderRecord,
   type McpServerRecord,
+  type ProviderTestResult,
   type SettingsResponse,
   type UpdateSettingsRequest,
 } from "@/lib/api";
@@ -47,6 +48,44 @@ function makeApiClient(overrides: Partial<ApiClient>): ApiClient {
       default_template_id: null,
       mcp_ready_count: 0,
     }),
+    getRuntimeState: vi.fn<() => Promise<import("@/lib/api").RuntimeStateResponse>>().mockResolvedValue({
+      thread_pool: {
+        snapshot: {
+          max_threads: 8,
+          active_threads: 0,
+          queued_threads: 0,
+          running_threads: 0,
+          cooling_threads: 0,
+          evicted_threads: 0,
+          estimated_memory_bytes: 0,
+          peak_estimated_memory_bytes: 0,
+          process_memory_bytes: null,
+          peak_process_memory_bytes: null,
+          resident_thread_count: 0,
+          avg_thread_memory_bytes: 0,
+          captured_at: "2026-04-23T12:00:00Z",
+        },
+        runtimes: [],
+      },
+      job_runtime: {
+        snapshot: {
+          max_threads: 8,
+          active_threads: 0,
+          queued_threads: 0,
+          running_threads: 0,
+          cooling_threads: 0,
+          evicted_threads: 0,
+          estimated_memory_bytes: 0,
+          peak_estimated_memory_bytes: 0,
+          process_memory_bytes: null,
+          peak_process_memory_bytes: null,
+          resident_thread_count: 0,
+          avg_thread_memory_bytes: 0,
+          captured_at: "2026-04-23T12:00:00Z",
+        },
+        runtimes: [],
+      },
+    }),
     getSettings: vi.fn<() => Promise<SettingsResponse>>().mockResolvedValue({
       instance_name: "Argus",
       default_provider_id: 1,
@@ -63,6 +102,27 @@ function makeApiClient(overrides: Partial<ApiClient>): ApiClient {
     saveProvider: vi.fn<(input: LlmProviderRecord) => Promise<LlmProviderRecord>>().mockImplementation(
       async (input) => input,
     ),
+    deleteProvider: vi.fn<(providerId: number) => Promise<{ deleted: boolean }>>().mockResolvedValue({
+      deleted: true,
+    }),
+    testProvider: vi.fn<(providerId: number, model?: string) => Promise<ProviderTestResult>>().mockResolvedValue({
+      provider_id: "1",
+      model: "gpt-4.1",
+      base_url: "https://api.openai.com/v1",
+      checked_at: "2026-04-23T12:00:00Z",
+      latency_ms: 10,
+      status: "success",
+      message: "连接成功",
+    }),
+    testProviderDraft: vi.fn<(input: LlmProviderRecord) => Promise<ProviderTestResult>>().mockResolvedValue({
+      provider_id: "0",
+      model: "gpt-4.1",
+      base_url: "https://api.openai.com/v1",
+      checked_at: "2026-04-23T12:00:00Z",
+      latency_ms: 10,
+      status: "success",
+      message: "连接成功",
+    }),
     listTemplates: vi.fn<() => Promise<AgentRecord[]>>().mockResolvedValue([]),
     saveTemplate: vi.fn<(input: AgentRecord) => Promise<AgentRecord>>().mockImplementation(
       async (input) => input,
@@ -187,5 +247,58 @@ describe("ProvidersPage", () => {
       base_url: "https://mirror.example.com/v1",
     });
     expect(wrapper.text()).toContain("OpenAI Mirror");
+  });
+
+  it("tests and deletes a provider with visible feedback", async () => {
+    const listProviders = vi
+      .fn<() => Promise<LlmProviderRecord[]>>()
+      .mockResolvedValueOnce([makeProvider({ id: 3, display_name: "Disposable Provider", is_default: false })])
+      .mockResolvedValueOnce([]);
+    const testProvider = vi.fn<(providerId: number, model?: string) => Promise<ProviderTestResult>>().mockResolvedValue({
+      provider_id: "3",
+      model: "gpt-4.1",
+      base_url: "https://api.openai.com/v1",
+      checked_at: "2026-04-23T12:00:00Z",
+      latency_ms: 5,
+      status: "request_failed",
+      message: "connection refused",
+    });
+    const deleteProvider = vi.fn<(providerId: number) => Promise<{ deleted: boolean }>>().mockResolvedValue({
+      deleted: true,
+    });
+
+    setApiClient(
+      makeApiClient({
+        listProviders,
+        testProvider,
+        deleteProvider,
+      }),
+    );
+
+    const wrapper = mount(ProvidersPage);
+    await flushPromises();
+
+    await wrapper.get('[data-testid="test-provider-3"]').trigger("click");
+    await flushPromises();
+    expect(testProvider).toHaveBeenCalledWith(3, "gpt-4.1");
+    expect(wrapper.text()).toContain("connection refused");
+
+    await wrapper.get('[data-testid="delete-provider-3"]').trigger("click");
+    await flushPromises();
+    expect(deleteProvider).toHaveBeenCalledWith(3);
+    expect(wrapper.text()).toContain("暂无已配置的提供方");
+  });
+
+  it("shows load errors instead of leaving the page silent", async () => {
+    setApiClient(
+      makeApiClient({
+        listProviders: vi.fn<() => Promise<LlmProviderRecord[]>>().mockRejectedValue(new Error("server offline")),
+      }),
+    );
+
+    const wrapper = mount(ProvidersPage);
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("server offline");
   });
 });

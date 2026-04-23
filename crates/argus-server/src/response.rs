@@ -11,3 +11,8 @@ impl<T> MutationResponse<T> {
         Self { item }
     }
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeleteResponse {
+    pub deleted: bool,
+}

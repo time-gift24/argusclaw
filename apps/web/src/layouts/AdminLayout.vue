@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, ref, onMounted } from "vue";
 import { RouterLink, RouterView, useRoute } from "vue-router";
 
 import { adminNavItems } from "@/app/nav";
@@ -8,6 +8,34 @@ const route = useRoute();
 const currentItem = computed(() => {
   return adminNavItems.find((item) => item.to === route.path) ?? adminNavItems[0];
 });
+
+const isDark = ref(false);
+
+onMounted(() => {
+  const saved = localStorage.getItem("theme");
+  if (saved === "dark") {
+    isDark.value = true;
+    document.documentElement.classList.add("theme-dark");
+    document.documentElement.classList.remove("theme-light");
+  } else {
+    isDark.value = false;
+    document.documentElement.classList.add("theme-light");
+    document.documentElement.classList.remove("theme-dark");
+  }
+});
+
+function toggleTheme() {
+  isDark.value = !isDark.value;
+  if (isDark.value) {
+    document.documentElement.classList.add("theme-dark");
+    document.documentElement.classList.remove("theme-light");
+    localStorage.setItem("theme", "dark");
+  } else {
+    document.documentElement.classList.add("theme-light");
+    document.documentElement.classList.remove("theme-dark");
+    localStorage.setItem("theme", "light");
+  }
+}
 </script>
 
 <template>
@@ -22,7 +50,7 @@ const currentItem = computed(() => {
             </svg>
           </div>
           <div class="brand-text">
-            <h1>ArgusClaw</h1>
+            <h1>ArgusWing</h1>
             <span class="brand-tag">管理控制台</span>
           </div>
         </div>
@@ -46,6 +74,25 @@ const currentItem = computed(() => {
         </div>
 
         <div class="sidebar-footer">
+          <button class="theme-toggle" @click="toggleTheme" :title="isDark ? '切换到浅色模式' : '切换到深色模式'">
+            <!-- Sun icon (shown in dark mode to switch to light) -->
+            <svg v-if="isDark" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="5"/>
+              <line x1="12" y1="1" x2="12" y2="3"/>
+              <line x1="12" y1="21" x2="12" y2="23"/>
+              <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/>
+              <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/>
+              <line x1="1" y1="12" x2="3" y2="12"/>
+              <line x1="21" y1="12" x2="23" y2="12"/>
+              <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/>
+              <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
+            </svg>
+            <!-- Moon icon (shown in light mode to switch to dark) -->
+            <svg v-else width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+            </svg>
+            <span>{{ isDark ? '浅色模式' : '深色模式' }}</span>
+          </button>
           <div class="instance-badge">
             <span class="instance-dot"></span>
             <span>单实例模式</span>
@@ -179,6 +226,8 @@ const currentItem = computed(() => {
   background: var(--accent-subtle);
   color: var(--accent);
   font-weight: 590;
+  border-left: 3px solid var(--accent);
+  padding-left: calc(var(--space-3) - 3px);
 }
 
 .nav-item:active {
@@ -190,6 +239,9 @@ const currentItem = computed(() => {
 }
 
 .sidebar-footer {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
   padding-top: var(--space-4);
   border-top: 1px solid var(--border-subtle);
 }
@@ -214,11 +266,37 @@ const currentItem = computed(() => {
   border-radius: 50%;
 }
 
+.theme-toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  padding: var(--space-2) var(--space-3);
+  background: transparent;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  font-weight: 510;
+  cursor: pointer;
+  transition: all var(--transition-base);
+}
+
+.theme-toggle:hover {
+  background: var(--accent-subtle);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
 .route-shell {
   display: flex;
   flex-direction: column;
   gap: var(--space-5);
   padding: var(--space-6);
+  width: 100%;
+}
+
+.route-shell > :not(.route-header) {
   max-width: 1200px;
 }
 

@@ -41,9 +41,11 @@ pnpm tauri dev
 | `crates/argus-session` | session 聚合、thread 恢复、scheduler backend |
 | `crates/argus-template` | agent 模板管理与 builtin agents seed |
 | `crates/argus-mcp` | MCP server runtime、supervision、tool adapter |
-| `crates/argus-wing` | 面向应用层的 facade，组合所有子系统 |
+| `crates/argus-wing` | desktop 侧应用 facade，组合桌面端所需子系统 |
+| `crates/argus-server` | axum 管理面服务，私有装配 server 运行内核 |
 | `crates/argus-test-support` | 测试辅助 provider 与 harness |
 | `crates/desktop` | 桌面端 UI 与前端测试 |
+| `apps/web` | Vue 3 + OpenTiny Vue 独立管理台 |
 
 ## 文档约定
 

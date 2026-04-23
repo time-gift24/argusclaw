@@ -50,16 +50,21 @@
 
 因此首阶段最应该拆的，不是 chat store 本身，而是：
 
-- `ArgusWing` 到 `axum` 的管理面 transport
+- server 私有 `ServerCore` 到 `axum` 的管理面 transport
 - 一套面向管理场景重新组织过的 web 前端
 
 ## 设计决策
 
 ### 1. 保留 Rust workspace 作为唯一业务核心
 
-现有 `argus-session`、`argus-agent`、`argus-job`、`argus-tool`、`argus-mcp`、`argus-wing` 继续作为唯一业务核心，不为 web 再造第二套实现。
+现有 `argus-session`、`argus-agent`、`argus-job`、`argus-tool`、`argus-mcp` 等 lower crate 继续作为唯一业务核心，不为 web 再造第二套实现。
 
-`argus-wing` 仍是应用 facade，也是 server transport 的唯一稳定入口。新增 `argus-server` 时，不应绕过 facade 直接拼接 repository 或 manager。
+Phase 3A 起，旧的 “server 只通过 `ArgusWing`” 规则废止：
+
+- `argus-wing` 继续作为 desktop 侧应用入口
+- `argus-server` 成为与 `argus-wing` 平等的应用入口
+- `argus-server` 在 crate 内通过私有 `ServerCore` 装配 provider、template、MCP、session、job、thread-pool、tool、auth 等组件
+- route handler 不直接拼下层 manager / repository，只调用 `ServerCore` 暴露的窄方法
 
 ### 2. 新增 `crates/argus-server`，但首阶段只暴露管理面
 
@@ -67,7 +72,7 @@
 
 它在首阶段的职责是：
 
-- 启动 `ArgusWing`
+- 启动私有 `ServerCore`
 - 暴露实例级管理 API
 - 承担序列化、错误映射、配置装配
 
@@ -252,14 +257,28 @@ desktop 在这轮里继续按原有方式工作：
 - `SSE`
 - 更细的 health / runtime 观测
 
-### Phase 3：更深的产品收敛
+Phase 2 已拆成两批推进，避免重新把范围做大：
+
+- Phase 2A：先交付 runtime snapshot REST API 与 web monitor 页面，使用轮询读取 server core 暴露的 thread pool / job runtime 状态
+- Phase 2B：在 monitor 页面验证真实需求后，引入 `SSE` 事件流；首批先流式推送 runtime snapshot，并保留轮询降级，更细的 runtime 时间线后置
+
+### Phase 3A：server 独立装配内核
+
+本阶段已经从 “更深的产品收敛” 中切出一个更小的基础设施步骤：
+
+- `argus-server` 移除 `argus-wing` 依赖
+- server 内新增私有 `ServerCore` / `ServerState` 装配层
+- 默认数据库仍按 `DATABASE_URL` 优先，否则 `~/.arguswing/sqlite.db`
+- trace 路径仍按 `TRACE_DIR` 优先，否则 `~/.arguswing/traces`
+- HTTP / SSE 管理契约保持 wire-compatible
+- 不新增 chat / thread / message API，不改 desktop
 
 后续再评估：
 
 - `chat` 服务化
 - `packages/app-core`
-- desktop 连接远端 server
-- desktop 本地能力节点模型
+- `argus-wing` 装配是否进一步收敛到 desktop 侧
+- desktop 是否需要连接远端 server
 
 ## 测试策略
 
@@ -293,8 +312,8 @@ desktop 在这轮里继续按原有方式工作：
 
 主要风险有三类：
 
-1. `ArgusWing` 当前管理面 API 不够顺手
-   处理方式是补 facade 方法，而不是让 `argus-server` 绕过 facade 直接拼底层。
+1. server 与 desktop 的装配边界可能重新耦合
+   处理方式是让 `argus-server` 只在私有 `ServerCore` 中装配 lower crates，route handler 仍保持窄接口；`argus-wing` 不在本阶段改动。
 
 2. web 管理台信息架构如果继续沿用 desktop 习惯，会把旧心智模型带过去
    处理方式是明确按管理台重新组织导航和页面，不以 desktop 现有布局为模板。

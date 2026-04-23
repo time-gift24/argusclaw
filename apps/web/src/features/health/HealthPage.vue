@@ -7,14 +7,23 @@ import { TinyTag } from "@/lib/opentiny";
 const api = getApiClient();
 const healthStatus = ref<"loading" | "healthy" | "unhealthy">("loading");
 const bootstrap = ref<BootstrapResponse | null>(null);
+const error = ref("");
 
 onMounted(async () => {
-  const [health, bootstrapData] = await Promise.all([
-    api.getHealth(),
-    api.getBootstrap(),
-  ]);
-  healthStatus.value = health.status === "ok" ? "healthy" : "unhealthy";
-  bootstrap.value = bootstrapData;
+  try {
+    const [health, bootstrapData] = await Promise.all([
+      api.getHealth(),
+      api.getBootstrap(),
+    ]);
+    healthStatus.value = health.status === "ok" ? "healthy" : "unhealthy";
+    bootstrap.value = bootstrapData;
+    if (health.status !== "ok") {
+      error.value = `服务状态异常：${health.status}`;
+    }
+  } catch (reason) {
+    healthStatus.value = "unhealthy";
+    error.value = reason instanceof Error ? reason.message : "健康检查失败。";
+  }
 });
 </script>
 
@@ -46,6 +55,13 @@ onMounted(async () => {
     </div>
 
     <div
+      v-if="error"
+      class="error-message"
+    >
+      {{ error }}
+    </div>
+
+    <div
       v-if="bootstrap"
       class="metrics-grid"
     >
@@ -61,6 +77,13 @@ onMounted(async () => {
         <span class="metric-label">MCP 就绪</span>
         <strong class="metric-value">{{ bootstrap.mcp_ready_count }}</strong>
       </article>
+    </div>
+
+    <div
+      v-else
+      class="empty-state"
+    >
+      暂无数据
     </div>
   </section>
 </template>
@@ -159,5 +182,26 @@ onMounted(async () => {
   .metrics-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+}
+
+.empty-state {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-10) var(--space-4);
+  background: var(--surface-base);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+}
+
+.error-message {
+  padding: var(--space-3);
+  background: var(--danger-bg);
+  border: 1px solid var(--danger-border);
+  border-radius: var(--radius-md);
+  color: var(--danger);
+  font-size: var(--text-sm);
 }
 </style>

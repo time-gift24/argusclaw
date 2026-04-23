@@ -11,18 +11,30 @@ const form = reactive<UpdateSettingsRequest>({
 });
 const savedProviderName = ref("");
 const saving = ref(false);
+const loading = ref(true);
+const error = ref("");
 const saveSuccess = ref(false);
 
-onMounted(async () => {
-  const settings = await api.getSettings();
-  form.instance_name = settings.instance_name;
-  form.default_provider_id = settings.default_provider_id;
-  savedProviderName.value = settings.default_provider_name ?? "未设置";
-});
+async function loadSettings() {
+  loading.value = true;
+  error.value = "";
+
+  try {
+    const settings = await api.getSettings();
+    form.instance_name = settings.instance_name;
+    form.default_provider_id = settings.default_provider_id;
+    savedProviderName.value = settings.default_provider_name ?? "未设置";
+  } catch (reason) {
+    error.value = reason instanceof Error ? reason.message : "加载设置失败。";
+  } finally {
+    loading.value = false;
+  }
+}
 
 async function saveSettings() {
   saving.value = true;
   saveSuccess.value = false;
+  error.value = "";
 
   try {
     const saved = await api.updateSettings({ ...form });
@@ -31,10 +43,16 @@ async function saveSettings() {
     setTimeout(() => {
       saveSuccess.value = false;
     }, 3000);
+  } catch (reason) {
+    error.value = reason instanceof Error ? reason.message : "保存设置失败。";
   } finally {
     saving.value = false;
   }
 }
+
+onMounted(() => {
+  void loadSettings();
+});
 </script>
 
 <template>
@@ -45,7 +63,7 @@ async function saveSettings() {
         <TinyTag
           :type="saveSuccess ? 'success' : 'info'"
         >
-          {{ saveSuccess ? "已保存" : saving ? "保存中" : "就绪" }}
+          {{ saveSuccess ? "已保存" : saving ? "保存中" : loading ? "加载中" : "就绪" }}
         </TinyTag>
       </div>
 
@@ -77,10 +95,17 @@ async function saveSettings() {
         </TinyFormItem>
       </TinyForm>
 
+      <p
+        v-if="error"
+        class="error-message"
+      >
+        {{ error }}
+      </p>
+
       <div class="card-actions">
         <TinyButton
           type="primary"
-          :disabled="saving"
+          :disabled="saving || loading"
           @click="saveSettings"
         >
           {{ saving ? "保存中…" : "保存设置" }}
@@ -160,6 +185,16 @@ async function saveSettings() {
   justify-content: flex-end;
   padding-top: var(--space-4);
   border-top: 1px solid var(--border-subtle);
+}
+
+.error-message {
+  margin: 0;
+  padding: var(--space-3);
+  background: var(--danger-bg);
+  border: 1px solid var(--danger-border);
+  border-radius: var(--radius-md);
+  color: var(--danger);
+  font-size: var(--text-sm);
 }
 
 @media (max-width: 960px) {

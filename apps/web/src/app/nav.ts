@@ -19,6 +19,12 @@ export const adminNavItems: AdminNavItem[] = [
     to: "/health",
   },
   {
+    key: "runtime",
+    label: "运行状态",
+    description: "线程池与后台 job runtime 的负载快照",
+    to: "/runtime",
+  },
+  {
     key: "providers",
     label: "模型提供方",
     description: "模型接入凭证与默认项管理",

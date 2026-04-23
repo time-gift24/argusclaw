@@ -2,20 +2,32 @@
 import { onMounted, ref } from "vue";
 
 import { getApiClient, type BootstrapResponse } from "@/lib/api";
-import { TinyTag } from "@/lib/opentiny";
+import { TinyLoading, TinyTag } from "@/lib/opentiny";
 
 const api = getApiClient();
 const bootstrap = ref<BootstrapResponse | null>(null);
+const loading = ref(true);
 
 onMounted(async () => {
-  bootstrap.value = await api.getBootstrap();
+  try {
+    bootstrap.value = await api.getBootstrap();
+  } finally {
+    loading.value = false;
+  }
 });
 </script>
 
 <template>
   <section class="page-section">
     <div
-      v-if="bootstrap"
+      v-if="loading"
+      class="loading-state"
+    >
+      <TinyLoading :show="true">加载中...</TinyLoading>
+    </div>
+
+    <div
+      v-else-if="bootstrap"
       class="metrics-grid"
     >
       <article class="metric-card">
@@ -42,6 +54,13 @@ onMounted(async () => {
         <span class="metric-label">默认提供方</span>
         <strong class="metric-value">{{ bootstrap.default_provider_id ?? "未设置" }}</strong>
       </article>
+    </div>
+
+    <div
+      v-else
+      class="empty-state"
+    >
+      暂无数据
     </div>
   </section>
 </template>
@@ -88,5 +107,18 @@ onMounted(async () => {
   .metrics-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+}
+
+.loading-state,
+.empty-state {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-10) var(--space-4);
+  background: var(--surface-base);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  color: var(--text-muted);
+  font-size: var(--text-sm);
 }
 </style>

@@ -29,6 +29,9 @@ const providers = ref<LlmProviderRecord[]>([]);
 const saving = ref(false);
 const loading = ref(true);
 const error = ref("");
+const actionMessage = ref("");
+const testingProviderId = ref<number | null>(null);
+const deletingProviderId = ref<number | null>(null);
 const draft = ref<LlmProviderRecord>(createDraft());
 
 const submitLabel = computed(() => {
@@ -41,9 +44,12 @@ const submitLabel = computed(() => {
 
 async function loadProviders() {
   loading.value = true;
+  error.value = "";
 
   try {
     providers.value = await api.listProviders();
+  } catch (reason) {
+    error.value = reason instanceof Error ? reason.message : "加载提供方失败。";
   } finally {
     loading.value = false;
   }
@@ -64,15 +70,81 @@ function editProvider(provider: LlmProviderRecord) {
 async function saveProvider() {
   saving.value = true;
   error.value = "";
+  actionMessage.value = "";
 
   try {
     await api.saveProvider(draft.value);
+    actionMessage.value = draft.value.id > 0 ? "提供方已更新。" : "提供方已创建。";
     resetDraft();
     await loadProviders();
   } catch (reason) {
     error.value = reason instanceof Error ? reason.message : "保存提供方失败。";
   } finally {
     saving.value = false;
+  }
+}
+
+async function testProvider(provider: LlmProviderRecord) {
+  if (!api.testProvider) {
+    error.value = "当前 API 客户端不支持提供方连接测试。";
+    return;
+  }
+
+  testingProviderId.value = provider.id;
+  error.value = "";
+  actionMessage.value = "";
+
+  try {
+    const result = await api.testProvider(provider.id, provider.default_model);
+    actionMessage.value = `连接测试：${result.message}`;
+  } catch (reason) {
+    error.value = reason instanceof Error ? reason.message : "连接测试失败。";
+  } finally {
+    testingProviderId.value = null;
+  }
+}
+
+async function testDraftProvider() {
+  if (!api.testProviderDraft) {
+    error.value = "当前 API 客户端不支持临时配置连接测试。";
+    return;
+  }
+
+  testingProviderId.value = 0;
+  error.value = "";
+  actionMessage.value = "";
+
+  try {
+    const result = await api.testProviderDraft(draft.value);
+    actionMessage.value = `当前配置测试：${result.message}`;
+  } catch (reason) {
+    error.value = reason instanceof Error ? reason.message : "当前配置测试失败。";
+  } finally {
+    testingProviderId.value = null;
+  }
+}
+
+async function deleteProvider(provider: LlmProviderRecord) {
+  if (!api.deleteProvider) {
+    error.value = "当前 API 客户端不支持删除提供方。";
+    return;
+  }
+
+  deletingProviderId.value = provider.id;
+  error.value = "";
+  actionMessage.value = "";
+
+  try {
+    await api.deleteProvider(provider.id);
+    actionMessage.value = "提供方已删除。";
+    if (draft.value.id === provider.id) {
+      resetDraft();
+    }
+    await loadProviders();
+  } catch (reason) {
+    error.value = reason instanceof Error ? reason.message : "删除提供方失败。";
+  } finally {
+    deletingProviderId.value = null;
   }
 }
 
@@ -101,6 +173,20 @@ onMounted(() => {
           </TinyTag>
         </div>
       </div>
+
+      <p
+        v-if="error"
+        class="error-message"
+      >
+        {{ error }}
+      </p>
+
+      <p
+        v-if="actionMessage"
+        class="success-message"
+      >
+        {{ actionMessage }}
+      </p>
 
       <div
         v-if="providers.length === 0 && !loading"
@@ -131,13 +217,31 @@ onMounted(() => {
             <span class="provider-url">{{ provider.base_url }}</span>
             <span class="provider-model">默认模型：{{ provider.default_model }}</span>
           </div>
-          <TinyButton
-            :data-testid="`edit-provider-${provider.id}`"
-            type="default"
-            @click="editProvider(provider)"
-          >
-            编辑
-          </TinyButton>
+          <div class="provider-actions">
+            <TinyButton
+              :data-testid="`test-provider-${provider.id}`"
+              type="default"
+              :disabled="testingProviderId === provider.id"
+              @click="testProvider(provider)"
+            >
+              {{ testingProviderId === provider.id ? "测试中" : "测试连接" }}
+            </TinyButton>
+            <TinyButton
+              :data-testid="`edit-provider-${provider.id}`"
+              type="default"
+              @click="editProvider(provider)"
+            >
+              编辑
+            </TinyButton>
+            <TinyButton
+              :data-testid="`delete-provider-${provider.id}`"
+              type="default"
+              :disabled="deletingProviderId === provider.id"
+              @click="deleteProvider(provider)"
+            >
+              {{ deletingProviderId === provider.id ? "删除中" : "删除" }}
+            </TinyButton>
+          </div>
         </div>
       </div>
     </article>
@@ -154,6 +258,17 @@ onMounted(() => {
         @cancel="resetDraft"
         @submit="saveProvider"
       />
+
+      <div class="form-extra-actions">
+        <TinyButton
+          data-testid="test-provider-draft"
+          type="default"
+          :disabled="testingProviderId === 0"
+          @click="testDraftProvider"
+        >
+          {{ testingProviderId === 0 ? "测试中" : "测试当前配置" }}
+        </TinyButton>
+      </div>
 
       <p
         v-if="error"
@@ -257,6 +372,14 @@ onMounted(() => {
   min-width: 0;
 }
 
+.provider-actions,
+.form-extra-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
 .provider-header {
   display: flex;
   align-items: center;
@@ -296,6 +419,16 @@ onMounted(() => {
   border: 1px solid var(--danger-border);
   border-radius: var(--radius-md);
   color: var(--danger);
+  font-size: var(--text-sm);
+}
+
+.success-message {
+  margin: 0;
+  padding: var(--space-3);
+  background: var(--success-bg);
+  border: 1px solid var(--success-border);
+  border-radius: var(--radius-md);
+  color: var(--success);
   font-size: var(--text-sm);
 }
 
