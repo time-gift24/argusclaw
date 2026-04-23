@@ -619,3 +619,20 @@ GET /api/v1/mcp/servers/{server_id}/tools
 - Each MCP server card shows transport target, timeout, last check, last success, and last error diagnostics
 - Existing discovered-tools API renders tool names, descriptions, and schema previews
 - Refresh, test, tools, and delete actions keep the existing REST contract unchanged
+
+### Phase 4B: Complete MCP operations configuration loop
+
+**Intent:** Complete MCP write-side administration in the standalone web console while keeping the existing Phase 3B REST contract unchanged.
+
+**Expected UI shape:**
+
+- MCP page exposes a list-below form for creating and editing MCP services
+- The form supports `stdio`, `HTTP`, and `SSE` transport-specific fields
+- Operators can test the current draft configuration before saving
+- Editing an existing server pre-fills transport details, timeout, and enabled state
+- Save, test, reset/cancel, error, and success feedback follow `apps/web/DESIGN.md`
+
+**Expected validation:**
+
+- `cd apps/web && pnpm exec vitest run`
+- `cd apps/web && pnpm build`

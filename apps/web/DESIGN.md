@@ -1,7 +1,7 @@
 # ArgusWing 管理控制台设计系统
 
 **日期：** 2026-04-23
-**版本：** Phase 3C
+**版本：** Phase 4B
 
 ## 1. 设计原则
 
@@ -242,8 +242,10 @@ Inter Variable, "Noto Sans SC", "PingFang SC", system-ui, sans-serif
 - 顶部运维摘要：总服务、就绪服务、需关注、已发现工具
 - 服务器列表卡片：名称、启用状态标签、传输目标、工具数量
 - 诊断信息：超时、最近检查、最近成功、最近错误
-- 操作：刷新、查看工具、测试连接、删除
+- 操作：刷新、查看工具、测试连接、编辑、删除
 - 展开视图：工具名称、描述与 Schema 预览
+- 表单：列表下方创建/编辑 MCP 服务，支持 `stdio` / `HTTP` / `SSE` 传输配置
+- 表单操作：保存、重置/取消编辑、测试当前配置，反馈成功与错误状态
 
 ### 系统设置（/settings）
 - 单卡片布局
@@ -261,6 +263,7 @@ Inter Variable, "Noto Sans SC", "PingFang SC", system-ui, sans-serif
 - `PATCH /api/v1/providers/:id` - 更新提供方
 - `DELETE /api/v1/providers/:id` - 删除提供方
 - `POST /api/v1/providers/:id/test` - 测试提供方连接
+- `POST /api/v1/providers/test` - 测试提供方草稿配置
 - `GET /api/v1/agents/templates` - 模板列表
 - `POST /api/v1/agents/templates` - 创建模板
 - `PATCH /api/v1/agents/templates/:id` - 更新模板
@@ -270,6 +273,7 @@ Inter Variable, "Noto Sans SC", "PingFang SC", system-ui, sans-serif
 - `PATCH /api/v1/mcp/servers/:id` - 更新 MCP 服务器
 - `DELETE /api/v1/mcp/servers/:id` - 删除 MCP 服务器
 - `POST /api/v1/mcp/servers/:id/test` - 测试 MCP 服务器
+- `POST /api/v1/mcp/servers/test` - 测试 MCP 服务器草稿配置
 - `GET /api/v1/mcp/servers/:id/tools` - MCP 服务器工具列表
 - `GET /api/v1/settings` - 获取设置
 - `PUT /api/v1/settings` - 更新设置
