@@ -22,6 +22,7 @@
 //! ```
 
 mod db;
+mod one_shot;
 mod resolver;
 
 use std::future::Future;
@@ -53,6 +54,7 @@ use argus_tool::ToolManager;
 use sqlx::SqlitePool;
 use tokio::sync::broadcast;
 
+pub use one_shot::{OneShotAgentSelector, OneShotRunRequest, OneShotRunResult};
 pub use resolver::ProviderManagerResolver;
 
 /// Default agent display name for the ArgusWing template.
