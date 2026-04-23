@@ -83,27 +83,6 @@ onMounted(() => {
 
 <template>
   <section class="page-grid">
-    <article class="form-panel">
-      <div class="panel-header">
-        <h3 class="panel-title">新增提供方</h3>
-        <p class="panel-description">填写下方信息以添加新的模型提供方</p>
-      </div>
-
-      <ProviderForm
-        v-model="draft"
-        :submit-label="submitLabel"
-        @cancel="resetDraft"
-        @submit="saveProvider"
-      />
-
-      <p
-        v-if="error"
-        class="error-message"
-      >
-        {{ error }}
-      </p>
-    </article>
-
     <article class="list-panel">
       <div class="panel-header">
         <div class="panel-header-left">
@@ -162,13 +141,34 @@ onMounted(() => {
         </div>
       </div>
     </article>
+
+    <article class="form-panel">
+      <div class="panel-header">
+        <h3 class="panel-title">新增提供方</h3>
+        <p class="panel-description">填写下方信息以添加新的模型提供方</p>
+      </div>
+
+      <ProviderForm
+        v-model="draft"
+        :submit-label="submitLabel"
+        @cancel="resetDraft"
+        @submit="saveProvider"
+      />
+
+      <p
+        v-if="error"
+        class="error-message"
+      >
+        {{ error }}
+      </p>
+    </article>
   </section>
 </template>
 
 <style scoped>
 .page-grid {
   display: grid;
-  grid-template-columns: minmax(0, 400px) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr) minmax(0, 400px);
   gap: var(--space-5);
   align-items: start;
 }
@@ -289,7 +289,7 @@ onMounted(() => {
   font-size: var(--text-sm);
 }
 
-@media (max-width: 960px) {
+@media (max-width: 1024px) {
   .page-grid {
     grid-template-columns: 1fr;
   }
