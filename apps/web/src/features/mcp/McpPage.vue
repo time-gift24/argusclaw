@@ -696,6 +696,7 @@ onMounted(() => {
 
       <div
         class="creation-tabs"
+        :class="`creation-tabs--${creationMode}`"
         role="tablist"
         aria-label="MCP 创建方式"
       >
@@ -703,7 +704,7 @@ onMounted(() => {
           data-testid="mcp-create-tab-manual"
           role="tab"
           :aria-selected="creationMode === 'manual'"
-          :type="creationMode === 'manual' ? 'primary' : 'default'"
+          type="default"
           @click="creationMode = 'manual'"
         >
           手动配置
@@ -712,18 +713,23 @@ onMounted(() => {
           data-testid="mcp-create-tab-json"
           role="tab"
           :aria-selected="creationMode === 'json'"
-          :type="creationMode === 'json' ? 'primary' : 'default'"
+          type="default"
           @click="creationMode = 'json'"
         >
           JSON 导入
         </TinyButton>
       </div>
 
-      <div
-        v-show="creationMode === 'manual'"
-        class="creation-tab-panel"
-        role="tabpanel"
+      <Transition
+        name="creation-panel"
+        mode="out-in"
       >
+        <div
+          v-if="creationMode === 'manual'"
+          key="manual"
+          class="creation-tab-panel"
+          role="tabpanel"
+        >
           <form
             data-testid="mcp-form"
             class="mcp-form"
@@ -873,38 +879,40 @@ onMounted(() => {
               </TinyButton>
             </div>
           </form>
-      </div>
+        </div>
 
-      <div
-        v-show="creationMode === 'json'"
-        class="creation-tab-panel import-tab-content"
-        role="tabpanel"
-      >
-            <p class="panel-description">
-              支持 Claude / MCP 常见配置片段，例如 { "brave-search": { "command": "npx", "args": ["-y", "..."], "env": { "KEY": "xxx" } } }。
-            </p>
+        <div
+          v-else
+          key="json"
+          class="creation-tab-panel import-tab-content"
+          role="tabpanel"
+        >
+          <p class="panel-description">
+            支持 Claude / MCP 常见配置片段，例如 { "brave-search": { "command": "npx", "args": ["-y", "..."], "env": { "KEY": "xxx" } } }。
+          </p>
 
-            <TinyInput
-              :model-value="importJsonText"
-              name="mcp-import-json"
-              type="textarea"
-              :rows="8"
-              placeholder='{ "brave-search": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-brave-search"], "env": { "BRAVE_API_KEY": "xxx" } } }'
-              @update:model-value="importJsonText = String($event)"
-            />
+          <TinyInput
+            :model-value="importJsonText"
+            name="mcp-import-json"
+            type="textarea"
+            :rows="8"
+            placeholder='{ "brave-search": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-brave-search"], "env": { "BRAVE_API_KEY": "xxx" } } }'
+            @update:model-value="importJsonText = String($event)"
+          />
 
-            <div class="import-actions">
-              <TinyButton
-                data-testid="import-mcp-json"
-                type="primary"
-                :disabled="importingConfig"
-                @click="importMcpJson"
-              >
-                {{ importingConfig ? "导入中" : "导入配置" }}
-              </TinyButton>
-              <span class="import-hint">导入后会保存为 stdio MCP 服务，并使用默认 5000ms 超时。</span>
-            </div>
-      </div>
+          <div class="import-actions">
+            <TinyButton
+              data-testid="import-mcp-json"
+              type="primary"
+              :disabled="importingConfig"
+              @click="importMcpJson"
+            >
+              {{ importingConfig ? "导入中" : "导入配置" }}
+            </TinyButton>
+            <span class="import-hint">导入后会保存为 stdio MCP 服务，并使用默认 5000ms 超时。</span>
+          </div>
+        </div>
+      </Transition>
     </article>
   </section>
 </template>
@@ -1005,10 +1013,75 @@ onMounted(() => {
 }
 
 .creation-tabs {
-  display: flex;
+  position: relative;
+  display: inline-grid;
+  grid-template-columns: repeat(2, minmax(88px, 1fr));
   align-items: center;
-  flex-wrap: wrap;
-  gap: var(--space-2);
+  width: max-content;
+  padding: 3px;
+  overflow: hidden;
+  background: var(--surface-raised);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-full);
+}
+
+.creation-tabs::before {
+  position: absolute;
+  inset: 3px auto 3px 3px;
+  width: calc((100% - 6px) / 2);
+  content: "";
+  background: var(--surface-base);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-full);
+  box-shadow: var(--shadow-xs);
+  pointer-events: none;
+  transition:
+    transform 180ms ease,
+    box-shadow 180ms ease;
+}
+
+.creation-tabs--json::before {
+  transform: translateX(100%);
+}
+
+.creation-tabs :deep(.tiny-button) {
+  position: relative;
+  z-index: 1;
+  min-width: 88px;
+  height: 30px;
+  padding: 0 var(--space-3);
+  font-size: var(--text-xs);
+  font-weight: 560;
+  color: var(--text-muted);
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+  transition:
+    color 160ms ease,
+    transform 160ms ease,
+    opacity 160ms ease;
+}
+
+.creation-tabs :deep(.tiny-button[aria-selected="true"]) {
+  color: var(--text-primary);
+}
+
+.creation-tabs :deep(.tiny-button:hover) {
+  color: var(--text-primary);
+  transform: translateY(-1px);
+}
+
+.creation-panel-enter-active,
+.creation-panel-leave-active {
+  transition:
+    opacity 160ms ease,
+    transform 160ms ease;
+}
+
+.creation-panel-enter-from,
+.creation-panel-leave-to {
+  opacity: 0;
+  transform: translateY(6px);
 }
 
 .import-actions {

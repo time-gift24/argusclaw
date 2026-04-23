@@ -411,6 +411,8 @@ describe("McpPage", () => {
     const wrapper = mount(McpPage);
     await flushPromises();
 
+    await wrapper.get('[data-testid="mcp-create-tab-json"]').trigger("click");
+    await flushPromises();
     await wrapper.get('[name="mcp-import-json"]').setValue(
       JSON.stringify({
         "brave-search": {
@@ -481,6 +483,10 @@ describe("McpPage", () => {
     expect(creationCard.text()).toContain("手动配置");
     expect(creationCard.text()).toContain("JSON 导入");
     expect(creationCard.find('[data-testid="mcp-form"]').exists()).toBe(true);
+    expect(creationCard.find('[name="mcp-import-json"]').exists()).toBe(false);
+
+    await creationCard.get('[data-testid="mcp-create-tab-json"]').trigger("click");
+    await flushPromises();
     expect(creationCard.find('[name="mcp-import-json"]').exists()).toBe(true);
     expect(wrapper.findAll(".form-panel")).toHaveLength(1);
   });
@@ -522,6 +528,8 @@ describe("McpPage", () => {
     const wrapper = mount(McpPage);
     await flushPromises();
 
+    await wrapper.get('[data-testid="mcp-create-tab-json"]').trigger("click");
+    await flushPromises();
     await wrapper.get('[name="mcp-import-json"]').setValue('{ "broken": { "args": [] } }');
     await wrapper.get('[data-testid="import-mcp-json"]').trigger("click");
     await flushPromises();
