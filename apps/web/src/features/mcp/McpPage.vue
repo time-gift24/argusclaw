@@ -1,0 +1,144 @@
+<script setup lang="ts">
+import { onMounted, ref } from "vue";
+
+import { getApiClient, type McpServerRecord } from "@/lib/api";
+import { TinyTag } from "@/lib/opentiny";
+
+const api = getApiClient();
+const servers = ref<McpServerRecord[]>([]);
+const loading = ref(true);
+
+onMounted(async () => {
+  servers.value = await api.listMcpServers();
+  loading.value = false;
+});
+</script>
+
+<template>
+  <section class="page-section">
+    <div class="page-header">
+      <div class="page-header-left">
+        <h3 class="page-title">MCP 服务</h3>
+        <TinyTag v-if="!loading">
+          {{ servers.length }} 项
+        </TinyTag>
+      </div>
+    </div>
+
+    <div
+      v-if="loading"
+      class="loading-state"
+    >
+      加载中...
+    </div>
+
+    <div
+      v-else-if="servers.length === 0"
+      class="empty-state"
+    >
+      <p>暂无已配置的 MCP 服务</p>
+    </div>
+
+    <div
+      v-else
+      class="server-list"
+    >
+      <article
+        v-for="server in servers"
+        :key="server.id ?? server.display_name"
+        class="server-card"
+      >
+        <div class="server-info">
+          <div class="server-header">
+            <strong class="server-name">{{ server.display_name }}</strong>
+            <TinyTag
+              :type="server.enabled ? 'success' : 'danger'"
+            >
+              {{ server.status }}
+            </TinyTag>
+          </div>
+          <span class="server-transport">{{ server.transport.kind }} 传输</span>
+          <span class="server-tools">{{ server.discovered_tool_count }} 个工具</span>
+        </div>
+      </article>
+    </div>
+  </section>
+</template>
+
+<style scoped>
+.page-section {
+  display: grid;
+  gap: var(--space-5);
+}
+
+.page-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.page-header-left {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.page-title {
+  margin: 0;
+  font-size: var(--text-base);
+  font-weight: 590;
+  color: var(--text-primary);
+}
+
+.server-list {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.server-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  padding: var(--space-4) var(--space-5);
+  background: var(--surface-base);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-xs);
+}
+
+.server-info {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.server-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.server-name {
+  font-size: var(--text-sm);
+  font-weight: 590;
+  color: var(--text-primary);
+}
+
+.server-transport,
+.server-tools {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+}
+
+.loading-state,
+.empty-state {
+  padding: var(--space-10) var(--space-4);
+  text-align: center;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  background: var(--surface-base);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+}
+</style>

@@ -1,0 +1,223 @@
+export type ProviderSecretStatus = "ready" | "requires_reentry";
+export type ProviderKind = "openai-compatible";
+export type McpServerStatus =
+  | "ready"
+  | "connecting"
+  | "retrying"
+  | "failed"
+  | "disabled";
+
+export interface ModelConfig {
+  max_context_window: number;
+}
+
+export interface HealthResponse {
+  status: string;
+}
+
+export interface BootstrapResponse {
+  instance_name: string;
+  provider_count: number;
+  template_count: number;
+  mcp_server_count: number;
+  default_provider_id: number | null;
+  default_template_id: number | null;
+  mcp_ready_count: number;
+}
+
+export interface SettingsResponse {
+  instance_name: string;
+  default_provider_id: number | null;
+  default_provider_name: string | null;
+}
+
+export interface UpdateSettingsRequest {
+  instance_name: string;
+  default_provider_id: number | null;
+}
+
+export interface LlmProviderRecord {
+  id: number;
+  kind: ProviderKind;
+  display_name: string;
+  base_url: string;
+  api_key: string;
+  models: string[];
+  model_config: Record<string, ModelConfig>;
+  default_model: string;
+  is_default: boolean;
+  extra_headers: Record<string, string>;
+  secret_status: ProviderSecretStatus;
+  meta_data: Record<string, string>;
+}
+
+export interface AgentRecord {
+  id: number;
+  display_name: string;
+  description: string;
+  version: string;
+  provider_id: number | null;
+  model_id?: string | null;
+  system_prompt: string;
+  tool_names: string[];
+  subagent_names: string[];
+  max_tokens?: number | null;
+  temperature?: number | null;
+  thinking_config?: {
+    type: "enabled" | "disabled";
+    clear_thinking: boolean;
+  } | null;
+}
+
+export type McpTransportConfig =
+  | {
+      kind: "stdio";
+      command: string;
+      args: string[];
+      env: Record<string, string>;
+    }
+  | {
+      kind: "http";
+      url: string;
+      headers: Record<string, string>;
+    }
+  | {
+      kind: "sse";
+      url: string;
+      headers: Record<string, string>;
+    };
+
+export interface McpServerRecord {
+  id: number | null;
+  display_name: string;
+  enabled: boolean;
+  transport: McpTransportConfig;
+  timeout_ms: number;
+  status: McpServerStatus;
+  last_checked_at: string | null;
+  last_success_at: string | null;
+  last_error: string | null;
+  discovered_tool_count: number;
+}
+
+interface MutationResponse<T> {
+  item: T;
+}
+
+export interface ApiClient {
+  getHealth(): Promise<HealthResponse>;
+  getBootstrap(): Promise<BootstrapResponse>;
+  getSettings(): Promise<SettingsResponse>;
+  updateSettings(input: UpdateSettingsRequest): Promise<SettingsResponse>;
+  listProviders(): Promise<LlmProviderRecord[]>;
+  saveProvider(input: LlmProviderRecord): Promise<LlmProviderRecord>;
+  listTemplates(): Promise<AgentRecord[]>;
+  saveTemplate(input: AgentRecord): Promise<AgentRecord>;
+  listMcpServers(): Promise<McpServerRecord[]>;
+  saveMcpServer(input: McpServerRecord): Promise<McpServerRecord>;
+}
+
+class HttpApiClient implements ApiClient {
+  constructor(private readonly baseUrl = "/api/v1") {}
+
+  getHealth(): Promise<HealthResponse> {
+    return this.request("/health");
+  }
+
+  getBootstrap(): Promise<BootstrapResponse> {
+    return this.request("/bootstrap");
+  }
+
+  getSettings(): Promise<SettingsResponse> {
+    return this.request("/settings");
+  }
+
+  async updateSettings(input: UpdateSettingsRequest): Promise<SettingsResponse> {
+    const response = await this.request<MutationResponse<SettingsResponse>>("/settings", {
+      body: JSON.stringify(input),
+      headers: {
+        "Content-Type": "application/json",
+      },
+      method: "PUT",
+    });
+
+    return response.item;
+  }
+
+  listProviders(): Promise<LlmProviderRecord[]> {
+    return this.request("/providers");
+  }
+
+  async saveProvider(input: LlmProviderRecord): Promise<LlmProviderRecord> {
+    const path = input.id > 0 ? `/providers/${input.id}` : "/providers";
+    const method = input.id > 0 ? "PATCH" : "POST";
+    const response = await this.request<MutationResponse<LlmProviderRecord>>(path, {
+      body: JSON.stringify(input),
+      headers: {
+        "Content-Type": "application/json",
+      },
+      method,
+    });
+
+    return response.item;
+  }
+
+  listTemplates(): Promise<AgentRecord[]> {
+    return this.request("/agents/templates");
+  }
+
+  async saveTemplate(input: AgentRecord): Promise<AgentRecord> {
+    const path = input.id > 0 ? `/agents/templates/${input.id}` : "/agents/templates";
+    const method = input.id > 0 ? "PATCH" : "POST";
+    const response = await this.request<MutationResponse<AgentRecord>>(path, {
+      body: JSON.stringify(input),
+      headers: {
+        "Content-Type": "application/json",
+      },
+      method,
+    });
+
+    return response.item;
+  }
+
+  listMcpServers(): Promise<McpServerRecord[]> {
+    return this.request("/mcp/servers");
+  }
+
+  async saveMcpServer(input: McpServerRecord): Promise<McpServerRecord> {
+    const path = input.id ? `/mcp/servers/${input.id}` : "/mcp/servers";
+    const method = input.id ? "PATCH" : "POST";
+    const response = await this.request<MutationResponse<McpServerRecord>>(path, {
+      body: JSON.stringify(input),
+      headers: {
+        "Content-Type": "application/json",
+      },
+      method,
+    });
+
+    return response.item;
+  }
+
+  private async request<T>(path: string, init?: RequestInit): Promise<T> {
+    const response = await fetch(`${this.baseUrl}${path}`, init);
+    if (!response.ok) {
+      throw new Error(`Request failed: ${response.status}`);
+    }
+
+    return (await response.json()) as T;
+  }
+}
+
+let apiClient: ApiClient = new HttpApiClient();
+
+export function getApiClient(): ApiClient {
+  return apiClient;
+}
+
+export function setApiClient(client: ApiClient): void {
+  apiClient = client;
+}
+
+export function resetApiClient(): void {
+  apiClient = new HttpApiClient();
+}
