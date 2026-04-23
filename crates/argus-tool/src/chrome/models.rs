@@ -11,6 +11,7 @@ use super::error::ChromeToolError;
 pub(super) enum ChromeAction {
     Install,
     Navigate,
+    Refresh,
     Close,
     Wait,
     ExtractText,
@@ -30,6 +31,7 @@ impl ChromeAction {
         match self {
             Self::Install => "install",
             Self::Navigate => "navigate",
+            Self::Refresh => "refresh",
             Self::Close => "close",
             Self::Wait => "wait",
             Self::ExtractText => "extract_text",
@@ -82,6 +84,9 @@ impl ChromeToolArgs {
             }
             ChromeAction::Navigate => {
                 validate_for_navigate(&mut args)?;
+            }
+            ChromeAction::Refresh => {
+                validate_for_refresh(&args)?;
             }
             ChromeAction::Close => {
                 validate_for_close(&args)?;
@@ -174,6 +179,10 @@ fn validate_for_wait(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
 }
 
 fn validate_for_close(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
+    allow_only_fields(args, &[])
+}
+
+fn validate_for_refresh(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
     allow_only_fields(args, &[])
 }
 

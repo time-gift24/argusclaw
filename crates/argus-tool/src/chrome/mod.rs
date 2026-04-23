@@ -226,6 +226,25 @@ mod tests {
     }
 
     #[test]
+    fn refresh_accepts_no_arguments() {
+        let args = ChromeToolArgs::validate(json!({
+            "action": "refresh",
+        }))
+        .unwrap();
+        assert_eq!(args.action.as_str(), "refresh");
+    }
+
+    #[test]
+    fn refresh_rejects_unexpected_url() {
+        let err = ChromeToolArgs::validate(json!({
+            "action": "refresh",
+            "url": "https://example.com",
+        }))
+        .unwrap_err();
+        assert!(matches!(err, ChromeToolError::InvalidArguments { .. }));
+    }
+
+    #[test]
     fn open_is_not_a_valid_action() {
         let err = ChromeToolArgs::validate(json!({
             "action": "open",
@@ -291,6 +310,7 @@ mod tests {
         assert!(action_values.contains(&"extract_text"));
         assert!(action_values.contains(&"install"));
         assert!(action_values.contains(&"close"));
+        assert!(action_values.contains(&"refresh"));
         assert!(action_values.contains(&"new_tab"));
         assert!(action_values.contains(&"switch_tab"));
         assert!(action_values.contains(&"close_tab"));
@@ -330,6 +350,7 @@ mod tests {
         assert!(action_values.contains(&"get_cookies"));
         assert!(action_values.contains(&"install"));
         assert!(action_values.contains(&"close"));
+        assert!(action_values.contains(&"refresh"));
         assert!(action_values.contains(&"navigate"));
         assert!(action_values.contains(&"new_tab"));
         assert!(action_values.contains(&"switch_tab"));
@@ -494,6 +515,42 @@ mod tests {
             ToolError::ExecutionFailed { reason, .. }
             if reason.contains("navigate(url)")
         ));
+    }
+
+    #[tokio::test]
+    async fn chrome_tool_refresh_reuses_hidden_shared_session() {
+        let tool = ChromeTool::new_for_test(Arc::new(FakeChromeBackend::default().with_page(
+            "https://example.com",
+            "https://example.com/landing",
+            "Example Title",
+            Vec::new(),
+            "Visible page text",
+        )));
+
+        tool.execute(
+            json!({
+                "action": "navigate",
+                "url": "https://example.com"
+            }),
+            make_ctx(),
+        )
+        .await
+        .expect("navigate should succeed");
+
+        let refresh = tool
+            .execute(
+                json!({
+                    "action": "refresh",
+                }),
+                make_ctx(),
+            )
+            .await
+            .expect("refresh should succeed");
+
+        assert_eq!(refresh["action"], "refresh");
+        assert_eq!(refresh["final_url"], "https://example.com/landing");
+        assert_eq!(refresh["page_title"], "Example Title");
+        assert!(refresh.get("session_id").is_none());
     }
 
     #[tokio::test]
@@ -1212,6 +1269,17 @@ mod tests {
             Ok(PageMetadata {
                 final_url: url.to_string(),
                 page_title: format!("Navigated to {url}"),
+            })
+        }
+
+        async fn refresh(&self) -> Result<PageMetadata, ChromeToolError> {
+            let tabs = self.tabs.lock().unwrap();
+            let active = tabs.first().ok_or_else(|| ChromeToolError::TabOperationFailed {
+                reason: "no tabs".to_string(),
+            })?;
+            Ok(PageMetadata {
+                final_url: active.url.clone(),
+                page_title: active.title.clone(),
             })
         }
 
