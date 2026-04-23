@@ -6,6 +6,7 @@ export type McpServerStatus =
   | "retrying"
   | "failed"
   | "disabled";
+export type RiskLevel = "low" | "medium" | "high" | "critical";
 
 export interface ModelConfig {
   max_context_window: number;
@@ -138,6 +139,13 @@ export interface McpConnectionTestResult {
   message: string;
 }
 
+export interface ToolRegistryItem {
+  name: string;
+  description: string;
+  risk_level: RiskLevel;
+  parameters: unknown;
+}
+
 export interface DeleteResponse {
   deleted: boolean;
 }
@@ -257,6 +265,7 @@ export interface ApiClient {
   testMcpServer?(serverId: number): Promise<McpConnectionTestResult>;
   testMcpServerDraft?(input: McpServerRecord): Promise<McpConnectionTestResult>;
   listMcpServerTools?(serverId: number): Promise<McpDiscoveredToolRecord[]>;
+  listTools?(): Promise<ToolRegistryItem[]>;
 }
 
 class HttpApiClient implements ApiClient {
@@ -427,6 +436,10 @@ class HttpApiClient implements ApiClient {
 
   listMcpServerTools(serverId: number): Promise<McpDiscoveredToolRecord[]> {
     return this.request(`/mcp/servers/${serverId}/tools`);
+  }
+
+  listTools(): Promise<ToolRegistryItem[]> {
+    return this.request("/tools");
   }
 
   private async request<T>(path: string, init?: RequestInit): Promise<T> {

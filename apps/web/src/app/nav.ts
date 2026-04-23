@@ -43,6 +43,12 @@ export const adminNavItems: AdminNavItem[] = [
     to: "/mcp",
   },
   {
+    key: "tools",
+    label: "工具注册表",
+    description: "内置工具、风险等级与参数 Schema",
+    to: "/tools",
+  },
+  {
     key: "settings",
     label: "系统设置",
     description: "实例级管理偏好与默认行为",

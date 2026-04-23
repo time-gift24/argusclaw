@@ -8,6 +8,7 @@ import BootstrapPage from "@/features/bootstrap/BootstrapPage.vue";
 import ProvidersPage from "@/features/providers/ProvidersPage.vue";
 import TemplatesPage from "@/features/templates/TemplatesPage.vue";
 import McpPage from "@/features/mcp/McpPage.vue";
+import ToolsPage from "@/features/tools/ToolsPage.vue";
 import RuntimePage from "@/features/runtime/RuntimePage.vue";
 import SettingsPage from "@/features/settings/SettingsPage.vue";
 
@@ -26,6 +27,7 @@ describe("AdminLayout", () => {
             { path: "providers", component: ProvidersPage },
             { path: "templates", component: TemplatesPage },
             { path: "mcp", component: McpPage },
+            { path: "tools", component: ToolsPage },
             { path: "settings", component: SettingsPage },
           ],
         },
@@ -53,6 +55,7 @@ describe("AdminLayout", () => {
     expect(wrapper.text()).toContain("运行状态");
     expect(wrapper.text()).toContain("模型提供方");
     expect(wrapper.text()).toContain("智能体模板");
+    expect(wrapper.text()).toContain("工具注册表");
     expect(wrapper.find(".topbar").exists()).toBe(false);
     expect(wrapper.text()).not.toContain("Desktop Server Web Admin");
   });

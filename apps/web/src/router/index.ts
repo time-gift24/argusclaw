@@ -7,6 +7,7 @@ import RuntimePage from "@/features/runtime/RuntimePage.vue";
 import ProvidersPage from "@/features/providers/ProvidersPage.vue";
 import TemplatesPage from "@/features/templates/TemplatesPage.vue";
 import McpPage from "@/features/mcp/McpPage.vue";
+import ToolsPage from "@/features/tools/ToolsPage.vue";
 import SettingsPage from "@/features/settings/SettingsPage.vue";
 
 export const router = createRouter({
@@ -45,6 +46,11 @@ export const router = createRouter({
           path: "mcp",
           name: "mcp",
           component: McpPage,
+        },
+        {
+          path: "tools",
+          name: "tools",
+          component: ToolsPage,
         },
         {
           path: "settings",

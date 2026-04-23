@@ -636,3 +636,25 @@ GET /api/v1/mcp/servers/{server_id}/tools
 
 - `cd apps/web && pnpm exec vitest run`
 - `cd apps/web && pnpm build`
+
+### Phase 4C: Add tool registry operations visibility
+
+**Intent:** Make the server-owned tool registry visible from the standalone web console without adding tool execution routes.
+
+**Expected server shape:**
+
+- `ServerCore` registers the same default built-in tools needed by server-managed runtime work
+- `GET /api/v1/tools` returns registered tool definitions with risk levels and parameter schemas
+- The route is read-only and does not expose tool execution
+
+**Expected UI shape:**
+
+- Add a “工具注册表” page to the traditional left navigation
+- Show total tools, high-risk count, critical count, and medium count
+- Render tool name, description, risk level, and parameter schema preview
+
+**Expected validation:**
+
+- `cargo test -p argus-server -- --nocapture`
+- `cd apps/web && pnpm exec vitest run`
+- `cd apps/web && pnpm build`

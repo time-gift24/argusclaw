@@ -10,7 +10,7 @@
 
 - 启动并持有 `ServerCore`
 - 在 `ServerCore` 内装配 provider、template、MCP、session、job、thread-pool、tool、auth 等 server 运行组件
-- 暴露 health / bootstrap / providers / templates / mcp / settings / runtime / runtime/events 管理 API
+- 暴露 health / bootstrap / providers / templates / mcp / settings / runtime / runtime/events / tools 管理 API
 - 负责 HTTP 请求校验、序列化与错误映射
 
 ## 修改守则

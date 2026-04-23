@@ -247,6 +247,12 @@ Inter Variable, "Noto Sans SC", "PingFang SC", system-ui, sans-serif
 - 表单：列表下方创建/编辑 MCP 服务，支持 `stdio` / `HTTP` / `SSE` 传输配置
 - 表单操作：保存、重置/取消编辑、测试当前配置，反馈成功与错误状态
 
+### 工具注册表（/tools）
+- 顶部摘要：总工具、高风险及以上、Critical、Medium
+- 工具卡片：工具名称、描述、风险等级标签
+- 展开视图：参数 Schema 预览
+- 不提供执行按钮，管理台只做运维可见性，不扩大工具执行面
+
 ### 系统设置（/settings）
 - 单卡片布局
 - 当前实例信息和默认提供方展示
@@ -275,6 +281,7 @@ Inter Variable, "Noto Sans SC", "PingFang SC", system-ui, sans-serif
 - `POST /api/v1/mcp/servers/:id/test` - 测试 MCP 服务器
 - `POST /api/v1/mcp/servers/test` - 测试 MCP 服务器草稿配置
 - `GET /api/v1/mcp/servers/:id/tools` - MCP 服务器工具列表
+- `GET /api/v1/tools` - 工具注册表
 - `GET /api/v1/settings` - 获取设置
 - `PUT /api/v1/settings` - 更新设置
 - `GET /api/v1/runtime` - 运行时快照

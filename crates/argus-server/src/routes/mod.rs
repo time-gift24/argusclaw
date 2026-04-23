@@ -5,6 +5,7 @@ pub mod providers;
 pub mod runtime;
 pub mod settings;
 pub mod templates;
+pub mod tools;
 
 use axum::routing::{get, post};
 use axum::{Router, routing::patch};
@@ -17,6 +18,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/v1/bootstrap", get(bootstrap::get_bootstrap))
         .route("/api/v1/runtime", get(runtime::get_runtime_state))
         .route("/api/v1/runtime/events", get(runtime::runtime_events))
+        .route("/api/v1/tools", get(tools::list_tools))
         .route(
             "/api/v1/settings",
             get(settings::get_settings).put(settings::update_settings),

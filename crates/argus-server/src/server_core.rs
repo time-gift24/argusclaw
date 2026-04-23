@@ -8,7 +8,7 @@ use argus_mcp::{McpRuntime, McpRuntimeConfig, RmcpConnector};
 use argus_protocol::{
     AgentId, AgentRecord, ArgusError, JobRuntimeState, LlmProviderId, LlmProviderRecord,
     McpDiscoveredToolRecord, McpServerRecord, McpServerStatus, McpToolResolver, ProviderResolver,
-    ProviderTestResult, Result, ThreadPoolState,
+    ProviderTestResult, Result, RiskLevel, ThreadPoolState,
 };
 use argus_repository::traits::{
     AccountRepository, AdminSettingsRepository, AgentRepository, JobRepository,
@@ -46,13 +46,21 @@ pub struct ServerCore {
     provider_manager: Arc<ProviderManager>,
     template_manager: Arc<TemplateManager>,
     session_manager: Arc<SessionManager>,
-    _tool_manager: Arc<ToolManager>,
+    tool_manager: Arc<ToolManager>,
     job_manager: Arc<JobManager>,
     mcp_runtime: Arc<McpRuntime>,
     _account_manager: Arc<AccountManager>,
     mcp_repo: Arc<dyn McpRepository>,
     admin_settings_repo: Arc<dyn AdminSettingsRepository>,
     admin_settings: Arc<RwLock<AdminSettings>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ToolRegistryItem {
+    pub name: String,
+    pub description: String,
+    pub risk_level: RiskLevel,
+    pub parameters: serde_json::Value,
 }
 
 impl ServerCore {
@@ -92,6 +100,7 @@ impl ServerCore {
         Self::bootstrap_template_manager(Arc::clone(&template_manager)).await?;
 
         let tool_manager = Arc::new(ToolManager::new());
+        Self::register_default_tools(&tool_manager);
         let trace_dir = default_trace_dir();
         let _ = std::fs::create_dir_all(&trace_dir);
 
@@ -143,7 +152,7 @@ impl ServerCore {
             provider_manager,
             template_manager,
             session_manager,
-            _tool_manager: tool_manager,
+            tool_manager,
             job_manager,
             mcp_runtime,
             _account_manager: account_manager,
@@ -157,6 +166,24 @@ impl ServerCore {
         template_manager.repair_placeholder_ids().await?;
         template_manager.seed_builtin_agents().await?;
         Ok(())
+    }
+
+    fn register_default_tools(tool_manager: &Arc<ToolManager>) {
+        use argus_tool::{
+            ApplyPatchTool, ChromeTool, GlobTool, GrepTool, HttpTool, ListDirTool, ReadTool,
+            ShellTool, SleepTool, WriteFileTool,
+        };
+
+        tool_manager.register(Arc::new(ShellTool::new()));
+        tool_manager.register(Arc::new(ReadTool::new()));
+        tool_manager.register(Arc::new(GrepTool::new()));
+        tool_manager.register(Arc::new(GlobTool::new()));
+        tool_manager.register(Arc::new(HttpTool::new()));
+        tool_manager.register(Arc::new(WriteFileTool::new()));
+        tool_manager.register(Arc::new(ListDirTool::new()));
+        tool_manager.register(Arc::new(ApplyPatchTool::new()));
+        tool_manager.register(Arc::new(SleepTool::new()));
+        tool_manager.register(Arc::new(ChromeTool::new_interactive()));
     }
 
     pub async fn admin_settings(&self) -> AdminSettings {
@@ -350,6 +377,22 @@ impl ServerCore {
             .list_mcp_server_tools(server_id)
             .await
             .map_err(database_error)
+    }
+
+    pub fn list_tools(&self) -> Vec<ToolRegistryItem> {
+        let mut tools = self
+            .tool_manager
+            .list_definitions()
+            .into_iter()
+            .map(|definition| ToolRegistryItem {
+                risk_level: self.tool_manager.get_risk_level(&definition.name),
+                name: definition.name,
+                description: definition.description,
+                parameters: definition.parameters,
+            })
+            .collect::<Vec<_>>();
+        tools.sort_by(|left, right| left.name.cmp(&right.name));
+        tools
     }
 
     pub fn thread_pool_state(&self) -> ThreadPoolState {
