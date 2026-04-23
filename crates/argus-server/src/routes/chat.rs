@@ -9,9 +9,15 @@ use serde::{Deserialize, Serialize};
 use crate::app_state::AppState;
 use crate::error::ApiError;
 use crate::response::{DeleteResponse, MutationResponse};
+use crate::server_core::{ChatThreadBinding, ChatThreadSnapshot};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateSessionRequest {
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RenameSessionRequest {
     pub name: String,
 }
 
@@ -20,6 +26,17 @@ pub struct CreateThreadRequest {
     pub template_id: i64,
     pub provider_id: Option<i64>,
     pub model: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RenameThreadRequest {
+    pub title: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateThreadModelRequest {
+    pub provider_id: i64,
+    pub model: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -42,8 +59,26 @@ pub async fn create_session(
     State(state): State<AppState>,
     Json(request): Json<CreateSessionRequest>,
 ) -> Result<(StatusCode, Json<MutationResponse<SessionSummary>>), ApiError> {
-    let session = state.core().create_chat_session(request.name).await?;
+    let session = state
+        .core()
+        .create_chat_session(required_non_empty("name", request.name)?)
+        .await?;
     Ok((StatusCode::CREATED, Json(MutationResponse::new(session))))
+}
+
+pub async fn rename_session(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+    Json(request): Json<RenameSessionRequest>,
+) -> Result<Json<MutationResponse<SessionSummary>>, ApiError> {
+    let session = state
+        .core()
+        .rename_chat_session(
+            parse_session_id(&session_id)?,
+            required_non_empty("name", request.name)?,
+        )
+        .await?;
+    Ok(Json(MutationResponse::new(session)))
 }
 
 pub async fn delete_session(
@@ -101,6 +136,62 @@ pub async fn delete_thread(
     })))
 }
 
+pub async fn get_thread_snapshot(
+    State(state): State<AppState>,
+    Path((session_id, thread_id)): Path<(String, String)>,
+) -> Result<Json<ChatThreadSnapshot>, ApiError> {
+    Ok(Json(
+        state
+            .core()
+            .get_chat_thread_snapshot(parse_session_id(&session_id)?, parse_thread_id(&thread_id)?)
+            .await?,
+    ))
+}
+
+pub async fn rename_thread(
+    State(state): State<AppState>,
+    Path((session_id, thread_id)): Path<(String, String)>,
+    Json(request): Json<RenameThreadRequest>,
+) -> Result<Json<MutationResponse<ThreadSummary>>, ApiError> {
+    let thread = state
+        .core()
+        .rename_chat_thread(
+            parse_session_id(&session_id)?,
+            parse_thread_id(&thread_id)?,
+            request.title,
+        )
+        .await?;
+    Ok(Json(MutationResponse::new(thread)))
+}
+
+pub async fn update_thread_model(
+    State(state): State<AppState>,
+    Path((session_id, thread_id)): Path<(String, String)>,
+    Json(request): Json<UpdateThreadModelRequest>,
+) -> Result<Json<MutationResponse<ChatThreadBinding>>, ApiError> {
+    let binding = state
+        .core()
+        .update_chat_thread_model(
+            parse_session_id(&session_id)?,
+            parse_thread_id(&thread_id)?,
+            ProviderId::new(request.provider_id),
+            required_non_empty("model", request.model)?,
+        )
+        .await?;
+    Ok(Json(MutationResponse::new(binding)))
+}
+
+pub async fn activate_thread(
+    State(state): State<AppState>,
+    Path((session_id, thread_id)): Path<(String, String)>,
+) -> Result<Json<MutationResponse<ChatThreadBinding>>, ApiError> {
+    let binding = state
+        .core()
+        .activate_chat_thread(parse_session_id(&session_id)?, parse_thread_id(&thread_id)?)
+        .await?;
+    Ok(Json(MutationResponse::new(binding)))
+}
+
 pub async fn list_messages(
     State(state): State<AppState>,
     Path((session_id, thread_id)): Path<(String, String)>,
@@ -123,7 +214,7 @@ pub async fn send_message(
         .send_chat_message(
             parse_session_id(&session_id)?,
             parse_thread_id(&thread_id)?,
-            request.message,
+            required_non_empty("message", request.message)?,
         )
         .await?;
     Ok((
@@ -147,12 +238,12 @@ pub async fn cancel_thread(
 
 fn parse_session_id(value: &str) -> Result<SessionId, ApiError> {
     SessionId::parse(value)
-        .map_err(|error| ApiError::internal(format!("Invalid session_id '{value}': {error}")))
+        .map_err(|error| ApiError::bad_request(format!("Invalid session_id '{value}': {error}")))
 }
 
 fn parse_thread_id(value: &str) -> Result<ThreadId, ApiError> {
     ThreadId::parse(value)
-        .map_err(|error| ApiError::internal(format!("Invalid thread_id '{value}': {error}")))
+        .map_err(|error| ApiError::bad_request(format!("Invalid thread_id '{value}': {error}")))
 }
 
 fn normalize_optional_string(value: Option<String>) -> Option<String> {
@@ -164,4 +255,13 @@ fn normalize_optional_string(value: Option<String>) -> Option<String> {
             Some(trimmed.to_string())
         }
     })
+}
+
+fn required_non_empty(field: &str, value: String) -> Result<String, ApiError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        Err(ApiError::bad_request(format!("{field} must not be empty")))
+    } else {
+        Ok(trimmed.to_string())
+    }
 }

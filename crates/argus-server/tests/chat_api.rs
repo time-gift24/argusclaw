@@ -62,12 +62,9 @@ async fn chat_messages_route_errors_for_unknown_thread() {
         ))
         .await;
 
-    assert_eq!(
-        messages_response.status(),
-        StatusCode::INTERNAL_SERVER_ERROR
-    );
+    assert_eq!(messages_response.status(), StatusCode::NOT_FOUND);
     let body: serde_json::Value = support::json_body(messages_response).await;
-    assert_eq!(body["error"]["code"], "internal_error");
+    assert_eq!(body["error"]["code"], "not_found");
     assert!(
         body["error"]["message"]
             .as_str()
@@ -128,6 +125,122 @@ async fn chat_thread_routes_create_and_delete_thread() {
     );
 }
 
+#[tokio::test]
+async fn chat_routes_rename_session_and_thread() {
+    let ctx = support::TestContext::new().await;
+    let provider = create_test_provider(&ctx).await;
+    let template = first_template(&ctx).await;
+    let session = create_test_session(&ctx, "Before Rename").await;
+    let thread = create_test_thread(&ctx, &session, &template, &provider).await;
+
+    let rename_session_response = ctx
+        .patch_json(
+            &format!("/api/v1/chat/sessions/{}", session.id),
+            &json!({ "name": "After Rename" }),
+        )
+        .await;
+    assert_eq!(rename_session_response.status(), StatusCode::OK);
+    let renamed_session: MutationResponse<SessionSummary> =
+        support::json_body(rename_session_response).await;
+    assert_eq!(renamed_session.item.name, "After Rename");
+
+    let rename_thread_response = ctx
+        .patch_json(
+            &format!("/api/v1/chat/sessions/{}/threads/{}", session.id, thread.id),
+            &json!({ "title": "Renamed Thread" }),
+        )
+        .await;
+    assert_eq!(rename_thread_response.status(), StatusCode::OK);
+    let renamed_thread: MutationResponse<ThreadSummary> =
+        support::json_body(rename_thread_response).await;
+    assert_eq!(renamed_thread.item.title.as_deref(), Some("Renamed Thread"));
+}
+
+#[tokio::test]
+async fn chat_routes_return_thread_snapshot_and_binding() {
+    let ctx = support::TestContext::new().await;
+    let provider = create_test_provider(&ctx).await;
+    let template = first_template(&ctx).await;
+    let session = create_test_session(&ctx, "Snapshot Case").await;
+    let thread = create_test_thread(&ctx, &session, &template, &provider).await;
+
+    let snapshot_response = ctx
+        .get(&format!(
+            "/api/v1/chat/sessions/{}/threads/{}",
+            session.id, thread.id
+        ))
+        .await;
+    assert_eq!(snapshot_response.status(), StatusCode::OK);
+    let snapshot: serde_json::Value = support::json_body(snapshot_response).await;
+    assert_eq!(snapshot["session_id"], session.id.to_string());
+    assert_eq!(snapshot["thread_id"], thread.id.to_string());
+    assert_eq!(snapshot["turn_count"], 0);
+    assert_eq!(snapshot["token_count"], 0);
+    assert_eq!(snapshot["plan_item_count"], 0);
+    assert_eq!(snapshot["messages"].as_array().map(Vec::len), Some(0));
+
+    let update_model_response = ctx
+        .patch_json(
+            &format!(
+                "/api/v1/chat/sessions/{}/threads/{}/model",
+                session.id, thread.id
+            ),
+            &json!({
+                "provider_id": provider.id,
+                "model": "alpha"
+            }),
+        )
+        .await;
+    assert_eq!(update_model_response.status(), StatusCode::OK);
+    let model_binding: MutationResponse<serde_json::Value> =
+        support::json_body(update_model_response).await;
+    assert_eq!(model_binding.item["session_id"], session.id.to_string());
+    assert_eq!(model_binding.item["thread_id"], thread.id.to_string());
+    assert_eq!(model_binding.item["template_id"], template.id.inner());
+    assert_eq!(model_binding.item["effective_provider_id"], provider.id);
+    assert_eq!(model_binding.item["effective_model"], "alpha");
+
+    let activate_response = ctx
+        .post_empty(&format!(
+            "/api/v1/chat/sessions/{}/threads/{}/activate",
+            session.id, thread.id
+        ))
+        .await;
+    assert_eq!(activate_response.status(), StatusCode::OK);
+    let activation: MutationResponse<serde_json::Value> =
+        support::json_body(activate_response).await;
+    assert_eq!(activation.item["session_id"], session.id.to_string());
+    assert_eq!(activation.item["thread_id"], thread.id.to_string());
+    assert_eq!(activation.item["template_id"], template.id.inner());
+    assert_eq!(activation.item["effective_provider_id"], provider.id);
+    assert_eq!(activation.item["effective_model"], "alpha");
+}
+
+#[tokio::test]
+async fn chat_routes_use_structured_client_errors() {
+    let ctx = support::TestContext::new().await;
+
+    let invalid_id_response = ctx
+        .patch_json(
+            "/api/v1/chat/sessions/not-a-uuid",
+            &json!({ "name": "Ignored" }),
+        )
+        .await;
+    assert_eq!(invalid_id_response.status(), StatusCode::BAD_REQUEST);
+    let invalid_body: serde_json::Value = support::json_body(invalid_id_response).await;
+    assert_eq!(invalid_body["error"]["code"], "bad_request");
+
+    let unknown_session_response = ctx
+        .patch_json(
+            &format!("/api/v1/chat/sessions/{}", argus_protocol::SessionId::new()),
+            &json!({ "name": "Missing" }),
+        )
+        .await;
+    assert_eq!(unknown_session_response.status(), StatusCode::NOT_FOUND);
+    let unknown_body: serde_json::Value = support::json_body(unknown_session_response).await;
+    assert_eq!(unknown_body["error"]["code"], "not_found");
+}
+
 async fn create_test_session(ctx: &support::TestContext, name: &str) -> SessionSummary {
     let response = ctx
         .post_json("/api/v1/chat/sessions", &json!({ "name": name }))
@@ -164,6 +277,27 @@ async fn create_test_provider(ctx: &support::TestContext) -> LlmProviderRecordJs
         .await;
     assert_eq!(response.status(), StatusCode::CREATED);
     let created: MutationResponse<LlmProviderRecordJson> = support::json_body(response).await;
+    created.item
+}
+
+async fn create_test_thread(
+    ctx: &support::TestContext,
+    session: &SessionSummary,
+    template: &AgentRecord,
+    provider: &LlmProviderRecordJson,
+) -> ThreadSummary {
+    let response = ctx
+        .post_json(
+            &format!("/api/v1/chat/sessions/{}/threads", session.id),
+            &json!({
+                "template_id": template.id,
+                "provider_id": provider.id,
+                "model": "alpha"
+            }),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let created: MutationResponse<ThreadSummary> = support::json_body(response).await;
     created.item
 }
 

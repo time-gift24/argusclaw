@@ -64,6 +64,25 @@ pub struct ToolRegistryItem {
     pub parameters: serde_json::Value,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatThreadSnapshot {
+    pub session_id: SessionId,
+    pub thread_id: ThreadId,
+    pub messages: Vec<ChatMessage>,
+    pub turn_count: u32,
+    pub token_count: u32,
+    pub plan_item_count: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatThreadBinding {
+    pub session_id: SessionId,
+    pub thread_id: ThreadId,
+    pub template_id: AgentId,
+    pub effective_provider_id: Option<ProviderId>,
+    pub effective_model: Option<String>,
+}
+
 impl ServerCore {
     pub async fn init(database_path: Option<&str>) -> Result<Arc<Self>> {
         let database_target = resolve_database_target(database_path)?;
@@ -421,6 +440,21 @@ impl ServerCore {
         self.session_manager.delete(session_id).await
     }
 
+    pub async fn rename_chat_session(
+        &self,
+        session_id: SessionId,
+        name: String,
+    ) -> Result<SessionSummary> {
+        self.session_manager
+            .rename_session(session_id, name)
+            .await?;
+        self.list_chat_sessions()
+            .await?
+            .into_iter()
+            .find(|session| session.id == session_id)
+            .ok_or_else(|| missing_after_mutation("session", session_id))
+    }
+
     pub async fn list_chat_threads(&self, session_id: SessionId) -> Result<Vec<ThreadSummary>> {
         self.session_manager.list_threads(session_id).await
     }
@@ -453,6 +487,47 @@ impl ServerCore {
             .await
     }
 
+    pub async fn rename_chat_thread(
+        &self,
+        session_id: SessionId,
+        thread_id: ThreadId,
+        title: String,
+    ) -> Result<ThreadSummary> {
+        self.session_manager
+            .rename_thread(session_id, &thread_id, title)
+            .await?;
+        self.list_chat_threads(session_id)
+            .await?
+            .into_iter()
+            .find(|thread| thread.id == thread_id)
+            .ok_or_else(|| missing_after_mutation("thread", thread_id))
+    }
+
+    pub async fn update_chat_thread_model(
+        &self,
+        session_id: SessionId,
+        thread_id: ThreadId,
+        provider_id: ProviderId,
+        model: String,
+    ) -> Result<ChatThreadBinding> {
+        let (effective_provider_id, effective_model) = self
+            .session_manager
+            .update_thread_model(session_id, &thread_id, provider_id, &model)
+            .await?;
+        let (template_id, activated_provider_id, _activated_model) = self
+            .session_manager
+            .activate_thread(session_id, &thread_id)
+            .await?;
+
+        Ok(ChatThreadBinding {
+            session_id,
+            thread_id,
+            template_id,
+            effective_provider_id: Some(activated_provider_id.unwrap_or(effective_provider_id)),
+            effective_model: Some(effective_model),
+        })
+    }
+
     pub async fn get_chat_messages(
         &self,
         session_id: SessionId,
@@ -461,6 +536,43 @@ impl ServerCore {
         self.session_manager
             .get_thread_messages(session_id, &thread_id)
             .await
+    }
+
+    pub async fn get_chat_thread_snapshot(
+        &self,
+        session_id: SessionId,
+        thread_id: ThreadId,
+    ) -> Result<ChatThreadSnapshot> {
+        let (messages, turn_count, token_count, plan_item_count) = self
+            .session_manager
+            .get_thread_snapshot(session_id, &thread_id)
+            .await?;
+        Ok(ChatThreadSnapshot {
+            session_id,
+            thread_id,
+            messages,
+            turn_count,
+            token_count,
+            plan_item_count,
+        })
+    }
+
+    pub async fn activate_chat_thread(
+        &self,
+        session_id: SessionId,
+        thread_id: ThreadId,
+    ) -> Result<ChatThreadBinding> {
+        let (template_id, effective_provider_id, effective_model) = self
+            .session_manager
+            .activate_thread(session_id, &thread_id)
+            .await?;
+        Ok(ChatThreadBinding {
+            session_id,
+            thread_id,
+            template_id,
+            effective_provider_id,
+            effective_model,
+        })
     }
 
     pub async fn send_chat_message(

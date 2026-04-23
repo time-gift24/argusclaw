@@ -8,7 +8,7 @@ pub mod settings;
 pub mod templates;
 pub mod tools;
 
-use axum::routing::{delete, get, post};
+use axum::routing::{get, post};
 use axum::{Router, routing::patch};
 
 use crate::app_state::AppState;
@@ -26,7 +26,7 @@ pub fn router() -> Router<AppState> {
         )
         .route(
             "/api/v1/chat/sessions/{session_id}",
-            delete(chat::delete_session),
+            patch(chat::rename_session).delete(chat::delete_session),
         )
         .route(
             "/api/v1/chat/sessions/{session_id}/threads",
@@ -34,7 +34,17 @@ pub fn router() -> Router<AppState> {
         )
         .route(
             "/api/v1/chat/sessions/{session_id}/threads/{thread_id}",
-            delete(chat::delete_thread),
+            get(chat::get_thread_snapshot)
+                .patch(chat::rename_thread)
+                .delete(chat::delete_thread),
+        )
+        .route(
+            "/api/v1/chat/sessions/{session_id}/threads/{thread_id}/model",
+            patch(chat::update_thread_model),
+        )
+        .route(
+            "/api/v1/chat/sessions/{session_id}/threads/{thread_id}/activate",
+            post(chat::activate_thread),
         )
         .route(
             "/api/v1/chat/sessions/{session_id}/threads/{thread_id}/messages",
