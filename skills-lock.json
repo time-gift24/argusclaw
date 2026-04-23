@@ -31,6 +31,16 @@
       "sourceType": "github",
       "computedHash": "aaa49c0f8c1a3c5cf37498c8019f7e0d4f614053b17728593a27755b663e9d7c"
     },
+    "tiny-robot-skill": {
+      "source": "opentiny/agent-skills",
+      "sourceType": "github",
+      "computedHash": "efb34101824786294ea62f4769dd661fc6050c1e5e948a4a50ffe11148aa285b"
+    },
+    "tiny-vue-skill": {
+      "source": "opentiny/agent-skills",
+      "sourceType": "github",
+      "computedHash": "91d4659e00b2210d656bea25c60f20114c02bb4638019f77341de6dc529ee465"
+    },
     "tools": {
       "source": "assistant-ui/skills",
       "sourceType": "github",

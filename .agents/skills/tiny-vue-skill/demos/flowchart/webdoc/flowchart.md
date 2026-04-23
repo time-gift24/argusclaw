@@ -1,0 +1,6 @@
+# flowchart Demos
+
+| demoId | 名称 | 描述 | 代码文件 |
+|--------|------|------|----------|
+| basic-usage | 基本用法 | <br><p>节点支持 <code>icon</code> \| <code>label</code> \| <code>content</code> 插槽定制内容，示例提供了 <code>content</code> 插槽的默认实现。节点使用 <code>row</code> \| <code>col</code> 属性进行行列配置。连线使用 <code>p</code> 属性进行相对路径配置。流程图的其它设置通过 <code>config</code> 进行配置。组件预置了 <code>createItem</code> \| <code>createNode</code> \| <code>createLink</code> \| <code>createConfig</code> 静态方法，以便于快速构建选项。流程图的行高列宽由 <code>config</code> 的属性 <code>width</code> \| <code>height</code> \| <code>cols</code> \| <code>rows</code> 确定，节点的位置由流程图的行高列宽，以及节点的 <code>row</code> \| <code>col</code> 位置确定。</p><br>        <p>连线相对路径配置详细介绍：</p><br>        <ul><br>          <li>'0'  表示从起始节点 1 的位置开始</li><br>          <li>'r2' 表示向右画两列宽度的连线</li><br>          <li>'c'  表示画一个圆角</li><br>          <li>'b2' 表示向下画两行高度的连线</li><br>          <li>'c'  再画一个圆角</li><br>          <li>'l1' 表示向左画一列宽度的连线</li><br>          <li>'c'  再画一个圆角</li><br>          <li>'t1' 向上画一行高度的连线</li><br>        </ul><br>        <p>连线配置参数举例:</p><br>        <span>const link = { from: '1', to: '2', p: '0 r2 c b2 c l1 c t1', status: 1 }</span><br>         | flowchart/basic-usage.vue |
+| slots | 插槽定制 | 节点支持 content 插槽自定义内容。 | flowchart/slots.vue |

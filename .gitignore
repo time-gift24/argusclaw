@@ -10,3 +10,12 @@
 crates/argus-template/src/generated_agents.rs
 .codex
 .omx
+.omx/
+.codex/*
+!.codex/agents/
+!.codex/agents/**
+!.codex/skills/
+!.codex/skills/**
+.codex/skills/.system/**
+!.codex/prompts/
+!.codex/prompts/**
