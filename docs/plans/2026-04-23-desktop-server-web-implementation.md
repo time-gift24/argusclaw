@@ -658,3 +658,19 @@ GET /api/v1/mcp/servers/{server_id}/tools
 - `cargo test -p argus-server -- --nocapture`
 - `cd apps/web && pnpm exec vitest run`
 - `cd apps/web && pnpm build`
+
+### Phase 4D: Add runtime health diagnostics
+
+**Intent:** Make runtime pressure and recovery signals visible without expanding the runtime API.
+
+**Expected UI shape:**
+
+- Runtime page computes diagnostics from the existing `GET /runtime` and `runtime.snapshot` payloads
+- Show queue pressure, evicted runtime count, unrecoverable runtime count, and peak memory
+- Show normal/attention status and short remediation hints
+- Keep SSE and polling behavior unchanged
+
+**Expected validation:**
+
+- `cd apps/web && pnpm exec vitest run`
+- `cd apps/web && pnpm build`

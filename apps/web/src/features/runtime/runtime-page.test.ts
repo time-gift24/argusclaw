@@ -213,4 +213,86 @@ describe("RuntimePage", () => {
     wrapper.unmount();
     expect(close).toHaveBeenCalledOnce();
   });
+
+  it("shows runtime health diagnostics for pressure signals", async () => {
+    const mockApi: ApiClient = {
+      getHealth: async () => ({ status: "ok" }),
+      getBootstrap: async () => ({
+        instance_name: "ArgusWing",
+        provider_count: 2,
+        template_count: 3,
+        mcp_server_count: 1,
+        default_provider_id: 1,
+        default_template_id: 2,
+        mcp_ready_count: 1,
+      }),
+      getRuntimeState: async () => ({
+        thread_pool: {
+          snapshot: {
+            max_threads: 8,
+            active_threads: 4,
+            queued_threads: 2,
+            running_threads: 2,
+            cooling_threads: 0,
+            evicted_threads: 1,
+            estimated_memory_bytes: 4096,
+            peak_estimated_memory_bytes: 8192,
+            process_memory_bytes: 16384,
+            peak_process_memory_bytes: 32768,
+            resident_thread_count: 4,
+            avg_thread_memory_bytes: 1024,
+            captured_at: "2026-04-23T12:00:00Z",
+          },
+          runtimes: [
+            {
+              thread_id: "thread-bad",
+              session_id: "session-1",
+              status: "evicted",
+              estimated_memory_bytes: 2048,
+              last_active_at: "2026-04-23T12:00:00Z",
+              recoverable: false,
+              last_reason: "execution_failed",
+            },
+          ],
+        },
+        job_runtime: {
+          snapshot: {
+            max_threads: 8,
+            active_threads: 2,
+            queued_threads: 1,
+            running_threads: 1,
+            cooling_threads: 0,
+            evicted_threads: 0,
+            estimated_memory_bytes: 1024,
+            peak_estimated_memory_bytes: 2048,
+            process_memory_bytes: 8192,
+            peak_process_memory_bytes: 16384,
+            resident_thread_count: 2,
+            avg_thread_memory_bytes: 512,
+            captured_at: "2026-04-23T12:00:00Z",
+          },
+          runtimes: [],
+        },
+      }),
+      getSettings: async () => ({ instance_name: "", default_provider_id: null, default_provider_name: null }),
+      updateSettings: async () => ({ instance_name: "", default_provider_id: null, default_provider_name: null }),
+      listProviders: async () => [],
+      saveProvider: async (input: LlmProviderRecord) => input,
+      listTemplates: async () => [],
+      saveTemplate: async (input: AgentRecord) => input,
+      listMcpServers: async () => [],
+      saveMcpServer: async (input: McpServerRecord) => input,
+    };
+    setApiClient(mockApi);
+
+    const wrapper = mount(RuntimePage);
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("运行健康诊断");
+    expect(wrapper.text()).toContain("需关注");
+    expect(wrapper.text()).toContain("队列压力3");
+    expect(wrapper.text()).toContain("逐出 runtime1");
+    expect(wrapper.text()).toContain("不可恢复1");
+    expect(wrapper.text()).toContain("存在不可恢复 runtime，建议查看最近原因。");
+  });
 });

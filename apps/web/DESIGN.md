@@ -1,7 +1,7 @@
 # ArgusWing 管理控制台设计系统
 
 **日期：** 2026-04-23
-**版本：** Phase 4B
+**版本：** Phase 4D
 
 ## 1. 设计原则
 
@@ -225,6 +225,8 @@ Inter Variable, "Noto Sans SC", "PingFang SC", system-ui, sans-serif
 ### 运行状态（/runtime）
 - 连接状态标签：EventSource 已连接 / 轮询降级
 - 6 个指标卡片（2x3 网格）：活跃线程、运行中、排队中、已冷却、已驱逐、预估内存
+- 运行健康诊断：队列压力、逐出 runtime、不可恢复 runtime、峰值内存
+- 诊断建议：基于 snapshot 生成需关注/正常状态和处理提示
 - 两个面板：线程池运行时、后台 Job 运行时
 
 ### 提供方管理（/providers）

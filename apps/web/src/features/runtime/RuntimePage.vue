@@ -17,6 +17,34 @@ const threadPoolSnapshot = computed(() => runtime.value?.thread_pool.snapshot ??
 const jobRuntimeSnapshot = computed(() => runtime.value?.job_runtime.snapshot ?? null);
 const threadPoolRuntimes = computed(() => runtime.value?.thread_pool.runtimes ?? []);
 const jobRuntimes = computed(() => runtime.value?.job_runtime.runtimes ?? []);
+const runtimeHealth = computed(() => {
+  if (!threadPoolSnapshot.value || !jobRuntimeSnapshot.value) {
+    return null;
+  }
+
+  const queued = threadPoolSnapshot.value.queued_threads + jobRuntimeSnapshot.value.queued_threads;
+  const evicted = threadPoolSnapshot.value.evicted_threads + jobRuntimeSnapshot.value.evicted_threads;
+  const unrecoverable = [...threadPoolRuntimes.value, ...jobRuntimes.value].filter((entry) => !entry.recoverable).length;
+  const peakMemory = Math.max(
+    threadPoolSnapshot.value.peak_process_memory_bytes ?? threadPoolSnapshot.value.peak_estimated_memory_bytes,
+    jobRuntimeSnapshot.value.peak_process_memory_bytes ?? jobRuntimeSnapshot.value.peak_estimated_memory_bytes,
+  );
+  const findings = [
+    queued > 0 ? "存在排队任务，建议观察调度吞吐。" : "",
+    evicted > 0 ? "存在已逐出 runtime，建议检查内存与冷却策略。" : "",
+    unrecoverable > 0 ? "存在不可恢复 runtime，建议查看最近原因。" : "",
+  ].filter(Boolean);
+
+  return {
+    status: findings.length > 0 ? "需关注" : "正常",
+    tagType: findings.length > 0 ? "warning" : "success",
+    queued,
+    evicted,
+    unrecoverable,
+    peakMemory,
+    findings: findings.length > 0 ? findings : ["当前运行状态稳定，暂无需要处理的健康信号。"],
+  };
+});
 
 async function refreshRuntime() {
   try {
@@ -187,6 +215,49 @@ onBeforeUnmount(() => {
       </article>
     </div>
 
+    <article
+      v-if="runtimeHealth"
+      class="health-panel"
+    >
+      <div class="panel-header">
+        <div>
+          <h3 class="panel-title">运行健康诊断</h3>
+          <p class="panel-description">基于当前 snapshot 汇总排队、逐出、不可恢复与峰值内存信号。</p>
+        </div>
+        <TinyTag :type="runtimeHealth.tagType">
+          {{ runtimeHealth.status }}
+        </TinyTag>
+      </div>
+
+      <div class="health-grid">
+        <article class="health-card">
+          <span class="metric-label">队列压力</span>
+          <strong class="metric-value">{{ runtimeHealth.queued }}</strong>
+        </article>
+        <article class="health-card">
+          <span class="metric-label">逐出 runtime</span>
+          <strong class="metric-value">{{ runtimeHealth.evicted }}</strong>
+        </article>
+        <article class="health-card">
+          <span class="metric-label">不可恢复</span>
+          <strong class="metric-value">{{ runtimeHealth.unrecoverable }}</strong>
+        </article>
+        <article class="health-card">
+          <span class="metric-label">峰值内存</span>
+          <strong class="metric-value">{{ formatBytes(runtimeHealth.peakMemory) }}</strong>
+        </article>
+      </div>
+
+      <ul class="health-findings">
+        <li
+          v-for="finding in runtimeHealth.findings"
+          :key="finding"
+        >
+          {{ finding }}
+        </li>
+      </ul>
+    </article>
+
     <div class="runtime-panels">
       <article class="runtime-panel">
         <div class="panel-header">
@@ -291,6 +362,8 @@ onBeforeUnmount(() => {
 
 .runtime-banner,
 .metric-card,
+.health-panel,
+.health-card,
 .runtime-panel {
   background: var(--surface-base);
   border: 1px solid var(--border-default);
@@ -351,6 +424,42 @@ onBeforeUnmount(() => {
   font-size: var(--text-xl);
   font-weight: 590;
   color: var(--text-primary);
+}
+
+.health-panel {
+  display: grid;
+  gap: var(--space-4);
+  padding: var(--space-5);
+}
+
+.health-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--space-3);
+}
+
+.health-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-4);
+}
+
+.health-findings {
+  display: grid;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+}
+
+.health-findings li {
+  padding: var(--space-3);
+  background: var(--surface-raised);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
 }
 
 .runtime-panels {
@@ -439,7 +548,8 @@ onBeforeUnmount(() => {
 }
 
 @media (max-width: 960px) {
-  .metrics-grid {
+  .metrics-grid,
+  .health-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
