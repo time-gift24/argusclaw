@@ -22,10 +22,11 @@ Phase 5A/5B completed the server-only chat REST surface. Phase 5C adds the first
 ## User Experience
 
 - A new sidebar item, "对话", opens the standalone chat page.
-- The page shows sessions and threads in a compact left rail, with the active TinyRobot conversation on the right.
+- The page follows an opencode desktop / Codex-like chat composition: a lightweight context rail sits on the left, the message timeline is the primary surface, and the composer is fixed below the conversation.
 - Users can create a session, create a thread from available templates/providers, select an existing thread, send a message, cancel an active request, refresh messages, and rename/delete session or thread entries.
 - Empty states guide users to configure providers/templates or start a new conversation.
 - `TrPrompts` provides quick starter prompts only when a thread is active and no user input has been typed.
+- Since Phase 5 does not provide chat SSE yet, sending enters a streaming-like pending state and polls the thread snapshot/messages until a new assistant response appears.
 
 ## API Mapping
 
@@ -52,6 +53,6 @@ Phase 5A/5B completed the server-only chat REST surface. Phase 5C adds the first
 
 ## Risk Notes
 
-- Without chat SSE, assistant replies may require manual refresh or short post-send refreshes.
+- Without chat SSE, the frontend can only approximate streaming through pending assistant bubbles and short post-send refresh polling.
 - Creating a usable thread requires at least one template and a resolvable provider/model binding.
 - TinyRobot dependency compatibility must be verified through `pnpm install`, Vitest, and build.

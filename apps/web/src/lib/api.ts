@@ -231,6 +231,71 @@ export interface RuntimeStateResponse {
   job_runtime: JobRuntimeState;
 }
 
+export type ChatMessageRole = "system" | "user" | "assistant" | "tool";
+
+export interface ChatSessionSummary {
+  id: string;
+  name: string;
+  thread_count: number;
+  updated_at: string;
+}
+
+export interface ChatThreadSummary {
+  id: string;
+  title: string | null;
+  turn_count: number;
+  token_count: number;
+  updated_at: string;
+}
+
+export interface ChatMessageRecord {
+  role: ChatMessageRole;
+  content: string;
+  reasoning_content?: string | null;
+  content_parts?: unknown[];
+  tool_call_id?: string | null;
+  name?: string | null;
+  tool_calls?: unknown[] | null;
+  metadata?: {
+    summary?: boolean;
+    mode?: "compaction_prompt" | "compaction_summary" | "compaction_replay" | null;
+    synthetic?: boolean;
+    collapsed_by_default?: boolean;
+  } | null;
+}
+
+export interface CreateChatThreadRequest {
+  template_id: number;
+  provider_id: number | null;
+  model: string | null;
+}
+
+export interface UpdateChatThreadModelRequest {
+  provider_id: number;
+  model: string;
+}
+
+export interface ChatThreadSnapshot {
+  session_id: string;
+  thread_id: string;
+  messages: ChatMessageRecord[];
+  turn_count: number;
+  token_count: number;
+  plan_item_count: number;
+}
+
+export interface ChatThreadBinding {
+  session_id: string;
+  thread_id: string;
+  template_id: number;
+  effective_provider_id: number | null;
+  effective_model: string | null;
+}
+
+export interface ChatActionResponse {
+  accepted: boolean;
+}
+
 export interface RuntimeEventHandlers {
   onSnapshot(snapshot: RuntimeStateResponse): void;
   onError(error: Error): void;
@@ -266,6 +331,24 @@ export interface ApiClient {
   testMcpServerDraft?(input: McpServerRecord): Promise<McpConnectionTestResult>;
   listMcpServerTools?(serverId: number): Promise<McpDiscoveredToolRecord[]>;
   listTools?(): Promise<ToolRegistryItem[]>;
+  listChatSessions?(): Promise<ChatSessionSummary[]>;
+  createChatSession?(name: string): Promise<ChatSessionSummary>;
+  renameChatSession?(sessionId: string, name: string): Promise<ChatSessionSummary>;
+  deleteChatSession?(sessionId: string): Promise<DeleteResponse>;
+  listChatThreads?(sessionId: string): Promise<ChatThreadSummary[]>;
+  createChatThread?(sessionId: string, input: CreateChatThreadRequest): Promise<ChatThreadSummary>;
+  renameChatThread?(sessionId: string, threadId: string, title: string): Promise<ChatThreadSummary>;
+  deleteChatThread?(sessionId: string, threadId: string): Promise<DeleteResponse>;
+  getChatThreadSnapshot?(sessionId: string, threadId: string): Promise<ChatThreadSnapshot>;
+  updateChatThreadModel?(
+    sessionId: string,
+    threadId: string,
+    input: UpdateChatThreadModelRequest,
+  ): Promise<ChatThreadBinding>;
+  activateChatThread?(sessionId: string, threadId: string): Promise<ChatThreadBinding>;
+  listChatMessages?(sessionId: string, threadId: string): Promise<ChatMessageRecord[]>;
+  sendChatMessage?(sessionId: string, threadId: string, message: string): Promise<ChatActionResponse>;
+  cancelChatThread?(sessionId: string, threadId: string): Promise<ChatActionResponse>;
 }
 
 class HttpApiClient implements ApiClient {
@@ -440,6 +523,148 @@ class HttpApiClient implements ApiClient {
 
   listTools(): Promise<ToolRegistryItem[]> {
     return this.request("/tools");
+  }
+
+  listChatSessions(): Promise<ChatSessionSummary[]> {
+    return this.request("/chat/sessions");
+  }
+
+  async createChatSession(name: string): Promise<ChatSessionSummary> {
+    const response = await this.request<MutationResponse<ChatSessionSummary>>("/chat/sessions", {
+      body: JSON.stringify({ name }),
+      headers: {
+        "Content-Type": "application/json",
+      },
+      method: "POST",
+    });
+
+    return response.item;
+  }
+
+  async renameChatSession(sessionId: string, name: string): Promise<ChatSessionSummary> {
+    const response = await this.request<MutationResponse<ChatSessionSummary>>(`/chat/sessions/${sessionId}`, {
+      body: JSON.stringify({ name }),
+      headers: {
+        "Content-Type": "application/json",
+      },
+      method: "PATCH",
+    });
+
+    return response.item;
+  }
+
+  async deleteChatSession(sessionId: string): Promise<DeleteResponse> {
+    const response = await this.request<MutationResponse<DeleteResponse>>(`/chat/sessions/${sessionId}`, {
+      method: "DELETE",
+    });
+
+    return response.item;
+  }
+
+  listChatThreads(sessionId: string): Promise<ChatThreadSummary[]> {
+    return this.request(`/chat/sessions/${sessionId}/threads`);
+  }
+
+  async createChatThread(sessionId: string, input: CreateChatThreadRequest): Promise<ChatThreadSummary> {
+    const response = await this.request<MutationResponse<ChatThreadSummary>>(`/chat/sessions/${sessionId}/threads`, {
+      body: JSON.stringify(input),
+      headers: {
+        "Content-Type": "application/json",
+      },
+      method: "POST",
+    });
+
+    return response.item;
+  }
+
+  async renameChatThread(sessionId: string, threadId: string, title: string): Promise<ChatThreadSummary> {
+    const response = await this.request<MutationResponse<ChatThreadSummary>>(
+      `/chat/sessions/${sessionId}/threads/${threadId}`,
+      {
+        body: JSON.stringify({ title }),
+        headers: {
+          "Content-Type": "application/json",
+        },
+        method: "PATCH",
+      },
+    );
+
+    return response.item;
+  }
+
+  async deleteChatThread(sessionId: string, threadId: string): Promise<DeleteResponse> {
+    const response = await this.request<MutationResponse<DeleteResponse>>(
+      `/chat/sessions/${sessionId}/threads/${threadId}`,
+      {
+        method: "DELETE",
+      },
+    );
+
+    return response.item;
+  }
+
+  getChatThreadSnapshot(sessionId: string, threadId: string): Promise<ChatThreadSnapshot> {
+    return this.request(`/chat/sessions/${sessionId}/threads/${threadId}`);
+  }
+
+  async updateChatThreadModel(
+    sessionId: string,
+    threadId: string,
+    input: UpdateChatThreadModelRequest,
+  ): Promise<ChatThreadBinding> {
+    const response = await this.request<MutationResponse<ChatThreadBinding>>(
+      `/chat/sessions/${sessionId}/threads/${threadId}/model`,
+      {
+        body: JSON.stringify(input),
+        headers: {
+          "Content-Type": "application/json",
+        },
+        method: "PATCH",
+      },
+    );
+
+    return response.item;
+  }
+
+  async activateChatThread(sessionId: string, threadId: string): Promise<ChatThreadBinding> {
+    const response = await this.request<MutationResponse<ChatThreadBinding>>(
+      `/chat/sessions/${sessionId}/threads/${threadId}/activate`,
+      {
+        method: "POST",
+      },
+    );
+
+    return response.item;
+  }
+
+  listChatMessages(sessionId: string, threadId: string): Promise<ChatMessageRecord[]> {
+    return this.request(`/chat/sessions/${sessionId}/threads/${threadId}/messages`);
+  }
+
+  async sendChatMessage(sessionId: string, threadId: string, message: string): Promise<ChatActionResponse> {
+    const response = await this.request<MutationResponse<ChatActionResponse>>(
+      `/chat/sessions/${sessionId}/threads/${threadId}/messages`,
+      {
+        body: JSON.stringify({ message }),
+        headers: {
+          "Content-Type": "application/json",
+        },
+        method: "POST",
+      },
+    );
+
+    return response.item;
+  }
+
+  async cancelChatThread(sessionId: string, threadId: string): Promise<ChatActionResponse> {
+    const response = await this.request<MutationResponse<ChatActionResponse>>(
+      `/chat/sessions/${sessionId}/threads/${threadId}/cancel`,
+      {
+        method: "POST",
+      },
+    );
+
+    return response.item;
   }
 
   private async request<T>(path: string, init?: RequestInit): Promise<T> {

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { flushPromises, mount } from "@vue/test-utils";
 
 vi.mock("@/lib/opentiny", async () => import("@/test/stubs/opentiny"));
+vi.mock("@opentiny/tiny-robot", async () => import("@/test/stubs/tiny-robot"));
 
 import App from "@/App.vue";
 import router from "@/router";
@@ -74,6 +75,7 @@ describe("admin console", () => {
       saveTemplate: async (input) => input,
       listMcpServers: async () => [],
       saveMcpServer: async (input) => input,
+      listChatSessions: async () => [],
     };
     setApiClient(mockApi);
 
@@ -94,6 +96,7 @@ describe("admin console", () => {
     expect(wrapper.text()).toContain("智能体模板");
     expect(wrapper.text()).toContain("MCP 服务");
     expect(wrapper.text()).toContain("工具注册表");
+    expect(wrapper.text()).toContain("对话");
     expect(wrapper.text()).toContain("系统设置");
 
     resetApiClient();

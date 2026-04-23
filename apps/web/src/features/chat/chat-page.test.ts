@@ -1,0 +1,318 @@
+import { flushPromises, mount } from "@vue/test-utils";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+vi.mock("@/lib/opentiny", async () => import("@/test/stubs/opentiny"));
+vi.mock("@opentiny/tiny-robot", async () => import("@/test/stubs/tiny-robot"));
+
+import ChatPage from "./ChatPage.vue";
+import {
+  resetApiClient,
+  setApiClient,
+  type AgentRecord,
+  type ApiClient,
+  type ChatActionResponse,
+  type ChatMessageRecord,
+  type ChatSessionSummary,
+  type ChatThreadBinding,
+  type ChatThreadSnapshot,
+  type ChatThreadSummary,
+  type LlmProviderRecord,
+} from "@/lib/api";
+
+const capturedConsoleErrors: unknown[] = [];
+
+function provider(overrides: Partial<LlmProviderRecord> = {}): LlmProviderRecord {
+  return {
+    id: 7,
+    kind: "openai-compatible",
+    display_name: "Z.ai",
+    base_url: "https://open.bigmodel.cn/api/paas/v4",
+    api_key: "",
+    models: ["glm-4.7"],
+    model_config: {},
+    default_model: "glm-4.7",
+    is_default: true,
+    extra_headers: {},
+    secret_status: "ready",
+    meta_data: {},
+    ...overrides,
+  };
+}
+
+function template(overrides: Partial<AgentRecord> = {}): AgentRecord {
+  return {
+    id: 3,
+    display_name: "通用助手",
+    description: "适合日常问答和轻量任务。",
+    version: "1.0.0",
+    provider_id: null,
+    model_id: null,
+    system_prompt: "You are helpful.",
+    tool_names: [],
+    subagent_names: [],
+    max_tokens: null,
+    temperature: null,
+    thinking_config: null,
+    ...overrides,
+  };
+}
+
+function session(overrides: Partial<ChatSessionSummary> = {}): ChatSessionSummary {
+  return {
+    id: "session-1",
+    name: "默认会话",
+    thread_count: 1,
+    updated_at: "2026-04-24T10:00:00Z",
+    ...overrides,
+  };
+}
+
+function thread(overrides: Partial<ChatThreadSummary> = {}): ChatThreadSummary {
+  return {
+    id: "thread-1",
+    title: "产品讨论",
+    turn_count: 1,
+    token_count: 12,
+    updated_at: "2026-04-24T10:01:00Z",
+    ...overrides,
+  };
+}
+
+function message(role: ChatMessageRecord["role"], content: string): ChatMessageRecord {
+  return {
+    role,
+    content,
+    reasoning_content: null,
+    content_parts: [],
+    tool_call_id: null,
+    name: null,
+    tool_calls: null,
+    metadata: null,
+  };
+}
+
+function runtimeState() {
+  return {
+    thread_pool: {
+      snapshot: {
+        max_threads: 8,
+        active_threads: 0,
+        queued_threads: 0,
+        running_threads: 0,
+        cooling_threads: 0,
+        evicted_threads: 0,
+        estimated_memory_bytes: 0,
+        peak_estimated_memory_bytes: 0,
+        process_memory_bytes: null,
+        peak_process_memory_bytes: null,
+        resident_thread_count: 0,
+        avg_thread_memory_bytes: 0,
+        captured_at: "2026-04-24T10:00:00Z",
+      },
+      runtimes: [],
+    },
+    job_runtime: {
+      snapshot: {
+        max_threads: 8,
+        active_threads: 0,
+        queued_threads: 0,
+        running_threads: 0,
+        cooling_threads: 0,
+        evicted_threads: 0,
+        estimated_memory_bytes: 0,
+        peak_estimated_memory_bytes: 0,
+        process_memory_bytes: null,
+        peak_process_memory_bytes: null,
+        resident_thread_count: 0,
+        avg_thread_memory_bytes: 0,
+        captured_at: "2026-04-24T10:00:00Z",
+      },
+      runtimes: [],
+    },
+  };
+}
+
+function makeApiClient(overrides: Partial<ApiClient> = {}): ApiClient {
+  return {
+    getHealth: vi.fn().mockResolvedValue({ status: "ok" }),
+    getBootstrap: vi.fn().mockResolvedValue({
+      instance_name: "ArgusWing",
+      provider_count: 1,
+      template_count: 1,
+      mcp_server_count: 0,
+      default_provider_id: 7,
+      default_template_id: 3,
+      mcp_ready_count: 0,
+    }),
+    getRuntimeState: vi.fn().mockResolvedValue(runtimeState()),
+    getSettings: vi.fn().mockResolvedValue({
+      instance_name: "ArgusWing",
+      default_provider_id: 7,
+      default_provider_name: "Z.ai",
+    }),
+    updateSettings: vi.fn().mockResolvedValue({
+      instance_name: "ArgusWing",
+      default_provider_id: 7,
+      default_provider_name: "Z.ai",
+    }),
+    listProviders: vi.fn().mockResolvedValue([provider()]),
+    saveProvider: vi.fn().mockImplementation(async (input) => input),
+    listTemplates: vi.fn().mockResolvedValue([template()]),
+    saveTemplate: vi.fn().mockImplementation(async (input) => input),
+    listMcpServers: vi.fn().mockResolvedValue([]),
+    saveMcpServer: vi.fn().mockImplementation(async (input) => input),
+    listChatSessions: vi.fn().mockResolvedValue([]),
+    createChatSession: vi.fn().mockResolvedValue(session()),
+    renameChatSession: vi.fn().mockImplementation(async (_sessionId, name) => session({ name })),
+    deleteChatSession: vi.fn().mockResolvedValue({ deleted: true }),
+    listChatThreads: vi.fn().mockResolvedValue([]),
+    createChatThread: vi.fn().mockResolvedValue(thread()),
+    renameChatThread: vi.fn().mockImplementation(async (_sessionId, _threadId, title) => thread({ title })),
+    deleteChatThread: vi.fn().mockResolvedValue({ deleted: true }),
+    getChatThreadSnapshot: vi.fn().mockResolvedValue({
+      session_id: "session-1",
+      thread_id: "thread-1",
+      messages: [],
+      turn_count: 0,
+      token_count: 0,
+      plan_item_count: 0,
+    }),
+    updateChatThreadModel: vi.fn().mockResolvedValue({
+      session_id: "session-1",
+      thread_id: "thread-1",
+      template_id: 3,
+      effective_provider_id: 7,
+      effective_model: "glm-4.7",
+    }),
+    activateChatThread: vi.fn().mockResolvedValue({
+      session_id: "session-1",
+      thread_id: "thread-1",
+      template_id: 3,
+      effective_provider_id: 7,
+      effective_model: "glm-4.7",
+    }),
+    listChatMessages: vi.fn().mockResolvedValue([]),
+    sendChatMessage: vi.fn().mockResolvedValue({ accepted: true }),
+    cancelChatThread: vi.fn().mockResolvedValue({ accepted: true }),
+    ...overrides,
+  };
+}
+
+afterEach(() => {
+  resetApiClient();
+  capturedConsoleErrors.splice(0);
+});
+
+describe("ChatPage", () => {
+  it("creates a session and thread, then sends a message through the Phase 5 API", async () => {
+    const listChatSessions = vi.fn<() => Promise<ChatSessionSummary[]>>().mockResolvedValueOnce([]).mockResolvedValue([session()]);
+    const listChatThreads = vi.fn<(sessionId: string) => Promise<ChatThreadSummary[]>>().mockResolvedValueOnce([]).mockResolvedValue([thread()]);
+    const createChatSession = vi.fn<(name: string) => Promise<ChatSessionSummary>>().mockResolvedValue(session());
+    const createChatThread = vi
+      .fn<(sessionId: string, input: { template_id: number; provider_id: number | null; model: string | null }) => Promise<ChatThreadSummary>>()
+      .mockResolvedValue(thread());
+    const listChatMessages = vi
+      .fn<(sessionId: string, threadId: string) => Promise<ChatMessageRecord[]>>()
+      .mockResolvedValueOnce([])
+      .mockResolvedValue([message("user", "帮我总结 MCP 配置"), message("assistant", "可以，先检查已启用服务。")]);
+    const getChatThreadSnapshot = vi
+      .fn<(sessionId: string, threadId: string) => Promise<ChatThreadSnapshot>>()
+      .mockResolvedValue({
+        session_id: "session-1",
+        thread_id: "thread-1",
+        messages: [message("user", "帮我总结 MCP 配置"), message("assistant", "可以，先检查已启用服务。")],
+        turn_count: 1,
+        token_count: 18,
+        plan_item_count: 0,
+      });
+    const sendChatMessage = vi
+      .fn<(sessionId: string, threadId: string, messageText: string) => Promise<ChatActionResponse>>()
+      .mockResolvedValue({ accepted: true });
+
+    setApiClient(
+      makeApiClient({
+        listChatSessions,
+        listChatThreads,
+        createChatSession,
+        createChatThread,
+        listChatMessages,
+        getChatThreadSnapshot,
+        sendChatMessage,
+      }),
+    );
+
+    const wrapper = mount(ChatPage);
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("暂无对话会话");
+    await wrapper.get('[data-testid="create-session"]').trigger("click");
+    await flushPromises();
+
+    expect(createChatSession).toHaveBeenCalledWith("新的 Web 对话");
+    expect(wrapper.text()).toContain("默认会话");
+
+    await wrapper.get('[data-testid="create-thread"]').trigger("click");
+    await flushPromises();
+
+    expect(createChatThread).toHaveBeenCalledWith("session-1", {
+      template_id: 3,
+      provider_id: 7,
+      model: "glm-4.7",
+    });
+    expect(wrapper.text()).toContain("产品讨论");
+
+    await wrapper.get("[data-testid='chat-input']").setValue("帮我总结 MCP 配置");
+    await flushPromises();
+    await wrapper.get(".tr-sender-stub button").trigger("click");
+    await flushPromises();
+
+    expect(sendChatMessage).toHaveBeenCalledWith("session-1", "thread-1", "帮我总结 MCP 配置");
+    expect(wrapper.text()).toContain("消息已提交");
+    expect(wrapper.text()).toContain("可以，先检查已启用服务。");
+  });
+
+  it("cancels an active thread and surfaces API failures", async () => {
+    const cancelChatThread = vi.fn<(sessionId: string, threadId: string) => Promise<ChatActionResponse>>().mockResolvedValue({
+      accepted: true,
+    });
+    const failingListChatMessages = vi
+      .fn<(sessionId: string, threadId: string) => Promise<ChatMessageRecord[]>>()
+      .mockRejectedValue(new Error("Request failed: 502"));
+
+    setApiClient(
+      makeApiClient({
+        listChatSessions: vi.fn().mockResolvedValue([session()]),
+        listChatThreads: vi.fn().mockResolvedValue([thread()]),
+        listChatMessages: failingListChatMessages,
+        cancelChatThread,
+      }),
+    );
+
+    const wrapper = mount(ChatPage);
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("Request failed: 502");
+    await wrapper.get('[data-testid="cancel-thread"]').trigger("click");
+    await flushPromises();
+
+    expect(cancelChatThread).toHaveBeenCalledWith("session-1", "thread-1");
+    expect(wrapper.text()).toContain("已请求取消当前线程。");
+  });
+
+  it("shows starter prompts and applies a prompt to the sender", async () => {
+    setApiClient(
+      makeApiClient({
+        listChatSessions: vi.fn().mockResolvedValue([session()]),
+        listChatThreads: vi.fn().mockResolvedValue([thread()]),
+        listChatMessages: vi.fn().mockResolvedValue([]),
+      }),
+    );
+
+    const wrapper = mount(ChatPage);
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("快速开始");
+    await wrapper.get('[data-testid="prompt-provider"]').trigger("click");
+    expect((wrapper.get("[data-testid='chat-input']").element as HTMLInputElement).value).toContain("当前默认模型");
+  });
+});

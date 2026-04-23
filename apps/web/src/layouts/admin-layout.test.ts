@@ -3,6 +3,7 @@ import { mount } from "@vue/test-utils";
 import { createRouter, createMemoryHistory } from "vue-router";
 
 vi.mock("@/lib/opentiny", async () => import("@/test/stubs/opentiny"));
+vi.mock("@opentiny/tiny-robot", async () => import("@/test/stubs/tiny-robot"));
 
 import AdminLayout from "./AdminLayout.vue";
 import HealthPage from "@/features/health/HealthPage.vue";
@@ -11,6 +12,7 @@ import ProvidersPage from "@/features/providers/ProvidersPage.vue";
 import TemplatesPage from "@/features/templates/TemplatesPage.vue";
 import McpPage from "@/features/mcp/McpPage.vue";
 import ToolsPage from "@/features/tools/ToolsPage.vue";
+import ChatPage from "@/features/chat/ChatPage.vue";
 import RuntimePage from "@/features/runtime/RuntimePage.vue";
 import SettingsPage from "@/features/settings/SettingsPage.vue";
 
@@ -30,6 +32,7 @@ describe("AdminLayout", () => {
             { path: "templates", component: TemplatesPage },
             { path: "mcp", component: McpPage },
             { path: "tools", component: ToolsPage },
+            { path: "chat", component: ChatPage },
             { path: "settings", component: SettingsPage },
           ],
         },
@@ -58,6 +61,7 @@ describe("AdminLayout", () => {
     expect(wrapper.text()).toContain("模型提供方");
     expect(wrapper.text()).toContain("智能体模板");
     expect(wrapper.text()).toContain("工具注册表");
+    expect(wrapper.text()).toContain("对话");
     expect(wrapper.find(".topbar").exists()).toBe(false);
     expect(wrapper.text()).not.toContain("Desktop Server Web Admin");
   });

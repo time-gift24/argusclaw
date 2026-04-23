@@ -10,6 +10,8 @@ import McpPage from "@/features/mcp/McpPage.vue";
 import ToolsPage from "@/features/tools/ToolsPage.vue";
 import SettingsPage from "@/features/settings/SettingsPage.vue";
 
+const ChatPage = () => import("@/features/chat/ChatPage.vue");
+
 export const router = createRouter({
   history: createWebHistory(),
   routes: [
@@ -51,6 +53,11 @@ export const router = createRouter({
           path: "tools",
           name: "tools",
           component: ToolsPage,
+        },
+        {
+          path: "chat",
+          name: "chat",
+          component: ChatPage,
         },
         {
           path: "settings",

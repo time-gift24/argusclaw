@@ -265,12 +265,13 @@ Inter Variable, "Noto Sans SC", "PingFang SC", system-ui, sans-serif
 
 ### 对话（/chat）
 - 独立 Web 对话页，不复用 desktop chat store，不引入 shared frontend core
-- 页面结构：左侧会话/线程管理 rail + 右侧 TinyRobot 对话面板
+- 页面结构：参考 opencode desktop / Codex 对话风格，左侧为轻量上下文 rail，消息 timeline 是主舞台，底部固定 composer
 - TinyRobot 组件：消息区使用 `TrBubbleList`，输入区使用 `TrSender`，空线程 starter 使用 `TrPrompts`
 - OpenTiny 控件：会话/线程创建、删除、刷新、模板/提供方/模型选择、状态反馈继续使用 OpenTiny Vue
-- 交互边界：通过 Phase 5 REST API 创建 session/thread、发送消息、取消运行、刷新消息，不使用 chat SSE
+- 交互边界：通过 Phase 5 REST API 创建 session/thread、发送消息、取消运行、刷新消息，不使用 desktop chat store
+- 流式反馈：Phase 5 暂无 chat SSE，发送后用 pending assistant bubble + 短轮询刷新模拟生成中状态
 - 空状态：无会话、无线程、无 provider/template 时提供中文引导和可执行按钮
-- 布局：桌面三栏感（页面 rail + 对话主面板），移动端堆叠为单列
+- 布局：桌面对话 split（左侧上下文区 + 主消息区 + 底部输入区），移动端堆叠为单列
 
 ## 7. API 约定（不变）
 

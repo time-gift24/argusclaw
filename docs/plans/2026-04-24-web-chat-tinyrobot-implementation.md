@@ -67,9 +67,10 @@ cd apps/web && pnpm exec vitest run apps/web/src/features/chat/chat-page.test.ts
 
 - Create `apps/web/src/features/chat/ChatPage.vue`.
 - Use `TrBubbleList`, `TrSender`, and `TrPrompts`.
+- Shape the page after opencode desktop / Codex chat behavior: left context rail, primary message timeline, bottom composer, and pending assistant feedback while the backend is generating.
 - Use OpenTiny controls for session/thread operations, selectors, refresh, delete, and status actions.
 - Keep all labels and feedback in Chinese.
-- Avoid SSE assumptions; refresh affected state after mutations.
+- Avoid SSE assumptions; refresh affected state after mutations and use short post-send polling to approximate streaming until Phase 5 adds a chat event stream.
 
 Verification:
 
