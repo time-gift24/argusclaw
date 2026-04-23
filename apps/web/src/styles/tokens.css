@@ -30,8 +30,10 @@
   --danger-border: rgba(239, 68, 68, 0.25);
   --warning: #f59e0b;
   --warning-bg: rgba(245, 158, 11, 0.12);
+  --warning-border: rgba(245, 158, 11, 0.25);
   --info: #3b82f6;
   --info-bg: rgba(59, 130, 246, 0.12);
+  --info-border: rgba(59, 130, 246, 0.25);
 
   /* === 间距 === */
   --space-1: 4px;
