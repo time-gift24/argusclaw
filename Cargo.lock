@@ -408,6 +408,7 @@ dependencies = [
 name = "argus-wing"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "argus-agent",
  "argus-auth",
  "argus-crypto",
@@ -421,7 +422,9 @@ dependencies = [
  "argus-thread-pool",
  "argus-tool",
  "async-trait",
+ "clap",
  "dirs",
+ "rust_decimal",
  "serde",
  "serde_json",
  "sqlx",
