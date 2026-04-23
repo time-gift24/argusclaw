@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
 
-import { getApiClient, type McpDiscoveredToolRecord, type McpServerRecord } from "@/lib/api";
+import { getApiClient, type McpConnectionTestResult, type McpDiscoveredToolRecord, type McpServerRecord } from "@/lib/api";
 import {
   TinyButton,
   TinyForm,
@@ -47,7 +47,7 @@ const loadingToolsServerId = ref<number | null>(null);
 const toolsByServer = ref<Record<number, McpDiscoveredToolRecord[]>>({});
 const importJsonText = ref("");
 const importingConfig = ref(false);
-const creationMode = ref("manual");
+const creationMode = ref<"json" | "manual">("json");
 
 function createFormState(overrides: Partial<McpFormState> = {}): McpFormState {
   return {
@@ -79,6 +79,28 @@ const submitLabel = computed(() => {
 
   return isEditing.value ? "更新 MCP 服务" : "创建 MCP 服务";
 });
+const primaryCreationLabel = computed(() => {
+  if (creationMode.value === "json") {
+    return importingConfig.value ? "导入中…" : "导入 MCP 配置";
+  }
+
+  return submitLabel.value;
+});
+const testCreationLabel = computed(() => {
+  if (testingDraft.value) {
+    return "测试中";
+  }
+
+  return creationMode.value === "json" ? "测试 JSON 配置" : "测试当前配置";
+});
+const resetCreationLabel = computed(() => {
+  if (creationMode.value === "json") {
+    return "清空 JSON";
+  }
+
+  return isEditing.value ? "取消编辑" : "重置表单";
+});
+const primaryCreationDisabled = computed(() => (creationMode.value === "json" ? importingConfig.value : saving.value));
 
 const summary = computed(() => {
   return {
@@ -272,6 +294,17 @@ function resetForm() {
   form.value = createFormState();
 }
 
+function resetCreationDraft() {
+  if (creationMode.value === "json") {
+    importJsonText.value = "";
+    error.value = "";
+    actionMessage.value = "";
+    return;
+  }
+
+  resetForm();
+}
+
 function editMcpServer(server: McpServerRecord) {
   creationMode.value = "manual";
   const baseState = {
@@ -434,6 +467,65 @@ async function importMcpJson() {
   } finally {
     importingConfig.value = false;
   }
+}
+
+async function testImportedMcpJson() {
+  if (!api.testMcpServerDraft) {
+    error.value = "当前 API 客户端不支持临时 MCP 配置测试。";
+    return;
+  }
+
+  let records: McpServerRecord[];
+  try {
+    records = importedRecordsFromJson(importJsonText.value);
+  } catch (reason) {
+    error.value = reason instanceof Error ? reason.message : "解析 MCP JSON 失败。";
+    actionMessage.value = "";
+    return;
+  }
+
+  testingDraft.value = true;
+  error.value = "";
+  actionMessage.value = "";
+
+  try {
+    const results: McpConnectionTestResult[] = [];
+    for (const record of records) {
+      results.push(await api.testMcpServerDraft(record));
+    }
+
+    const firstResult = results[0];
+    if (results.length === 1 && firstResult) {
+      actionMessage.value = `JSON 配置测试：${firstResult.message}`;
+      return;
+    }
+
+    actionMessage.value = `已测试 ${results.length} 个 JSON MCP 配置：${results
+      .map((result, index) => `${records[index]?.display_name ?? `第 ${index + 1} 个服务`} ${result.message}`)
+      .join("；")}`;
+  } catch (reason) {
+    error.value = reason instanceof Error ? reason.message : "JSON MCP 配置测试失败。";
+  } finally {
+    testingDraft.value = false;
+  }
+}
+
+async function submitCreationDraft() {
+  if (creationMode.value === "json") {
+    await importMcpJson();
+    return;
+  }
+
+  await saveMcpServerDraft();
+}
+
+async function testCreationDraft() {
+  if (creationMode.value === "json") {
+    await testImportedMcpJson();
+    return;
+  }
+
+  await testDraftMcpServer();
 }
 
 async function loadServerTools(server: McpServerRecord) {
@@ -690,33 +782,33 @@ onMounted(() => {
       <div class="panel-header">
         <h3 class="panel-title">{{ isEditing ? "编辑 MCP 服务" : "新增 MCP 服务" }}</h3>
         <p class="panel-description">
-          {{ isEditing ? "更新已配置服务的连接参数" : "选择手动配置或 JSON 导入来创建 MCP 服务" }}
+          {{ isEditing ? "更新已配置服务的连接参数" : "优先粘贴 JSON 配置，也可切换到手动配置" }}
         </p>
       </div>
 
       <div
-        class="creation-tabs"
-        :class="`creation-tabs--${creationMode}`"
         role="tablist"
         aria-label="MCP 创建方式"
       >
         <TinyButton
-          data-testid="mcp-create-tab-manual"
-          role="tab"
-          :aria-selected="creationMode === 'manual'"
-          type="default"
-          @click="creationMode = 'manual'"
-        >
-          手动配置
-        </TinyButton>
-        <TinyButton
           data-testid="mcp-create-tab-json"
+          class="creation-mode-tab"
           role="tab"
           :aria-selected="creationMode === 'json'"
           type="default"
           @click="creationMode = 'json'"
         >
           JSON 导入
+        </TinyButton>
+        <TinyButton
+          data-testid="mcp-create-tab-manual"
+          class="creation-mode-tab"
+          role="tab"
+          :aria-selected="creationMode === 'manual'"
+          type="default"
+          @click="creationMode = 'manual'"
+        >
+          手动配置
         </TinyButton>
       </div>
 
@@ -733,7 +825,7 @@ onMounted(() => {
           <form
             data-testid="mcp-form"
             class="mcp-form"
-            @submit.prevent="saveMcpServerDraft"
+            @submit.prevent="submitCreationDraft"
           >
             <TinyForm
               label-position="top"
@@ -854,30 +946,6 @@ onMounted(() => {
                 </div>
               </TinyFormItem>
             </TinyForm>
-
-            <div class="mcp-form__actions">
-              <TinyButton
-                native-type="submit"
-                type="primary"
-                :disabled="saving"
-              >
-                {{ submitLabel }}
-              </TinyButton>
-              <TinyButton
-                data-testid="test-mcp-draft"
-                type="default"
-                :disabled="testingDraft"
-                @click="testDraftMcpServer"
-              >
-                {{ testingDraft ? "测试中" : "测试当前配置" }}
-              </TinyButton>
-              <TinyButton
-                type="default"
-                @click="resetForm"
-              >
-                {{ isEditing ? "取消编辑" : "重置" }}
-              </TinyButton>
-            </div>
           </form>
         </div>
 
@@ -900,19 +968,35 @@ onMounted(() => {
             @update:model-value="importJsonText = String($event)"
           />
 
-          <div class="import-actions">
-            <TinyButton
-              data-testid="import-mcp-json"
-              type="primary"
-              :disabled="importingConfig"
-              @click="importMcpJson"
-            >
-              {{ importingConfig ? "导入中" : "导入配置" }}
-            </TinyButton>
-            <span class="import-hint">导入后会保存为 stdio MCP 服务，并使用默认 5000ms 超时。</span>
-          </div>
+          <span class="import-hint">导入后会保存为 stdio MCP 服务，并使用默认 5000ms 超时。</span>
         </div>
       </Transition>
+
+      <div class="creation-action-bar">
+        <TinyButton
+          data-testid="submit-creation-draft"
+          type="primary"
+          :disabled="primaryCreationDisabled"
+          @click="submitCreationDraft"
+        >
+          {{ primaryCreationLabel }}
+        </TinyButton>
+        <TinyButton
+          data-testid="test-mcp-draft"
+          type="default"
+          :disabled="testingDraft"
+          @click="testCreationDraft"
+        >
+          {{ testCreationLabel }}
+        </TinyButton>
+        <TinyButton
+          data-testid="reset-creation-draft"
+          type="default"
+          @click="resetCreationDraft"
+        >
+          {{ resetCreationLabel }}
+        </TinyButton>
+      </div>
     </article>
   </section>
 </template>
@@ -987,8 +1071,7 @@ onMounted(() => {
   margin-bottom: 0;
 }
 
-.mcp-form__switch,
-.mcp-form__actions {
+.mcp-form__switch {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
@@ -998,6 +1081,44 @@ onMounted(() => {
 .switch-hint {
   font-size: var(--text-sm);
   color: var(--text-muted);
+}
+
+.creation-action-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
+
+.creation-action-bar :deep(.tiny-button) {
+  height: 30px;
+  padding: 0 var(--space-4);
+  font-size: var(--text-xs);
+  font-weight: 560;
+  border-radius: var(--radius-md);
+}
+
+.creation-action-bar :deep(.tiny-button[type="primary"]) {
+  color: #ffffff;
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.creation-action-bar :deep(.tiny-button[type="primary"]:hover) {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+
+.creation-action-bar :deep(.tiny-button[type="default"]) {
+  color: var(--text-secondary);
+  background: var(--surface-raised);
+  border-color: var(--border-default);
+}
+
+.creation-action-bar :deep(.tiny-button[type="default"]:hover) {
+  color: var(--text-primary);
+  background: var(--surface-overlay);
+  border-color: var(--border-strong);
 }
 
 .create-panel,
@@ -1012,44 +1133,15 @@ onMounted(() => {
   display: grid;
 }
 
-.creation-tabs {
-  position: relative;
-  display: inline-grid;
-  grid-template-columns: repeat(2, minmax(88px, 1fr));
-  align-items: center;
-  width: max-content;
-  padding: 3px;
-  overflow: hidden;
-  background: var(--surface-raised);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-full);
+.creation-tab-panel {
+  min-height: clamp(420px, 52vh, 560px);
+  align-content: start;
 }
 
-.creation-tabs::before {
-  position: absolute;
-  inset: 3px auto 3px 3px;
-  width: calc((100% - 6px) / 2);
-  content: "";
-  background: var(--surface-base);
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-full);
-  box-shadow: var(--shadow-xs);
-  pointer-events: none;
-  transition:
-    transform 180ms ease,
-    box-shadow 180ms ease;
-}
-
-.creation-tabs--json::before {
-  transform: translateX(100%);
-}
-
-.creation-tabs :deep(.tiny-button) {
-  position: relative;
-  z-index: 1;
-  min-width: 88px;
-  height: 30px;
-  padding: 0 var(--space-3);
+.creation-mode-tab {
+  min-width: 0;
+  height: auto;
+  padding: 0 var(--space-3) 0 0;
   font-size: var(--text-xs);
   font-weight: 560;
   color: var(--text-muted);
@@ -1058,17 +1150,15 @@ onMounted(() => {
   box-shadow: none;
   transition:
     color 160ms ease,
-    transform 160ms ease,
     opacity 160ms ease;
 }
 
-.creation-tabs :deep(.tiny-button[aria-selected="true"]) {
+.creation-mode-tab[aria-selected="true"] {
   color: var(--text-primary);
 }
 
-.creation-tabs :deep(.tiny-button:hover) {
+.creation-mode-tab:hover {
   color: var(--text-primary);
-  transform: translateY(-1px);
 }
 
 .creation-panel-enter-active,
@@ -1082,13 +1172,6 @@ onMounted(() => {
 .creation-panel-leave-to {
   opacity: 0;
   transform: translateY(6px);
-}
-
-.import-actions {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: var(--space-3);
 }
 
 .import-hint {

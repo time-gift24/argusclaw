@@ -322,6 +322,8 @@ describe("McpPage", () => {
     const wrapper = mount(McpPage);
     await flushPromises();
 
+    await wrapper.get('[data-testid="mcp-create-tab-manual"]').trigger("click");
+    await flushPromises();
     await wrapper.get('[name="mcp-display-name"]').setValue("Docs MCP");
     await wrapper.get('[name="mcp-command"]').setValue("docs-mcp");
     await wrapper.get('[name="mcp-args"]').setValue("--stdio\n--verbose");
@@ -340,7 +342,7 @@ describe("McpPage", () => {
     );
     expect(wrapper.text()).toContain("missing binary");
 
-    await wrapper.get('[data-testid="mcp-form"]').trigger("submit");
+    await wrapper.get('[data-testid="submit-creation-draft"]').trigger("click");
     await flushPromises();
     expect(saveMcpServer).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -422,7 +424,7 @@ describe("McpPage", () => {
         },
       }),
     );
-    await wrapper.get('[data-testid="import-mcp-json"]').trigger("click");
+    await wrapper.get('[data-testid="submit-creation-draft"]').trigger("click");
     await flushPromises();
 
     expect(saveMcpServer).toHaveBeenCalledWith(
@@ -482,13 +484,100 @@ describe("McpPage", () => {
     const creationCard = wrapper.get('[data-testid="mcp-create-card"]');
     expect(creationCard.text()).toContain("手动配置");
     expect(creationCard.text()).toContain("JSON 导入");
+    expect(creationCard.get('[role="tablist"]').classes()).toHaveLength(0);
+    expect(creationCard.find(".creation-tabs").exists()).toBe(false);
+    expect(creationCard.findAll(".creation-action-bar")).toHaveLength(1);
+    expect(creationCard.find('[name="mcp-import-json"]').exists()).toBe(true);
+    expect(creationCard.find('[data-testid="mcp-form"]').exists()).toBe(false);
+    expect(creationCard.get('[data-testid="submit-creation-draft"]').text()).toContain("导入 MCP 配置");
+    expect(creationCard.get('[data-testid="test-mcp-draft"]').text()).toContain("测试 JSON 配置");
+    expect(creationCard.get('[data-testid="reset-creation-draft"]').text()).toContain("清空 JSON");
+
+    await creationCard.get('[data-testid="mcp-create-tab-manual"]').trigger("click");
+    await flushPromises();
     expect(creationCard.find('[data-testid="mcp-form"]').exists()).toBe(true);
     expect(creationCard.find('[name="mcp-import-json"]').exists()).toBe(false);
-
-    await creationCard.get('[data-testid="mcp-create-tab-json"]').trigger("click");
-    await flushPromises();
-    expect(creationCard.find('[name="mcp-import-json"]').exists()).toBe(true);
+    expect(creationCard.findAll(".creation-action-bar")).toHaveLength(1);
+    expect(creationCard.get('[data-testid="submit-creation-draft"]').text()).toContain("创建 MCP 服务");
+    expect(creationCard.get('[data-testid="test-mcp-draft"]').text()).toContain("测试当前配置");
     expect(wrapper.findAll(".form-panel")).toHaveLength(1);
+  });
+
+  it("tests imported MCP JSON configuration from the shared action bar", async () => {
+    const testMcpServerDraft = vi.fn<(input: McpServerRecord) => Promise<McpConnectionTestResult>>().mockResolvedValue({
+      status: "ready",
+      checked_at: "2026-04-23T12:00:00Z",
+      latency_ms: 11,
+      discovered_tools: [],
+      message: "json config ok",
+    });
+
+    setApiClient({
+      getHealth: async () => ({ status: "ok" }),
+      getBootstrap: async () => ({
+        instance_name: "",
+        provider_count: 0,
+        template_count: 0,
+        mcp_server_count: 0,
+        default_provider_id: null,
+        default_template_id: null,
+        mcp_ready_count: 0,
+      }),
+      getRuntimeState: async () => emptyRuntimeState(),
+      getSettings: async () => ({ instance_name: "", default_provider_id: null, default_provider_name: null }),
+      updateSettings: async () => ({ instance_name: "", default_provider_id: null, default_provider_name: null }),
+      listProviders: async () => [],
+      saveProvider: async (input) => input,
+      listTemplates: async () => [],
+      saveTemplate: async (input) => input,
+      listMcpServers: async () => [],
+      saveMcpServer: async (input) => input,
+      deleteMcpServer: async () => ({ deleted: true }),
+      testMcpServer: async () => ({
+        status: "ready",
+        checked_at: "2026-04-23T12:00:00Z",
+        latency_ms: 10,
+        discovered_tools: [],
+        message: "connection succeeded",
+      }),
+      testMcpServerDraft,
+      listMcpServerTools: async () => [],
+    });
+
+    const wrapper = mount(McpPage);
+    await flushPromises();
+
+    await wrapper.get('[data-testid="mcp-create-tab-json"]').trigger("click");
+    await flushPromises();
+    await wrapper.get('[name="mcp-import-json"]').setValue(
+      JSON.stringify({
+        "brave-search": {
+          command: "npx",
+          args: ["-y", "@modelcontextprotocol/server-brave-search"],
+          env: { BRAVE_API_KEY: "xxx" },
+        },
+      }),
+    );
+
+    await wrapper.get('[data-testid="test-mcp-draft"]').trigger("click");
+    await flushPromises();
+
+    expect(testMcpServerDraft).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: null,
+        display_name: "brave-search",
+        enabled: true,
+        timeout_ms: 5000,
+        status: "connecting",
+        transport: {
+          kind: "stdio",
+          command: "npx",
+          args: ["-y", "@modelcontextprotocol/server-brave-search"],
+          env: { BRAVE_API_KEY: "xxx" },
+        },
+      }),
+    );
+    expect(wrapper.text()).toContain("JSON 配置测试：json config ok");
   });
 
   it("shows an error without saving when imported MCP JSON is invalid", async () => {
@@ -531,7 +620,7 @@ describe("McpPage", () => {
     await wrapper.get('[data-testid="mcp-create-tab-json"]').trigger("click");
     await flushPromises();
     await wrapper.get('[name="mcp-import-json"]').setValue('{ "broken": { "args": [] } }');
-    await wrapper.get('[data-testid="import-mcp-json"]').trigger("click");
+    await wrapper.get('[data-testid="submit-creation-draft"]').trigger("click");
     await flushPromises();
 
     expect(saveMcpServer).not.toHaveBeenCalled();
@@ -605,7 +694,7 @@ describe("McpPage", () => {
     await wrapper.get('[name="mcp-url"]').setValue("https://new.example.com/mcp");
     await wrapper.get('[name="mcp-headers"]').setValue("Authorization=Bearer new");
     await wrapper.get('[name="mcp-timeout"]').setValue("9000");
-    await wrapper.get('[data-testid="mcp-form"]').trigger("submit");
+    await wrapper.get('[data-testid="submit-creation-draft"]').trigger("click");
     await flushPromises();
 
     expect(saveMcpServer).toHaveBeenCalledWith(
