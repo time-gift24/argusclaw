@@ -608,3 +608,14 @@ GET /api/v1/mcp/servers/{server_id}/tools
 - Provider management has a complete add/edit/test/delete loop
 - MCP management can test servers and inspect discovered tools
 - Templates can be removed from the admin console
+
+### Phase 4A: Improve MCP operations visibility
+
+**Intent:** Improve the management console's MCP operations view without adding new server contracts.
+
+**Expected UI shape:**
+
+- MCP page shows service, ready, attention, and discovered-tool summary cards
+- Each MCP server card shows transport target, timeout, last check, last success, and last error diagnostics
+- Existing discovered-tools API renders tool names, descriptions, and schema previews
+- Refresh, test, tools, and delete actions keep the existing REST contract unchanged

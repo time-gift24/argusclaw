@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from "vue";
+import { computed, onMounted, ref } from "vue";
 
 import { getApiClient, type McpDiscoveredToolRecord, type McpServerRecord } from "@/lib/api";
 import { TinyButton, TinyTag } from "@/lib/opentiny";
@@ -13,6 +13,38 @@ const deletingServerId = ref<number | null>(null);
 const testingServerId = ref<number | null>(null);
 const loadingToolsServerId = ref<number | null>(null);
 const toolsByServer = ref<Record<number, McpDiscoveredToolRecord[]>>({});
+
+const summary = computed(() => {
+  return {
+    total: servers.value.length,
+    ready: servers.value.filter((server) => server.enabled && server.status === "ready").length,
+    attention: servers.value.filter((server) => !server.enabled || ["failed", "retrying"].includes(server.status)).length,
+    tools: servers.value.reduce((count, server) => count + server.discovered_tool_count, 0),
+  };
+});
+
+function transportLabel(server: McpServerRecord) {
+  if (server.transport.kind === "stdio") {
+    return `stdio：${server.transport.command}`;
+  }
+
+  return `${server.transport.kind}：${server.transport.url}`;
+}
+
+function statusType(server: McpServerRecord) {
+  if (!server.enabled) {
+    return "danger";
+  }
+  return server.status === "ready" ? "success" : server.status === "failed" ? "danger" : "warning";
+}
+
+function formatNullable(value: string | null) {
+  return value ?? "暂无";
+}
+
+function schemaPreview(tool: McpDiscoveredToolRecord) {
+  return JSON.stringify(tool.schema, null, 2);
+}
 
 async function loadServers() {
   loading.value = true;
@@ -114,6 +146,14 @@ onMounted(() => {
           {{ servers.length }} 项
         </TinyTag>
       </div>
+      <TinyButton
+        data-testid="refresh-mcp"
+        type="default"
+        :disabled="loading"
+        @click="loadServers"
+      >
+        {{ loading ? "刷新中" : "刷新" }}
+      </TinyButton>
     </div>
 
     <div
@@ -138,6 +178,28 @@ onMounted(() => {
     </p>
 
     <div
+      v-if="!loading"
+      class="ops-grid"
+    >
+      <article class="ops-card">
+        <span class="ops-label">总服务</span>
+        <strong class="ops-value">{{ summary.total }}</strong>
+      </article>
+      <article class="ops-card">
+        <span class="ops-label">就绪服务</span>
+        <strong class="ops-value">{{ summary.ready }}</strong>
+      </article>
+      <article class="ops-card">
+        <span class="ops-label">需关注</span>
+        <strong class="ops-value">{{ summary.attention }}</strong>
+      </article>
+      <article class="ops-card">
+        <span class="ops-label">已发现工具</span>
+        <strong class="ops-value">{{ summary.tools }}</strong>
+      </article>
+    </div>
+
+    <div
       v-if="!loading && servers.length === 0"
       class="empty-state"
     >
@@ -157,13 +219,24 @@ onMounted(() => {
           <div class="server-header">
             <strong class="server-name">{{ server.display_name }}</strong>
             <TinyTag
-              :type="server.enabled ? 'success' : 'danger'"
+              :type="statusType(server)"
             >
               {{ server.status }}
             </TinyTag>
           </div>
-          <span class="server-transport">{{ server.transport.kind }} 传输</span>
+          <span class="server-transport">{{ transportLabel(server) }}</span>
           <span class="server-tools">{{ server.discovered_tool_count }} 个工具</span>
+        </div>
+        <div class="server-diagnostics">
+          <span>超时：{{ server.timeout_ms }} ms</span>
+          <span>最近检查：{{ formatNullable(server.last_checked_at) }}</span>
+          <span>最近成功：{{ formatNullable(server.last_success_at) }}</span>
+          <span
+            v-if="server.last_error"
+            class="diagnostic-error"
+          >
+            最近错误：{{ server.last_error }}
+          </span>
         </div>
         <div class="server-actions">
           <TinyButton
@@ -193,15 +266,32 @@ onMounted(() => {
         </div>
         <div
           v-if="server.id && toolsByServer[server.id]"
-          class="tool-list"
+          class="tool-panel"
         >
-          <span
+          <div class="tool-panel-header">
+            <strong>已发现工具</strong>
+            <TinyTag type="info">{{ toolsByServer[server.id].length }} 个</TinyTag>
+          </div>
+          <div
+            v-if="toolsByServer[server.id].length === 0"
+            class="tool-empty"
+          >
+            暂无已发现工具
+          </div>
+          <article
             v-for="tool in toolsByServer[server.id]"
             :key="tool.tool_name_original"
-            class="tool-pill"
+            class="tool-card"
           >
-            {{ tool.tool_name_original }}
-          </span>
+            <div class="tool-card-header">
+              <strong>{{ tool.tool_name_original }}</strong>
+            </div>
+            <p>{{ tool.description || "暂无描述" }}</p>
+            <details>
+              <summary>Schema</summary>
+              <pre>{{ schemaPreview(tool) }}</pre>
+            </details>
+          </article>
         </div>
       </article>
     </div>
@@ -218,6 +308,7 @@ onMounted(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: var(--space-4);
 }
 
 .page-header-left {
@@ -230,6 +321,33 @@ onMounted(() => {
   margin: 0;
   font-size: var(--text-base);
   font-weight: 590;
+  color: var(--text-primary);
+}
+
+.ops-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--space-3);
+}
+
+.ops-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-4);
+  background: var(--surface-base);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-xs);
+}
+
+.ops-label {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+}
+
+.ops-value {
+  font-size: var(--text-xl);
   color: var(--text-primary);
 }
 
@@ -266,6 +384,19 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   gap: var(--space-1);
+  flex: 1 1 260px;
+}
+
+.server-diagnostics {
+  display: grid;
+  gap: var(--space-1);
+  flex: 1 1 320px;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+}
+
+.diagnostic-error {
+  color: var(--danger);
 }
 
 .server-actions {
@@ -275,21 +406,65 @@ onMounted(() => {
   gap: var(--space-2);
 }
 
-.tool-list {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-2);
+.tool-panel {
+  display: grid;
+  gap: var(--space-3);
   flex: 1 1 100%;
   padding-top: var(--space-2);
 }
 
-.tool-pill {
-  padding: var(--space-1) var(--space-2);
+.tool-panel-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--text-primary);
+  font-size: var(--text-sm);
+}
+
+.tool-card,
+.tool-empty {
+  padding: var(--space-3);
   background: var(--surface-raised);
   border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   color: var(--text-muted);
+}
+
+.tool-card {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.tool-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--text-primary);
   font-size: var(--text-xs);
+}
+
+.tool-card p {
+  margin: 0;
+  font-size: var(--text-xs);
+  line-height: 1.5;
+}
+
+.tool-card details {
+  font-size: var(--text-xs);
+}
+
+.tool-card summary {
+  cursor: pointer;
+  color: var(--accent);
+}
+
+.tool-card pre {
+  overflow: auto;
+  margin: var(--space-2) 0 0;
+  padding: var(--space-2);
+  background: var(--surface-base);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
 }
 
 .server-header {
@@ -339,5 +514,11 @@ onMounted(() => {
   background: var(--success-bg);
   border: 1px solid var(--success-border);
   color: var(--success);
+}
+
+@media (max-width: 960px) {
+  .ops-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 </style>
