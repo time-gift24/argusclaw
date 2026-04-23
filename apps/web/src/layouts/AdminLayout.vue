@@ -82,7 +82,7 @@ const currentItem = computed(() => {
   top: 0;
   height: 100vh;
   background: var(--surface-base);
-  border-right: 1px solid var(--border-default);
+  border-right: 1px solid var(--border-subtle);
   display: flex;
   flex-direction: column;
 }
@@ -162,8 +162,12 @@ const currentItem = computed(() => {
   border-radius: var(--radius-md);
   color: var(--text-secondary);
   font-size: var(--text-sm);
-  font-weight: 500;
-  transition: background 120ms ease, color 120ms ease;
+  font-weight: 510;
+  transition:
+    background var(--transition-base),
+    color var(--transition-base),
+    transform var(--transition-fast);
+  cursor: pointer;
 }
 
 .nav-item:hover {
@@ -175,6 +179,10 @@ const currentItem = computed(() => {
   background: var(--accent-subtle);
   color: var(--accent);
   font-weight: 590;
+}
+
+.nav-item:active {
+  transform: scale(0.97);
 }
 
 .nav-item__label {
@@ -195,7 +203,7 @@ const currentItem = computed(() => {
   border: 1px solid var(--success-border);
   border-radius: var(--radius-full);
   font-size: var(--text-xs);
-  font-weight: 500;
+  font-weight: 510;
   color: var(--success);
 }
 
@@ -261,7 +269,7 @@ const currentItem = computed(() => {
     position: static;
     height: auto;
     border-right: 0;
-    border-bottom: 1px solid var(--border-default);
+    border-bottom: 1px solid var(--border-subtle);
   }
 
   .route-shell {
