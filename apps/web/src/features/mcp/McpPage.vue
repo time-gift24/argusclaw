@@ -45,6 +45,8 @@ const testingServerId = ref<number | null>(null);
 const testingDraft = ref(false);
 const loadingToolsServerId = ref<number | null>(null);
 const toolsByServer = ref<Record<number, McpDiscoveredToolRecord[]>>({});
+const importJsonText = ref("");
+const importingConfig = ref(false);
 
 function createFormState(overrides: Partial<McpFormState> = {}): McpFormState {
   return {
@@ -117,6 +119,106 @@ function parseListLines(input: string) {
     .split("\n")
     .map((entry) => entry.trim())
     .filter(Boolean);
+}
+
+function asObject(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+
+  return value as Record<string, unknown>;
+}
+
+function parseJsonStringArray(value: unknown, serverName: string, fieldName: string) {
+  if (value === undefined) {
+    return [];
+  }
+  if (!Array.isArray(value)) {
+    throw new Error(`${serverName} 的 ${fieldName} 必须是字符串数组。`);
+  }
+
+  return value.map((entry) => {
+    if (typeof entry !== "string") {
+      throw new Error(`${serverName} 的 ${fieldName} 只能包含字符串。`);
+    }
+    return entry;
+  });
+}
+
+function parseJsonStringMap(value: unknown, serverName: string, fieldName: string) {
+  if (value === undefined) {
+    return {};
+  }
+
+  const objectValue = asObject(value);
+  if (!objectValue) {
+    throw new Error(`${serverName} 的 ${fieldName} 必须是对象。`);
+  }
+
+  return Object.entries(objectValue).reduce<Record<string, string>>((result, [key, entry]) => {
+    if (typeof entry !== "string") {
+      throw new Error(`${serverName} 的 ${fieldName}.${key} 必须是字符串。`);
+    }
+    result[key] = entry;
+    return result;
+  }, {});
+}
+
+function importedRecordsFromJson(input: string): McpServerRecord[] {
+  if (!input.trim()) {
+    throw new Error("请粘贴 MCP JSON 配置。");
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(input);
+  } catch {
+    throw new Error("MCP JSON 格式无效，请检查逗号、引号和括号。");
+  }
+
+  const root = asObject(parsed);
+  if (!root) {
+    throw new Error("MCP JSON 顶层必须是对象。");
+  }
+
+  const serversRoot = asObject(root.mcpServers) ?? root;
+  const entries = Object.entries(serversRoot);
+  if (entries.length === 0) {
+    throw new Error("MCP JSON 中没有可导入的服务。");
+  }
+
+  return entries.map(([displayName, config]) => {
+    const normalizedName = displayName.trim();
+    if (!normalizedName) {
+      throw new Error("MCP 服务名称不能为空。");
+    }
+
+    const serverConfig = asObject(config);
+    if (!serverConfig) {
+      throw new Error(`${normalizedName} 的配置必须是对象。`);
+    }
+    if (typeof serverConfig.command !== "string" || !serverConfig.command.trim()) {
+      throw new Error(`${normalizedName} 缺少 command。`);
+    }
+
+    return {
+      id: null,
+      display_name: normalizedName,
+      enabled: true,
+      transport: {
+        kind: "stdio" as const,
+        command: serverConfig.command.trim(),
+        args: parseJsonStringArray(serverConfig.args, normalizedName, "args"),
+        env: parseJsonStringMap(serverConfig.env, normalizedName, "env"),
+      },
+      timeout_ms: 5000,
+      status: "connecting" as const,
+      last_checked_at: null,
+      last_success_at: null,
+      last_error: null,
+      discovered_tool_count: 0,
+    };
+  });
 }
 
 function recordFromForm(): McpServerRecord {
@@ -301,6 +403,34 @@ async function loadServers() {
     error.value = reason instanceof Error ? reason.message : "加载 MCP 服务失败。";
   } finally {
     loading.value = false;
+  }
+}
+
+async function importMcpJson() {
+  let records: McpServerRecord[];
+  try {
+    records = importedRecordsFromJson(importJsonText.value);
+  } catch (reason) {
+    error.value = reason instanceof Error ? reason.message : "解析 MCP JSON 失败。";
+    actionMessage.value = "";
+    return;
+  }
+
+  importingConfig.value = true;
+  error.value = "";
+  actionMessage.value = "";
+
+  try {
+    for (const record of records) {
+      await api.saveMcpServer(record);
+    }
+    actionMessage.value = `已导入 ${records.length} 个 MCP 服务。`;
+    importJsonText.value = "";
+    await loadServers();
+  } catch (reason) {
+    error.value = reason instanceof Error ? reason.message : "导入 MCP JSON 失败。";
+  } finally {
+    importingConfig.value = false;
   }
 }
 
@@ -551,6 +681,36 @@ onMounted(() => {
       </article>
     </div>
 
+    <article class="form-panel import-panel">
+      <div class="panel-header">
+        <h3 class="panel-title">导入 MCP JSON</h3>
+        <p class="panel-description">
+          支持 Claude / MCP 常见配置片段，例如 { "brave-search": { "command": "npx", "args": ["-y", "..."], "env": { "KEY": "xxx" } } }。
+        </p>
+      </div>
+
+      <TinyInput
+        :model-value="importJsonText"
+        name="mcp-import-json"
+        type="textarea"
+        :rows="8"
+        placeholder='{ "brave-search": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-brave-search"], "env": { "BRAVE_API_KEY": "xxx" } } }'
+        @update:model-value="importJsonText = String($event)"
+      />
+
+      <div class="import-actions">
+        <TinyButton
+          data-testid="import-mcp-json"
+          type="primary"
+          :disabled="importingConfig"
+          @click="importMcpJson"
+        >
+          {{ importingConfig ? "导入中" : "导入配置" }}
+        </TinyButton>
+        <span class="import-hint">导入后会保存为 stdio MCP 服务，并使用默认 5000ms 超时。</span>
+      </div>
+    </article>
+
     <article class="form-panel">
       <div class="panel-header">
         <h3 class="panel-title">{{ isEditing ? "编辑 MCP 服务" : "新增 MCP 服务" }}</h3>
@@ -793,6 +953,22 @@ onMounted(() => {
 .switch-hint {
   font-size: var(--text-sm);
   color: var(--text-muted);
+}
+
+.import-panel {
+  gap: var(--space-4);
+}
+
+.import-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
+
+.import-hint {
+  color: var(--text-muted);
+  font-size: var(--text-sm);
 }
 
 .full-width {

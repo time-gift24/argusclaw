@@ -353,6 +353,140 @@ describe("McpPage", () => {
     expect(wrapper.text()).toContain("Docs MCP");
   });
 
+  it("imports stdio MCP servers from JSON configuration", async () => {
+    const importedServer: McpServerRecord = {
+      id: 15,
+      display_name: "brave-search",
+      enabled: true,
+      transport: {
+        kind: "stdio",
+        command: "npx",
+        args: ["-y", "@modelcontextprotocol/server-brave-search"],
+        env: { BRAVE_API_KEY: "xxx" },
+      },
+      timeout_ms: 5000,
+      status: "connecting",
+      last_checked_at: null,
+      last_success_at: null,
+      last_error: null,
+      discovered_tool_count: 0,
+    };
+    const listMcpServers = vi
+      .fn<() => Promise<McpServerRecord[]>>()
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([importedServer]);
+    const saveMcpServer = vi.fn<(input: McpServerRecord) => Promise<McpServerRecord>>().mockResolvedValue(importedServer);
+
+    setApiClient({
+      getHealth: async () => ({ status: "ok" }),
+      getBootstrap: async () => ({
+        instance_name: "",
+        provider_count: 0,
+        template_count: 0,
+        mcp_server_count: 0,
+        default_provider_id: null,
+        default_template_id: null,
+        mcp_ready_count: 0,
+      }),
+      getRuntimeState: async () => emptyRuntimeState(),
+      getSettings: async () => ({ instance_name: "", default_provider_id: null, default_provider_name: null }),
+      updateSettings: async () => ({ instance_name: "", default_provider_id: null, default_provider_name: null }),
+      listProviders: async () => [],
+      saveProvider: async (input) => input,
+      listTemplates: async () => [],
+      saveTemplate: async (input) => input,
+      listMcpServers,
+      saveMcpServer,
+      deleteMcpServer: async () => ({ deleted: true }),
+      testMcpServer: async () => ({
+        status: "ready",
+        checked_at: "2026-04-23T12:00:00Z",
+        latency_ms: 10,
+        discovered_tools: [],
+        message: "connection succeeded",
+      }),
+      listMcpServerTools: async () => [],
+    });
+
+    const wrapper = mount(McpPage);
+    await flushPromises();
+
+    await wrapper.get('[name="mcp-import-json"]').setValue(
+      JSON.stringify({
+        "brave-search": {
+          command: "npx",
+          args: ["-y", "@modelcontextprotocol/server-brave-search"],
+          env: { BRAVE_API_KEY: "xxx" },
+        },
+      }),
+    );
+    await wrapper.get('[data-testid="import-mcp-json"]').trigger("click");
+    await flushPromises();
+
+    expect(saveMcpServer).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: null,
+        display_name: "brave-search",
+        enabled: true,
+        timeout_ms: 5000,
+        status: "connecting",
+        transport: {
+          kind: "stdio",
+          command: "npx",
+          args: ["-y", "@modelcontextprotocol/server-brave-search"],
+          env: { BRAVE_API_KEY: "xxx" },
+        },
+      }),
+    );
+    expect(wrapper.text()).toContain("已导入 1 个 MCP 服务。");
+    expect(wrapper.text()).toContain("brave-search");
+  });
+
+  it("shows an error without saving when imported MCP JSON is invalid", async () => {
+    const saveMcpServer = vi.fn<(input: McpServerRecord) => Promise<McpServerRecord>>();
+
+    setApiClient({
+      getHealth: async () => ({ status: "ok" }),
+      getBootstrap: async () => ({
+        instance_name: "",
+        provider_count: 0,
+        template_count: 0,
+        mcp_server_count: 0,
+        default_provider_id: null,
+        default_template_id: null,
+        mcp_ready_count: 0,
+      }),
+      getRuntimeState: async () => emptyRuntimeState(),
+      getSettings: async () => ({ instance_name: "", default_provider_id: null, default_provider_name: null }),
+      updateSettings: async () => ({ instance_name: "", default_provider_id: null, default_provider_name: null }),
+      listProviders: async () => [],
+      saveProvider: async (input) => input,
+      listTemplates: async () => [],
+      saveTemplate: async (input) => input,
+      listMcpServers: async () => [],
+      saveMcpServer,
+      deleteMcpServer: async () => ({ deleted: true }),
+      testMcpServer: async () => ({
+        status: "ready",
+        checked_at: "2026-04-23T12:00:00Z",
+        latency_ms: 10,
+        discovered_tools: [],
+        message: "connection succeeded",
+      }),
+      listMcpServerTools: async () => [],
+    });
+
+    const wrapper = mount(McpPage);
+    await flushPromises();
+
+    await wrapper.get('[name="mcp-import-json"]').setValue('{ "broken": { "args": [] } }');
+    await wrapper.get('[data-testid="import-mcp-json"]').trigger("click");
+    await flushPromises();
+
+    expect(saveMcpServer).not.toHaveBeenCalled();
+    expect(wrapper.text()).toContain("broken 缺少 command。");
+  });
+
   it("edits an existing HTTP MCP server", async () => {
     const server: McpServerRecord = {
       id: 12,

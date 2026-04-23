@@ -1,7 +1,7 @@
 # ArgusWing 管理控制台设计系统
 
 **日期：** 2026-04-23
-**版本：** Phase 4D
+**版本：** Phase 4E
 
 ## 1. 设计原则
 
@@ -246,6 +246,7 @@ Inter Variable, "Noto Sans SC", "PingFang SC", system-ui, sans-serif
 - 诊断信息：超时、最近检查、最近成功、最近错误
 - 操作：刷新、查看工具、测试连接、编辑、删除
 - 展开视图：工具名称、描述与 Schema 预览
+- 导入：支持从 MCP JSON 配置片段批量导入 stdio 服务
 - 表单：列表下方创建/编辑 MCP 服务，支持 `stdio` / `HTTP` / `SSE` 传输配置
 - 表单操作：保存、重置/取消编辑、测试当前配置，反馈成功与错误状态
 

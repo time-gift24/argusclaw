@@ -674,3 +674,20 @@ GET /api/v1/mcp/servers/{server_id}/tools
 
 - `cd apps/web && pnpm exec vitest run`
 - `cd apps/web && pnpm build`
+
+### Phase 4E: Import MCP JSON configuration
+
+**Intent:** Let operators paste common MCP JSON snippets into the standalone web console without changing server contracts.
+
+**Expected UI shape:**
+
+- MCP page exposes a JSON import panel above the manual create/edit form
+- Supports top-level server maps like `{ "brave-search": { "command": "npx", "args": ["-y", "..."], "env": { "KEY": "xxx" } } }`
+- Also accepts the common `{ "mcpServers": { ... } }` wrapper
+- Imported entries save as enabled stdio MCP services with the default 5000ms timeout
+- Invalid JSON and invalid field shapes show a clear Chinese error and do not save
+
+**Expected validation:**
+
+- `cd apps/web && pnpm exec vitest run`
+- `cd apps/web && pnpm build`
