@@ -166,6 +166,10 @@ pub enum ThreadError {
     #[error("Event channel closed")]
     ChannelClosed,
 
+    /// Owner-only runtime mutation attempted after shutdown has started.
+    #[error("Runtime owner mutations are unavailable after shutdown has started")]
+    ShutdownInProgress,
+
     /// Owner-only control message attempted through a generic observer handle.
     #[error("Runtime control messages require an owner handle")]
     OwnerControlRestricted,
@@ -287,6 +291,12 @@ mod tests {
     fn thread_error_display_channel_closed() {
         let err = ThreadError::ChannelClosed;
         assert!(err.to_string().contains("channel"));
+    }
+
+    #[test]
+    fn thread_error_display_shutdown_in_progress() {
+        let err = ThreadError::ShutdownInProgress;
+        assert!(err.to_string().contains("shutdown has started"));
     }
 
     #[test]

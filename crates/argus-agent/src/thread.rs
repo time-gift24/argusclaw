@@ -1,6 +1,7 @@
 //! Thread implementation.
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 
 use chrono::{DateTime, Utc};
@@ -83,17 +84,17 @@ pub(crate) enum ThreadLoopAction {
 }
 
 enum ThreadOwnerCommand {
-    SetTitle {
+    Title {
         title: Option<String>,
-        ack: oneshot::Sender<()>,
+        ack: oneshot::Sender<Result<(), ThreadError>>,
     },
-    SetProvider {
+    Provider {
         provider: Arc<dyn LlmProvider>,
-        ack: oneshot::Sender<()>,
+        ack: oneshot::Sender<Result<(), ThreadError>>,
     },
-    SetMcpToolResolver {
+    McpToolResolver {
         resolver: Option<Arc<dyn McpToolResolver>>,
-        ack: oneshot::Sender<()>,
+        ack: oneshot::Sender<Result<(), ThreadError>>,
     },
 }
 
@@ -104,6 +105,7 @@ struct ThreadHandleInner {
     pipe_tx: broadcast::Sender<ThreadEvent>,
     snapshot_rx: watch::Receiver<ThreadRuntimeSnapshot>,
     terminated_rx: watch::Receiver<bool>,
+    shutdown_started: AtomicBool,
 }
 
 /// Cloneable observer/control handle for a loaded thread runtime.
@@ -460,13 +462,17 @@ impl ThreadHandle {
 impl ThreadOwnerHandle {
     async fn send_owner_command(
         &self,
-        command: impl FnOnce(oneshot::Sender<()>) -> ThreadOwnerCommand,
+        command: impl FnOnce(oneshot::Sender<Result<(), ThreadError>>) -> ThreadOwnerCommand,
     ) -> Result<(), ThreadError> {
+        if self.handle.inner.shutdown_started.load(Ordering::SeqCst) {
+            return Err(ThreadError::ShutdownInProgress);
+        }
         let (ack_tx, ack_rx) = oneshot::channel();
         self.owner_tx
             .send(command(ack_tx))
             .map_err(|_| ThreadError::ChannelClosed)?;
-        ack_rx.await.map_err(|_| ThreadError::ChannelClosed)
+        ack_rx.await.map_err(|_| ThreadError::ChannelClosed)??;
+        Ok(())
     }
 
     /// Get the thread identifier.
@@ -491,13 +497,13 @@ impl ThreadOwnerHandle {
 
     /// Update the in-memory runtime title.
     pub async fn set_title(&self, title: Option<String>) -> Result<(), ThreadError> {
-        self.send_owner_command(|ack| ThreadOwnerCommand::SetTitle { title, ack })
+        self.send_owner_command(|ack| ThreadOwnerCommand::Title { title, ack })
             .await
     }
 
     /// Update the bound provider for subsequent turns.
     pub async fn set_provider(&self, provider: Arc<dyn LlmProvider>) -> Result<(), ThreadError> {
-        self.send_owner_command(|ack| ThreadOwnerCommand::SetProvider { provider, ack })
+        self.send_owner_command(|ack| ThreadOwnerCommand::Provider { provider, ack })
             .await
     }
 
@@ -506,7 +512,7 @@ impl ThreadOwnerHandle {
         &self,
         resolver: Option<Arc<dyn McpToolResolver>>,
     ) -> Result<(), ThreadError> {
-        self.send_owner_command(|ack| ThreadOwnerCommand::SetMcpToolResolver { resolver, ack })
+        self.send_owner_command(|ack| ThreadOwnerCommand::McpToolResolver { resolver, ack })
             .await
     }
 
@@ -514,8 +520,14 @@ impl ThreadOwnerHandle {
     pub async fn shutdown(self) -> Result<(), ThreadError> {
         self.handle
             .inner
+            .shutdown_started
+            .store(true, Ordering::SeqCst);
+        self.handle
+            .inner
             .message_tx
-            .send(ThreadMessage::Control(ThreadControlMessage::ShutdownRuntime))
+            .send(ThreadMessage::Control(
+                ThreadControlMessage::ShutdownRuntime,
+            ))
             .map_err(|_| ThreadError::ChannelClosed)?;
         self.handle.wait_for_termination().await;
         Ok(())
@@ -624,6 +636,7 @@ impl Thread {
                 pipe_tx: self.pipe_tx.clone(),
                 snapshot_rx,
                 terminated_rx,
+                shutdown_started: AtomicBool::new(false),
             }),
         };
         let owner_handle = ThreadOwnerHandle { handle, owner_tx };
@@ -954,19 +967,36 @@ impl Thread {
         Ok(())
     }
 
+    fn acknowledge_owner_command(
+        ack: oneshot::Sender<Result<(), ThreadError>>,
+        result: Result<(), ThreadError>,
+    ) {
+        let _ = ack.send(result);
+    }
+
+    fn reject_owner_command(command: ThreadOwnerCommand, error: ThreadError) {
+        match command {
+            ThreadOwnerCommand::Title { ack, .. }
+            | ThreadOwnerCommand::Provider { ack, .. }
+            | ThreadOwnerCommand::McpToolResolver { ack, .. } => {
+                Self::acknowledge_owner_command(ack, Err(error));
+            }
+        }
+    }
+
     fn handle_owner_command(&mut self, command: ThreadOwnerCommand) {
         match command {
-            ThreadOwnerCommand::SetTitle { title, ack } => {
+            ThreadOwnerCommand::Title { title, ack } => {
                 self.set_title(title);
-                let _ = ack.send(());
+                Self::acknowledge_owner_command(ack, Ok(()));
             }
-            ThreadOwnerCommand::SetProvider { provider, ack } => {
+            ThreadOwnerCommand::Provider { provider, ack } => {
                 self.set_provider(provider);
-                let _ = ack.send(());
+                Self::acknowledge_owner_command(ack, Ok(()));
             }
-            ThreadOwnerCommand::SetMcpToolResolver { resolver, ack } => {
+            ThreadOwnerCommand::McpToolResolver { resolver, ack } => {
                 self.set_mcp_tool_resolver(resolver);
-                let _ = ack.send(());
+                Self::acknowledge_owner_command(ack, Ok(()));
             }
         }
     }
@@ -1000,7 +1030,11 @@ impl Thread {
                     thread.process_loop_action(runtime_action, &mut active_turn).await;
                 }
                 Some(command) = owner_rx.recv() => {
-                    thread.handle_owner_command(command);
+                    if shutdown_requested {
+                        Self::reject_owner_command(command, ThreadError::ShutdownInProgress);
+                    } else {
+                        thread.handle_owner_command(command);
+                    }
                 }
                 result = async {
                     match active_turn.as_mut() {
@@ -1461,6 +1495,7 @@ mod tests {
     use crate::trace::TraceConfig;
     use crate::turn_log_store::recover_thread_log_state;
     use argus_protocol::llm::{CompletionRequest, CompletionResponse, LlmError, ToolDefinition};
+    use argus_protocol::mcp::ResolvedMcpTools;
     use argus_protocol::tool::{NamedTool, ToolError, ToolExecutionContext};
     use argus_protocol::{
         AgentId, MailboxMessage, MailboxMessageType, ProviderId, ThreadControlMessage,
@@ -1480,6 +1515,8 @@ mod tests {
     }
 
     struct DummyProvider;
+
+    struct NoopMcpResolver;
 
     struct StubTool {
         name: &'static str,
@@ -1505,6 +1542,16 @@ mod tests {
             _ctx: Arc<ToolExecutionContext>,
         ) -> Result<serde_json::Value, ToolError> {
             Ok(serde_json::json!({}))
+        }
+    }
+
+    #[async_trait]
+    impl McpToolResolver for NoopMcpResolver {
+        async fn resolve_for_agent(
+            &self,
+            _agent_id: AgentId,
+        ) -> argus_protocol::Result<ResolvedMcpTools> {
+            Ok(ResolvedMcpTools::default())
         }
     }
 
@@ -2355,6 +2402,68 @@ mod tests {
         );
         assert_eq!(thread.turn_count(), 0);
         assert_eq!(thread.state(), ThreadState::Idle);
+    }
+
+    #[tokio::test]
+    async fn shutdown_rejects_owner_only_runtime_mutations() {
+        let captured_user_inputs = Arc::new(Mutex::new(Vec::new()));
+        let owner = ThreadBuilder::new()
+            .provider(Arc::new(PendingStreamProvider::new(Arc::clone(
+                &captured_user_inputs,
+            ))))
+            .compactor(Arc::new(NoopCompactor))
+            .agent_record(test_agent_record_without_system_prompt())
+            .session_id(SessionId::new())
+            .build()
+            .expect("thread should build")
+            .spawn_runtime()
+            .expect("runtime handle should spawn");
+        let thread = owner.observer();
+
+        thread
+            .send_message(ThreadMessage::UserInput {
+                content: "first".to_string(),
+                msg_override: None,
+            })
+            .expect("first message should enqueue");
+
+        timeout(Duration::from_secs(5), async {
+            loop {
+                if thread.is_turn_running() {
+                    break;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("runtime should start the first turn");
+
+        let shutdown_owner = owner.clone();
+        let shutdown_task = tokio::spawn(async move { shutdown_owner.shutdown().await });
+        sleep(Duration::from_millis(10)).await;
+
+        let title_error = owner
+            .set_title(Some("renamed".to_string()))
+            .await
+            .expect_err("title mutation should be rejected after shutdown starts");
+        assert!(matches!(title_error, ThreadError::ShutdownInProgress));
+
+        let provider_error = owner
+            .set_provider(Arc::new(DummyProvider))
+            .await
+            .expect_err("provider mutation should be rejected after shutdown starts");
+        assert!(matches!(provider_error, ThreadError::ShutdownInProgress));
+
+        let resolver_error = owner
+            .set_mcp_tool_resolver(Some(Arc::new(NoopMcpResolver)))
+            .await
+            .expect_err("resolver mutation should be rejected after shutdown starts");
+        assert!(matches!(resolver_error, ThreadError::ShutdownInProgress));
+
+        shutdown_task
+            .await
+            .expect("shutdown task should join")
+            .expect("shutdown should complete");
     }
 
     #[tokio::test]
