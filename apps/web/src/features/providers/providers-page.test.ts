@@ -118,6 +118,10 @@ describe("ProvidersPage", () => {
     const wrapper = mount(ProvidersPage);
     await flushPromises();
 
+    const panels = wrapper.findAll("article");
+    expect(panels[0]?.classes()).toContain("list-panel");
+    expect(panels[1]?.classes()).toContain("form-panel");
+
     expect(wrapper.text()).toContain("OpenAI");
 
     await wrapper.get('input[name="display-name"]').setValue("Azure Mirror");

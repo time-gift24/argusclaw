@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/argus-protocol", "crates/argus-template", "crates/argus-session", "crates/argus-agent", "crates/argus-llm", "crates/argus-tool", "crates/argus-repository", "crates/argus-wing", "crates/argus-crypto", "crates/argus-auth", "crates/desktop/src-tauri", "crates/argus-test-support", "crates/argus-job", "crates/argus-mcp", "crates/argus-thread-pool"]
+members = ["crates/argus-protocol", "crates/argus-template", "crates/argus-session", "crates/argus-agent", "crates/argus-llm", "crates/argus-tool", "crates/argus-repository", "crates/argus-wing", "crates/argus-crypto", "crates/argus-auth", "crates/desktop/src-tauri", "crates/argus-test-support", "crates/argus-job", "crates/argus-mcp", "crates/argus-thread-pool", "crates/argus-server"]
 resolver = "3"
 
 [workspace.dependencies]
@@ -7,6 +7,8 @@ resolver = "3"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "json", "stream"] }
 thirtyfour = { version = "0.36.1", default-features = false, features = ["reqwest", "rustls-tls", "tokio-multi-threaded"] }
 zip = "8.4.0"
+axum = { version = "0.8.6", features = ["macros", "json"] }
+tower = { version = "0.5.2", features = ["util"] }
 
 # Async runtime
 tokio = { version = "1", features = ["sync", "rt", "rt-multi-thread", "fs", "process", "time", "macros", "test-util"] }

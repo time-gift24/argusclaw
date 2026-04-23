@@ -1,0 +1,52 @@
+use axum::Json;
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+use serde::Serialize;
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum ApiError {
+    #[error("{0}")]
+    Internal(String),
+}
+
+#[derive(Debug, Serialize)]
+struct ErrorBody {
+    error: ErrorEnvelope,
+}
+
+#[derive(Debug, Serialize)]
+struct ErrorEnvelope {
+    code: &'static str,
+    message: String,
+}
+
+impl ApiError {
+    pub fn internal(message: impl Into<String>) -> Self {
+        Self::Internal(message.into())
+    }
+}
+
+impl From<argus_protocol::ArgusError> for ApiError {
+    fn from(value: argus_protocol::ArgusError) -> Self {
+        Self::Internal(value.to_string())
+    }
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        let (status, code, message) = match self {
+            Self::Internal(message) => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal_error", message)
+            }
+        };
+
+        (
+            status,
+            Json(ErrorBody {
+                error: ErrorEnvelope { code, message },
+            }),
+        )
+            .into_response()
+    }
+}

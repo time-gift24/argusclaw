@@ -1,0 +1,19 @@
+[package]
+name = "argus-server"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+argus-protocol = { path = "../argus-protocol" }
+argus-repository = { path = "../argus-repository" }
+argus-wing = { path = "../argus-wing" }
+axum = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tower = { workspace = true }
