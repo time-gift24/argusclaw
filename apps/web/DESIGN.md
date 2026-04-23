@@ -1,7 +1,7 @@
 # ArgusWing 管理控制台设计系统
 
 **日期：** 2026-04-23
-**版本：** Phase 4E
+**版本：** Phase 5C
 
 ## 1. 设计原则
 
@@ -263,6 +263,15 @@ Inter Variable, "Noto Sans SC", "PingFang SC", system-ui, sans-serif
 - 表单：实例名称（输入框）、默认提供方（下拉选择）
 - 保存按钮：加载状态、成功反馈、错误反馈
 
+### 对话（/chat）
+- 独立 Web 对话页，不复用 desktop chat store，不引入 shared frontend core
+- 页面结构：左侧会话/线程管理 rail + 右侧 TinyRobot 对话面板
+- TinyRobot 组件：消息区使用 `TrBubbleList`，输入区使用 `TrSender`，空线程 starter 使用 `TrPrompts`
+- OpenTiny 控件：会话/线程创建、删除、刷新、模板/提供方/模型选择、状态反馈继续使用 OpenTiny Vue
+- 交互边界：通过 Phase 5 REST API 创建 session/thread、发送消息、取消运行、刷新消息，不使用 chat SSE
+- 空状态：无会话、无线程、无 provider/template 时提供中文引导和可执行按钮
+- 布局：桌面三栏感（页面 rail + 对话主面板），移动端堆叠为单列
+
 ## 7. API 约定（不变）
 
 前端保持现有 REST API 契约不变：
@@ -290,14 +299,28 @@ Inter Variable, "Noto Sans SC", "PingFang SC", system-ui, sans-serif
 - `PUT /api/v1/settings` - 更新设置
 - `GET /api/v1/runtime` - 运行时快照
 - `GET /api/v1/runtime/events` - 运行时事件流（SSE）
+- `GET /api/v1/chat/sessions` - 对话会话列表
+- `POST /api/v1/chat/sessions` - 创建对话会话
+- `PATCH /api/v1/chat/sessions/:session_id` - 重命名对话会话
+- `DELETE /api/v1/chat/sessions/:session_id` - 删除对话会话
+- `GET /api/v1/chat/sessions/:session_id/threads` - 会话线程列表
+- `POST /api/v1/chat/sessions/:session_id/threads` - 创建对话线程
+- `GET /api/v1/chat/sessions/:session_id/threads/:thread_id` - 线程快照
+- `PATCH /api/v1/chat/sessions/:session_id/threads/:thread_id` - 重命名对话线程
+- `PATCH /api/v1/chat/sessions/:session_id/threads/:thread_id/model` - 更新线程模型绑定
+- `POST /api/v1/chat/sessions/:session_id/threads/:thread_id/activate` - 激活线程并返回有效模型绑定
+- `GET /api/v1/chat/sessions/:session_id/threads/:thread_id/messages` - 获取线程消息
+- `POST /api/v1/chat/sessions/:session_id/threads/:thread_id/messages` - 发送用户消息
+- `POST /api/v1/chat/sessions/:session_id/threads/:thread_id/cancel` - 取消当前线程运行
 
 ## 8. 技术约束
 
 - **不改动 desktop**
-- **不做 chat 界面**
+- **chat 界面仅限 apps/web 独立页面，不做 desktop rewiring**
 - **不做 thread monitor 新能力**
 - **不做 shared frontend core / packages/app-core**
 - **不让 server 托管 web 静态资源**
 - 前端使用 Vue 3 + OpenTiny Vue + Vite
+- 对话 UI 使用 TinyRobot，管理控件优先使用 OpenTiny Vue
 - 优先使用 OpenTiny Vue 组件和 token 覆盖
 - 主题切换通过 CSS class + localStorage 实现
