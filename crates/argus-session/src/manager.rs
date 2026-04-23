@@ -760,19 +760,25 @@ impl SessionManager {
                 };
                 match change {
                     RuntimeLifecycleChange::Cooling(_) => {
-                        let _ = thread_pool.emit_observer_event(&runtime.thread_id, ThreadEvent::ThreadPoolCooling {
-                            thread_id: runtime.thread_id,
-                            session_id: Some(session_id),
-                        });
+                        let _ = thread_pool.emit_observer_event(
+                            &runtime.thread_id,
+                            ThreadEvent::ThreadPoolCooling {
+                                thread_id: runtime.thread_id,
+                                session_id: Some(session_id),
+                            },
+                        );
                     }
                     RuntimeLifecycleChange::Evicted(_) => {
-                        let _ = thread_pool.emit_observer_event(&runtime.thread_id, ThreadEvent::ThreadPoolEvicted {
-                            thread_id: runtime.thread_id,
-                            session_id: Some(session_id),
-                            reason: runtime
-                                .last_reason
-                                .unwrap_or(ThreadPoolEventReason::MemoryPressure),
-                        });
+                        let _ = thread_pool.emit_observer_event(
+                            &runtime.thread_id,
+                            ThreadEvent::ThreadPoolEvicted {
+                                thread_id: runtime.thread_id,
+                                session_id: Some(session_id),
+                                reason: runtime
+                                    .last_reason
+                                    .unwrap_or(ThreadPoolEventReason::MemoryPressure),
+                            },
+                        );
                     }
                 }
                 let snapshot = SessionManager::adapted_thread_pool_state(
@@ -780,8 +786,10 @@ impl SessionManager {
                     thread_sessions.as_ref(),
                 )
                 .snapshot;
-                let _ = thread_pool
-                    .emit_observer_event(&runtime.thread_id, ThreadEvent::ThreadPoolMetricsUpdated { snapshot });
+                let _ = thread_pool.emit_observer_event(
+                    &runtime.thread_id,
+                    ThreadEvent::ThreadPoolMetricsUpdated { snapshot },
+                );
             }));
     }
 
@@ -869,9 +877,10 @@ impl SessionManager {
             .deliver_thread_message(thread_id, Self::route_mailbox_message(message.clone()))
             .await
             .map_err(Self::map_pool_error)?;
-        let _ = self
-            .thread_pool
-            .emit_observer_event(&thread_id, ThreadEvent::MailboxMessageQueued { thread_id, message });
+        let _ = self.thread_pool.emit_observer_event(
+            &thread_id,
+            ThreadEvent::MailboxMessageQueued { thread_id, message },
+        );
         Ok(())
     }
 
@@ -998,13 +1007,19 @@ impl SessionManager {
         self.thread_pool
             .mark_runtime_running(&thread_id, estimated_memory_bytes, started_at)
             .ok_or_else(|| ArgusError::ThreadNotFound(thread_id.inner().to_string()))?;
-        let _ = self.thread_pool.emit_observer_event(&thread_id, ThreadEvent::ThreadPoolStarted {
-            thread_id,
-            session_id: Some(session_id),
-        });
-        let _ = self.thread_pool.emit_observer_event(&thread_id, ThreadEvent::ThreadPoolMetricsUpdated {
-            snapshot: self.thread_pool_snapshot(),
-        });
+        let _ = self.thread_pool.emit_observer_event(
+            &thread_id,
+            ThreadEvent::ThreadPoolStarted {
+                thread_id,
+                session_id: Some(session_id),
+            },
+        );
+        let _ = self.thread_pool.emit_observer_event(
+            &thread_id,
+            ThreadEvent::ThreadPoolMetricsUpdated {
+                snapshot: self.thread_pool_snapshot(),
+            },
+        );
         Ok(())
     }
 

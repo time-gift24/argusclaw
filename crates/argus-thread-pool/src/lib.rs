@@ -14,7 +14,9 @@ use argus_protocol::{
 };
 use chrono::Utc;
 use thiserror::Error;
-use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard, OwnedSemaphorePermit, Semaphore, broadcast};
+use tokio::sync::{
+    Mutex as AsyncMutex, OwnedMutexGuard, OwnedSemaphorePermit, Semaphore, broadcast,
+};
 use tokio::task::AbortHandle;
 
 const DEFAULT_MAX_THREADS: u32 = 8;
@@ -1330,15 +1332,22 @@ mod tests {
             let release_build = Arc::clone(&release_build);
             async move {
                 load_pool
-                    .load_runtime_with_builder(thread_id, "chat runtime", false, None, true, move || {
-                        let build_started = Arc::clone(&build_started);
-                        let release_build = Arc::clone(&release_build);
-                        async move {
-                            build_started.notify_waiters();
-                            release_build.notified().await;
-                            Ok(build_thread(thread_id, "loaded after block"))
-                        }
-                    })
+                    .load_runtime_with_builder(
+                        thread_id,
+                        "chat runtime",
+                        false,
+                        None,
+                        true,
+                        move || {
+                            let build_started = Arc::clone(&build_started);
+                            let release_build = Arc::clone(&release_build);
+                            async move {
+                                build_started.notify_waiters();
+                                release_build.notified().await;
+                                Ok(build_thread(thread_id, "loaded after block"))
+                            }
+                        },
+                    )
                     .await
             }
         });
@@ -1372,8 +1381,7 @@ mod tests {
         let release = Arc::new(tokio::sync::Notify::new());
         let original = pool
             .load_runtime_with_builder(thread_id, "chat runtime", false, None, true, {
-                let thread =
-                    build_blocked_thread(thread_id, "slow reply", Arc::clone(&release));
+                let thread = build_blocked_thread(thread_id, "slow reply", Arc::clone(&release));
                 move || async move { Ok(thread) }
             })
             .await
@@ -1401,7 +1409,8 @@ mod tests {
         .expect("runtime should start running before removal");
 
         let removing_pool = Arc::clone(&pool);
-        let remove_task = tokio::spawn(async move { removing_pool.remove_runtime(&thread_id).await });
+        let remove_task =
+            tokio::spawn(async move { removing_pool.remove_runtime(&thread_id).await });
         sleep(Duration::from_millis(20)).await;
         let removal_pending = !remove_task.is_finished();
 
@@ -1471,8 +1480,7 @@ mod tests {
         let release = Arc::new(tokio::sync::Notify::new());
         let original = pool
             .load_runtime_with_builder(thread_id, "chat runtime", false, None, true, {
-                let thread =
-                    build_blocked_thread(thread_id, "slow reply", Arc::clone(&release));
+                let thread = build_blocked_thread(thread_id, "slow reply", Arc::clone(&release));
                 move || async move { Ok(thread) }
             })
             .await
@@ -1499,8 +1507,11 @@ mod tests {
         .await
         .expect("runtime should start running before eviction");
 
-        pool.transition_runtime_to_cooling(&thread_id, Some(ThreadPool::estimate_thread_memory(&original)))
-            .expect("runtime should enter cooling before eviction");
+        pool.transition_runtime_to_cooling(
+            &thread_id,
+            Some(ThreadPool::estimate_thread_memory(&original)),
+        )
+        .expect("runtime should enter cooling before eviction");
 
         let evicting_pool = Arc::clone(&pool);
         let evict_task = tokio::spawn(async move {
