@@ -1,6 +1,6 @@
 use anyhow::{bail, Context, Result};
 use argus_protocol::AgentId;
-use argus_wing::{ArgusWing, OneShotRunRequest};
+use argus_wing::{ArgusWing, OneShotAgentSelector, OneShotRunRequest};
 use clap::{Args, Parser, Subcommand};
 use serde::Serialize;
 
@@ -55,19 +55,13 @@ struct RunArgs {
     prompt: String,
 }
 
-fn resolve_agent_selector(args: &RunArgs) -> Result<(Option<AgentId>, Option<String>)> {
-    if args.agent_id.is_some() && args.agent.is_some() {
-        bail!("use either --agent-id or --agent, not both");
+fn resolve_agent_selector(args: &RunArgs) -> Result<OneShotAgentSelector> {
+    match (args.agent_id, args.agent.as_ref()) {
+        (Some(agent_id), None) => Ok(OneShotAgentSelector::Id(AgentId::new(agent_id))),
+        (None, Some(agent_name)) => Ok(OneShotAgentSelector::DisplayName(agent_name.clone())),
+        (None, None) => bail!("select a database agent with --agent-id or --agent"),
+        (Some(_), Some(_)) => bail!("use either --agent-id or --agent, not both"),
     }
-
-    if args.agent_id.is_none() && args.agent.is_none() {
-        bail!("select a database agent with --agent-id or --agent");
-    }
-
-    Ok((
-        args.agent_id.map(AgentId::new),
-        args.agent.as_ref().map(ToOwned::to_owned),
-    ))
 }
 
 #[derive(Debug, Serialize)]
@@ -114,12 +108,12 @@ fn summarize_tools(tool_names: &[String]) -> String {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    let wing = ArgusWing::init(cli.database.as_deref())
-        .await
-        .context("failed to initialize ArgusWing")?;
 
     match cli.command {
         Commands::ListAgents(args) => {
+            let wing = ArgusWing::init(cli.database.as_deref())
+                .await
+                .context("failed to initialize ArgusWing")?;
             let templates = wing
                 .list_templates()
                 .await
@@ -167,11 +161,13 @@ async fn main() -> Result<()> {
             }
         }
         Commands::Run(args) => {
-            let (agent_id, agent_name) = resolve_agent_selector(&args)?;
+            let agent = resolve_agent_selector(&args)?;
+            let wing = ArgusWing::init(cli.database.as_deref())
+                .await
+                .context("failed to initialize ArgusWing")?;
             let result = wing
                 .run_one_shot(OneShotRunRequest {
-                    agent_id,
-                    agent_name,
+                    agent,
                     prompt: args.prompt,
                     system_prompt: args.system_prompt,
                     model: args.model,
@@ -236,6 +232,21 @@ mod tests {
         .expect_err("selector resolution should reject conflicting selectors");
 
         assert!(error.to_string().contains("either --agent-id or --agent"));
+    }
+
+    #[test]
+    fn resolve_agent_selector_returns_database_agent_id_selector() {
+        let selector = resolve_agent_selector(&RunArgs {
+            agent_id: Some(7),
+            agent: None,
+            system_prompt: None,
+            model: None,
+            json: false,
+            prompt: "run this".to_string(),
+        })
+        .expect("selector resolution should return the chosen database agent");
+
+        assert!(matches!(selector, OneShotAgentSelector::Id(id) if id == AgentId::new(7)));
     }
 
     #[test]
