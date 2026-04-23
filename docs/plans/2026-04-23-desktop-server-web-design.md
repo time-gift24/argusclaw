@@ -4,278 +4,299 @@
 
 ## 目标
 
-把当前以 Tauri 为入口的 desktop 演进成三部分协作的形态：
+这次拆分的首阶段目标，已经从“desktop 功能平移到 web”收敛成更小、更稳的一版：
 
-- 保留现有 `crates/desktop` 桌面端
-- 新增基于 `axum` 的 `argus-server`
-- 新增基于 `React + Vite` 的 web 前端
+- 保留现有 `crates/desktop`，首阶段不重接、不改壳、不去登录
+- 新增基于 `axum` 的 `crates/argus-server`
+- 新增一个基于 `React + Vite` 的 `apps/web`
+- 先把 web 做成一个**基本可用的管理台**
+- 首阶段不再以 `chat`、`thread monitor`、shared frontend core 为主线
 
-首版只覆盖 `chat + settings + thread monitor` 三条主链路，并满足以下已确认约束：
+已确认约束：
 
 - Rust 继续作为核心服务端实现，复用现有 workspace crate
-- web 继续沿用 `React + Vite` 生态，不引入 `Next.js`
-- desktop 和 web 最终共用后端共享状态
-- tool 执行采用混合模式：共享能力上收服务端，本地强能力保留在 desktop
-- `v1` 不做多用户，不做登录，按“单实例单操作者环境”设计
-- 用户端实时协议采用 `REST + SSE`，不强上 `WebSocket`
+- web 继续沿用 `React + Vite`，不引入 `Next.js`
+- `v1` 不做多用户，不做登录，按单实例单操作者环境设计
+- tool 执行仍是混合模式，但不并入首阶段管理台范围
+- 用户端长期可以采用 `REST + SSE`，但**首阶段只要求 `REST`**
+
+## 这版相对上一稿的修正
+
+上一稿的问题，不在技术选型，而在首阶段范围过大：
+
+- 把 `chat + settings + thread monitor` 当成 `v1` 主线
+- 把 shared frontend core 当成起手式
+- 把 desktop rewiring 放到了第一波
+- 把 `sessions / threads / messages / SSE` 一起铺进首版 server surface
+
+这和已经确认的目标相冲突：
+
+- `defer-desktop-rewire`
+- `defer-shared-core`
+- 前端逻辑应该按管理台场景重写
+- 服务端应该先关注管理能力
+- `frontend-reset-first`，但阶段产物必须是**可用管理台**
+
+所以这版设计的核心修正是：
+
+**首阶段不是迁移 desktop，而是交付一套新的 server + web 管理面。**
 
 ## 当前问题
 
-当前仓库虽然已经把核心能力下沉到 Rust workspace，但对外产品形态仍然偏 desktop 一体化：
+当前仓库的问题，已经不该再表述成“如何复用 desktop chat 前端”，而应该表述成两个更具体的阻塞：
 
-1. `crates/desktop/src-tauri` 通过 Tauri command 暴露 API，前端直接依赖 `invoke`
-2. 前端状态通过 Tauri `"thread:event"` 事件流收口，和浏览器网络协议没有抽象层
-3. `chat`、`settings`、`thread monitor` 的页面和 store 都默认运行在 desktop 壳里
+1. 当前前端的信息架构是围绕 desktop 聊天工作台长出来的，不适合直接做管理台
+2. 当前对外入口仍主要是 Tauri command，缺少一层稳定的网络管理 API
 
-这导致两个直接问题：
+因此首阶段最应该拆的，不是 chat store 本身，而是：
 
-- 现有前端逻辑难以原样复用到 web
-- 想增加服务端时，容易误把“重写 UI”当成主任务，而真正该拆的是 transport 边界
-
-问题核心不是业务能力缺失，而是 transport 与前端状态模型耦合过紧。
+- `ArgusWing` 到 `axum` 的管理面 transport
+- 一套面向管理场景重新组织过的 web 前端
 
 ## 设计决策
 
 ### 1. 保留 Rust workspace 作为唯一业务核心
 
-现有 `argus-session`、`argus-agent`、`argus-job`、`argus-tool`、`argus-mcp`、`argus-wing` 继续作为唯一业务核心，不为 web 再造一套实现。
+现有 `argus-session`、`argus-agent`、`argus-job`、`argus-tool`、`argus-mcp`、`argus-wing` 继续作为唯一业务核心，不为 web 再造第二套实现。
 
-`argus-wing` 仍是应用 facade，也是 server 与 desktop bridge 的共同能力入口。新增服务端时，不应绕过 facade 直接让 HTTP handler 依赖底层 repository 或 manager。
+`argus-wing` 仍是应用 facade，也是 server transport 的唯一稳定入口。新增 `argus-server` 时，不应绕过 facade 直接拼接 repository 或 manager。
 
-### 2. 新增 `crates/argus-server` 作为网络 transport 层
+### 2. 新增 `crates/argus-server`，但首阶段只暴露管理面
 
-新增一个独立 crate：`crates/argus-server`。
+新增独立 crate：`crates/argus-server`。
 
-它的职责是：
+它在首阶段的职责是：
 
 - 启动 `ArgusWing`
-- 暴露 `REST` API
-- 暴露 `SSE` 实时事件流
-- 承载服务实例级配置、中间件、序列化和错误映射
+- 暴露实例级管理 API
+- 承担序列化、错误映射、配置装配
 
-它的职责不包括：
+它在首阶段**不负责**：
 
-- 新增第二套业务状态
-- 直接拼底层 repository
-- 承担 desktop 本地能力执行
+- `chat`、`thread`、`message` 主链路
+- `SSE` 用户事件流
+- desktop 本地能力执行
+- desktop 远端接入模式
 
-服务端与客户端的边界统一为一句话：
+服务端边界可以明确为：
 
-**服务端拥有共享状态，desktop 拥有本地能力。**
+**首阶段 server 只拥有实例级管理状态，不追求先接住全部运行时状态。**
 
-### 3. 用户端协议采用 `REST + SSE`
+### 3. 首阶段协议采用 `REST`，`SSE` 后置
 
-`v1` 不采用 `WebSocket` 作为默认用户端协议，原因是现有前端模型本身就是“命令请求 + 单向事件订阅”：
+虽然长期上 `REST + SSE` 仍然合理，但当前首阶段目标是“可用管理台”，不是“运行时聊天工作台”。因此：
 
-- 请求型操作走命令调用
-- 实时更新通过事件推送增量收口
+- `v1 phase 1` 只要求 `REST`
+- `SSE` 在需要 runtime monitor 或事件驱动页面时再引入
 
-因此首版协议定为：
+首阶段建议的 API 面：
 
-- `REST`：providers、agent templates、MCP、sessions、threads、messages、snapshot、monitor
-- `SSE`：thread events、job runtime events、thread monitor updates
-
-建议的接口形态：
-
+- `GET /api/v1/health`
+- `GET /api/v1/bootstrap`
 - `GET /api/v1/providers`
 - `POST /api/v1/providers`
+- `PATCH /api/v1/providers/:provider_id`
 - `GET /api/v1/agents/templates`
-- `GET /api/v1/sessions`
-- `POST /api/v1/sessions`
-- `GET /api/v1/sessions/:session_id/threads`
-- `POST /api/v1/sessions/:session_id/threads/:thread_id/messages`
-- `GET /api/v1/sessions/:session_id/threads/:thread_id/snapshot`
-- `GET /api/v1/monitor/thread-pool`
-- `GET /api/v1/monitor/job-runtime`
-- `GET /api/v1/events`
+- `POST /api/v1/agents/templates`
+- `PATCH /api/v1/agents/templates/:template_id`
+- `GET /api/v1/mcp/servers`
+- `POST /api/v1/mcp/servers`
+- `PATCH /api/v1/mcp/servers/:server_id`
+- `GET /api/v1/settings`
+- `PUT /api/v1/settings`
 
-`/api/v1/events` 返回统一 envelope，至少包含：
+`bootstrap` 的作用是给 web 管理台提供最小初始化数据，例如：
 
-- `channel`
-- `session_id?`
-- `thread_id?`
-- `payload`
+- 服务实例基础信息
+- 可用 provider / template / MCP 摘要
+- 版本或运行状态摘要
 
-后续如果 desktop 本地能力节点需要服务端主动下发任务，再单独评估 `WebSocket` 作为节点控制面协议；该需求不并入 `v1` 用户端协议。
+### 4. Web 首阶段是“重写后的管理台”，不是 desktop 的裁剪版
 
-### 4. 前端改成“共享核心 + 双 transport”
+首阶段新增 `apps/web`，但不再假设它要消费 desktop 的页面组合方式。
 
-推荐路线不是复制一份 desktop UI，而是抽离共享前端核心。
+web 管理台应该按新的信息架构组织，建议至少包含：
 
-新增目录：
+- Overview / Health
+- Providers
+- Templates
+- MCP Servers
+- Settings
 
-- `packages/app-core`
+这里的 `frontend-reset-first`，含义不是只做设计稿或壳子，而是：
+
+- 用新的管理台心智模型重组页面
+- 让服务端 API 以管理场景为中心收敛
+- 阶段结束时交付一个**基本可用的管理台**
+
+“基本可用”至少意味着：
+
+- 能打开 web 管理台
+- 能看到真实服务状态
+- 至少核心配置对象能完成真实的读取与修改闭环
+
+### 5. 首阶段不抽 `packages/app-core`
+
+shared frontend core 仍然可能是正确方向，但不应作为第一阶段前提。
+
+原因有两个：
+
+1. 当前 desktop 前端的主心智模型是聊天工作台，而不是管理台
+2. 如果一开始先抽共享层，容易把旧状态模型和旧页面组合方式一起复制到 web
+
+因此首阶段明确：
+
+- 不创建 `packages/app-core` 作为必须项
+- 不要求先定义 `TauriTransport` / `HttpSseTransport` 双实现
+- 不把 desktop store 抽离当成 web 起步条件
+
+shared core 的评估时机，应该放在 web 管理台信息架构稳定之后。
+
+### 6. 首阶段不改 desktop
+
+desktop 在这轮里继续按原有方式工作：
+
+- 不改主路由
+- 不移除现有登录相关流
+- 不让 desktop 先切 server
+- 不在这一轮把 desktop 壳改成共享 shell
+
+这能把第一阶段的风险控制在 server + web 两个新面向上，而不是把已有产品一起拉进迁移。
+
+### 7. 单实例、无登录
+
+服务形态仍明确为：
+
+- 一台 `argus-server` 对应一个操作者环境
+- 不做业务登录
+- 不做多用户隔离
+- provider、template、MCP、settings 都按实例级资源处理
+
+如果部署层需要保护，可依赖内网、反向代理或外层访问控制，但不把登录系统纳入本轮设计。
+
+### 8. `chat`、`monitor`、本地能力节点全部后置
+
+首阶段明确不做：
+
+- `chat` web 化
+- `thread monitor` web 化
+- `sessions / threads / messages / snapshot`
+- `SSE` 事件流
+- desktop 作为本地能力节点注册
+- desktop 连接远端 `argus-server`
+
+这些内容不是被否定，而是被重新放回正确顺序：
+
+- `Phase 1`：管理台
+- `Phase 2`：monitor 与需要事件流的页面
+- `Phase 3`：chat / shared core / desktop rewire
+
+## 仓库组织
+
+首阶段推荐的最小目录增量：
+
+- `crates/argus-server`
 - `apps/web`
 
 其中：
 
-- `packages/app-core` 放共享 types、DTO、transport 抽象、feature store、runtime、hooks、共享页面组件
-- `apps/web` 只放 web 壳、入口、路由装配和 web 专属初始化
-- `crates/desktop` 继续作为 Tauri 壳，但逐步消费 `packages/app-core`
+- `crates/desktop` 保持独立，不并入新的前端共享层
+- `apps/web` 可以先作为独立 Vite app 存在
+- 如果后续再需要前端 workspace 或 `packages/app-core`，应在第二阶段以后再评估
 
-共享前端核心先拆成三块：
+换句话说，这一版刻意避免为了“未来也许会共享”而先做大规模目录重组。
 
-1. `protocol`
-2. `transport`
-3. `features`
+## 分阶段路线
 
-`transport` 层定义统一 `AppTransport`，至少提供：
+### Phase 1：可用管理台
 
-- auth/bootstrap 能力
-- provider / template / MCP 管理
-- session / thread / message / snapshot API
-- thread monitor API
-- `subscribeThreadEvents()`
-- `subscribeMonitorEvents()`
+交付物：
 
-然后分别实现：
-
-- `TauriTransport`
-- `HttpSseTransport`
-
-这样 desktop 初期仍可保持原有能力路径，而 web 可以直接接入 `argus-server`。
-
-### 5. Web 首版范围
-
-`v1 web` 只覆盖三条主链路：
-
-- chat
-- settings
-- thread monitor
-
-其中 `settings` 的定位要明确成：
-
-**服务实例管理页，而不是用户个人设置页。**
-
-首版至少包含：
-
-- Provider 管理
-- Agent Template 管理
-- MCP Server 管理
-- 服务运行状态和基础观测
-
-不在 `v1` 范围内的内容：
-
-- desktop 特有窗口能力
-- 本地 filesystem / shell / browser 工具直接搬到 web
-- 多用户空间、租户、组织、权限模型
-
-### 6. 单实例、无登录
-
-`v1` 服务形态明确为：
-
-- 一台 `argus-server` 对应一个操作者环境
-- 不做业务登录
-- 不做多用户数据隔离
-- provider、template、MCP、session、thread 都按实例级资源处理
-
-这意味着当前 desktop 的本地账号体系不是 web/server 首版的前提条件。部署侧如需保护服务，可依赖内网隔离、反向代理或外层访问控制，但不把登录系统纳入本轮设计。
-
-### 7. 混合工具执行
-
-tool 执行模型采用混合模式：
-
-- 共享且适合中心化的能力可由服务端执行
-- 强本地、强权限、强机器绑定的能力继续保留在 desktop
-
-因此 `v1` 不要求 web 直接调用本地 tool。desktop 后续可以演进成“桌面壳 + 本地能力节点”，但该节点协议不并入当前首版。
-
-### 8. 错误恢复与状态一致性
-
-网络版前端继续沿用现有 desktop 的收口原则：
-
-- `SSE` 提供增量事件
-- `snapshot` 才是最终事实来源
-- 前端保留 `pendingUserMessage`、`pendingAssistant` 这类可见性补偿态
-- 一旦断流、丢事件、解析失败，回退到 `get_thread_snapshot` 或 monitor snapshot 刷新
-
-也就是说，事件通道只负责“尽快更新”，不负责“唯一真相”。
-
-### 9. 仓库组织
-
-推荐的目标目录结构：
-
-- `crates/argus-server`
+- `argus-server`
 - `apps/web`
+- 可用的管理台页面和最小管理 API
+
+范围：
+
+- Providers
+- Templates
+- MCP Servers
+- Settings
+- Health / Overview
+
+不包含：
+
+- Chat
+- Thread monitor
+- SSE
+- Shared core
+- Desktop rewiring
+
+### Phase 2：运行状态与事件流
+
+只有当管理台稳定且确实需要时，再引入：
+
+- Runtime monitor 页面
+- `SSE`
+- 更细的 health / runtime 观测
+
+### Phase 3：更深的产品收敛
+
+后续再评估：
+
+- `chat` 服务化
 - `packages/app-core`
-- `crates/desktop`
-
-为支撑 `apps/web` 和 `packages/app-core`，根目录需要新增前端 workspace 管理文件，例如：
-
-- `pnpm-workspace.yaml`
-
-desktop 当前独立前端工程中的共用配置也需要逐步上提或共享，例如：
-
-- TypeScript base config
-- ESLint 共享配置
-- Vite alias / path 约定
-
-这些共享配置只在确有复用需要时再上提，不在第一步做大规模工具链改造。
-
-## 迁移顺序
-
-推荐按以下顺序渐进迁移：
-
-1. 抽离前端 transport 接口，让现有 desktop store 不再直接依赖 Tauri
-2. 抽离共享前端核心到 `packages/app-core`
-3. 新增 `crates/argus-server`，把现有 `ArgusWing` facade 暴露成 `REST + SSE`
-4. 新增 `apps/web`，复用共享核心实现 `chat + settings + thread monitor`
-5. 最后再引入 desktop 连接远端 server 的模式，以及本地能力节点模型
-
-这个顺序的目标是分散风险：
-
-- 先验证共享前端核心是否能从 desktop 中成功抽离
-- 再验证 `ArgusWing` 到 `axum` 的映射是否稳定
-- 最后才处理 desktop/server 共存和本地能力接入
+- desktop 连接远端 server
+- desktop 本地能力节点模型
 
 ## 测试策略
 
-测试按四层铺开：
+首阶段测试不再围绕 chat store，而是围绕管理能力：
 
 1. Rust 服务端集成测试
-   覆盖 `argus-server` 的 REST / SSE 映射、错误 envelope 和 snapshot 恢复路径。
+   覆盖 `health`、`bootstrap`、providers、templates、MCP、settings 的 REST 行为和错误 envelope。
 
-2. Transport 合约测试
-   同一组前端 contract 测试同时覆盖 `TauriTransport` 与 `HttpSseTransport`。
+2. Web 管理台页面测试
+   覆盖页面渲染、导航、表单提交、错误展示、成功回显。
 
-3. Store / runtime 回归测试
-   优先锁住 `chat-store`、`chat-runtime`、thread monitor 收口行为，确保抽共享层后行为不漂移。
+3. 冒烟测试
+   验证“打开管理台 -> 读取实例状态 -> 修改一项真实配置 -> 刷新后仍可见”的闭环。
 
-4. 冒烟测试
-   保留一条 desktop 本地链路和一条 web 连 server 链路，验证 `chat + settings + thread monitor` 主路径。
+4. Desktop 回归
+   本阶段不改 desktop 逻辑，因此只做最低限度的“不受影响”验证，不把 desktop 测试放在主路径。
 
 ## 非目标
 
 本轮明确不做：
 
-- desktop 下线或 Tauri bridge 全量删除
+- desktop 下线
+- desktop 去登录
+- shared frontend core
+- `chat` 和 `thread monitor` 首发 web 化
+- `SSE` 首阶段上线
 - 多用户 / 多租户 / 权限系统
-- `WebSocket` 用户端协议
-- 把所有本地 tool 立即上收服务端
-- 先于需求引入 OpenAPI codegen 或大规模前端基建重构
+- 本地 tool 直接上 web
 
 ## 风险与控制
 
 主要风险有三类：
 
-1. transport 抽离过程中，desktop 现有 chat 行为回归
-2. server API 与现有 Tauri command 语义不一致，导致共享层变成双份逻辑
-3. 过早引入本地能力节点和安全模型，扩大首版范围
+1. `ArgusWing` 当前管理面 API 不够顺手
+   处理方式是补 facade 方法，而不是让 `argus-server` 绕过 facade 直接拼底层。
 
-对应控制策略：
+2. web 管理台信息架构如果继续沿用 desktop 习惯，会把旧心智模型带过去
+   处理方式是明确按管理台重新组织导航和页面，不以 desktop 现有布局为模板。
 
-- 先抽 transport，不先改页面
-- server API 尽量对齐现有 facade 与 command 语义
-- 用 feature-by-feature 迁移，不做一把切
-- 本地能力节点后置，不与 web 首版绑定
+3. 首阶段如果重新把 desktop 或 shared core 拉进来，会再次扩 scope
+   处理方式是把 desktop rewiring 和 shared core 提升为显式后续阶段，不作为首阶段任务。
 
 ## 结论
 
-这次拆分的推荐路线是：
+这次 desktop -> server + web 的合理切法，不是“先把 desktop 的核心抽共享，再接 server”，而是：
 
-- 核心业务继续留在 Rust workspace 与 `ArgusWing`
-- 新增 `axum` 服务端作为共享状态与网络 transport
-- 新增共享前端核心，让 desktop 与 web 复用状态模型和页面能力
-- `v1` 以 `REST + SSE`、单实例无登录、`chat + settings + thread monitor` 为边界
+1. 先做 `argus-server`
+2. 先做新的 web 管理台
+3. 先把管理能力跑通
+4. 再决定哪些前端逻辑值得共享、哪些 desktop 能力值得后续迁移
 
-这样既能保留现有 desktop 的迭代速度，也能为 web 和后续服务化演进建立稳定边界。
+这样更符合当前真实目标，也更符合 YAGNI。
