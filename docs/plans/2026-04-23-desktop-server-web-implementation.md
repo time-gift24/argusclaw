@@ -681,7 +681,7 @@ GET /api/v1/mcp/servers/{server_id}/tools
 
 **Expected UI shape:**
 
-- MCP page exposes a JSON import panel above the manual create/edit form
+- MCP page exposes one creation card with tabs for manual create/edit and JSON import
 - Supports top-level server maps like `{ "brave-search": { "command": "npx", "args": ["-y", "..."], "env": { "KEY": "xxx" } } }`
 - Also accepts the common `{ "mcpServers": { ... } }` wrapper
 - Imported entries save as enabled stdio MCP services with the default 5000ms timeout

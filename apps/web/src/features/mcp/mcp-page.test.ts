@@ -442,6 +442,49 @@ describe("McpPage", () => {
     expect(wrapper.text()).toContain("brave-search");
   });
 
+  it("keeps manual creation and JSON import in one creation card with tabs", async () => {
+    setApiClient({
+      getHealth: async () => ({ status: "ok" }),
+      getBootstrap: async () => ({
+        instance_name: "",
+        provider_count: 0,
+        template_count: 0,
+        mcp_server_count: 0,
+        default_provider_id: null,
+        default_template_id: null,
+        mcp_ready_count: 0,
+      }),
+      getRuntimeState: async () => emptyRuntimeState(),
+      getSettings: async () => ({ instance_name: "", default_provider_id: null, default_provider_name: null }),
+      updateSettings: async () => ({ instance_name: "", default_provider_id: null, default_provider_name: null }),
+      listProviders: async () => [],
+      saveProvider: async (input) => input,
+      listTemplates: async () => [],
+      saveTemplate: async (input) => input,
+      listMcpServers: async () => [],
+      saveMcpServer: async (input) => input,
+      deleteMcpServer: async () => ({ deleted: true }),
+      testMcpServer: async () => ({
+        status: "ready",
+        checked_at: "2026-04-23T12:00:00Z",
+        latency_ms: 10,
+        discovered_tools: [],
+        message: "connection succeeded",
+      }),
+      listMcpServerTools: async () => [],
+    });
+
+    const wrapper = mount(McpPage);
+    await flushPromises();
+
+    const creationCard = wrapper.get('[data-testid="mcp-create-card"]');
+    expect(creationCard.text()).toContain("手动配置");
+    expect(creationCard.text()).toContain("JSON 导入");
+    expect(creationCard.find('[data-testid="mcp-form"]').exists()).toBe(true);
+    expect(creationCard.find('[name="mcp-import-json"]').exists()).toBe(true);
+    expect(wrapper.findAll(".form-panel")).toHaveLength(1);
+  });
+
   it("shows an error without saving when imported MCP JSON is invalid", async () => {
     const saveMcpServer = vi.fn<(input: McpServerRecord) => Promise<McpServerRecord>>();
 

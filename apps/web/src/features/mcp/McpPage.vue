@@ -47,6 +47,7 @@ const loadingToolsServerId = ref<number | null>(null);
 const toolsByServer = ref<Record<number, McpDiscoveredToolRecord[]>>({});
 const importJsonText = ref("");
 const importingConfig = ref(false);
+const creationMode = ref("manual");
 
 function createFormState(overrides: Partial<McpFormState> = {}): McpFormState {
   return {
@@ -272,6 +273,7 @@ function resetForm() {
 }
 
 function editMcpServer(server: McpServerRecord) {
+  creationMode.value = "manual";
   const baseState = {
     id: server.id,
     display_name: server.display_name,
@@ -681,193 +683,228 @@ onMounted(() => {
       </article>
     </div>
 
-    <article class="form-panel import-panel">
-      <div class="panel-header">
-        <h3 class="panel-title">导入 MCP JSON</h3>
-        <p class="panel-description">
-          支持 Claude / MCP 常见配置片段，例如 { "brave-search": { "command": "npx", "args": ["-y", "..."], "env": { "KEY": "xxx" } } }。
-        </p>
-      </div>
-
-      <TinyInput
-        :model-value="importJsonText"
-        name="mcp-import-json"
-        type="textarea"
-        :rows="8"
-        placeholder='{ "brave-search": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-brave-search"], "env": { "BRAVE_API_KEY": "xxx" } } }'
-        @update:model-value="importJsonText = String($event)"
-      />
-
-      <div class="import-actions">
-        <TinyButton
-          data-testid="import-mcp-json"
-          type="primary"
-          :disabled="importingConfig"
-          @click="importMcpJson"
-        >
-          {{ importingConfig ? "导入中" : "导入配置" }}
-        </TinyButton>
-        <span class="import-hint">导入后会保存为 stdio MCP 服务，并使用默认 5000ms 超时。</span>
-      </div>
-    </article>
-
-    <article class="form-panel">
+    <article
+      data-testid="mcp-create-card"
+      class="form-panel create-panel"
+    >
       <div class="panel-header">
         <h3 class="panel-title">{{ isEditing ? "编辑 MCP 服务" : "新增 MCP 服务" }}</h3>
         <p class="panel-description">
-          {{ isEditing ? "更新已配置服务的连接参数" : "添加新的 stdio / HTTP / SSE MCP 服务" }}
+          {{ isEditing ? "更新已配置服务的连接参数" : "选择手动配置或 JSON 导入来创建 MCP 服务" }}
         </p>
       </div>
 
-      <form
-        data-testid="mcp-form"
-        class="mcp-form"
-        @submit.prevent="saveMcpServerDraft"
+      <div
+        class="creation-tabs"
+        role="tablist"
+        aria-label="MCP 创建方式"
       >
-        <TinyForm
-          label-position="top"
-          class="mcp-form__grid"
+        <TinyButton
+          data-testid="mcp-create-tab-manual"
+          role="tab"
+          :aria-selected="creationMode === 'manual'"
+          :type="creationMode === 'manual' ? 'primary' : 'default'"
+          @click="creationMode = 'manual'"
         >
-          <TinyFormItem label="服务名称">
-            <TinyInput
-              :model-value="form.display_name"
-              name="mcp-display-name"
-              placeholder="例如：Docs MCP"
-              @update:model-value="updateFormField('display_name', String($event))"
-            />
-          </TinyFormItem>
+          手动配置
+        </TinyButton>
+        <TinyButton
+          data-testid="mcp-create-tab-json"
+          role="tab"
+          :aria-selected="creationMode === 'json'"
+          :type="creationMode === 'json' ? 'primary' : 'default'"
+          @click="creationMode = 'json'"
+        >
+          JSON 导入
+        </TinyButton>
+      </div>
 
-          <TinyFormItem label="传输类型">
-            <TinySelect
-              :model-value="form.transport_kind"
-              name="mcp-transport-kind"
-              @update:model-value="updateTransportKind"
+      <div
+        v-show="creationMode === 'manual'"
+        class="creation-tab-panel"
+        role="tabpanel"
+      >
+          <form
+            data-testid="mcp-form"
+            class="mcp-form"
+            @submit.prevent="saveMcpServerDraft"
+          >
+            <TinyForm
+              label-position="top"
+              class="mcp-form__grid"
             >
-              <TinyOption
-                label="stdio"
-                value="stdio"
-              />
-              <TinyOption
-                label="HTTP"
-                value="http"
-              />
-              <TinyOption
-                label="SSE"
-                value="sse"
-              />
-            </TinySelect>
-          </TinyFormItem>
+              <TinyFormItem label="服务名称">
+                <TinyInput
+                  :model-value="form.display_name"
+                  name="mcp-display-name"
+                  placeholder="例如：Docs MCP"
+                  @update:model-value="updateFormField('display_name', String($event))"
+                />
+              </TinyFormItem>
 
-          <template v-if="form.transport_kind === 'stdio'">
-            <TinyFormItem label="启动命令">
-              <TinyInput
-                :model-value="form.command"
-                name="mcp-command"
-                placeholder="docs-mcp"
-                @update:model-value="updateFormField('command', String($event))"
-              />
-            </TinyFormItem>
+              <TinyFormItem label="传输类型">
+                <TinySelect
+                  :model-value="form.transport_kind"
+                  name="mcp-transport-kind"
+                  @update:model-value="updateTransportKind"
+                >
+                  <TinyOption
+                    label="stdio"
+                    value="stdio"
+                  />
+                  <TinyOption
+                    label="HTTP"
+                    value="http"
+                  />
+                  <TinyOption
+                    label="SSE"
+                    value="sse"
+                  />
+                </TinySelect>
+              </TinyFormItem>
 
-            <TinyFormItem label="参数列表">
-              <TinyInput
-                :model-value="form.argsText"
-                name="mcp-args"
-                type="textarea"
-                :rows="3"
-                placeholder="每行一个参数，例如 --stdio"
-                @update:model-value="updateFormField('argsText', String($event))"
-              />
-            </TinyFormItem>
+              <template v-if="form.transport_kind === 'stdio'">
+                <TinyFormItem label="启动命令">
+                  <TinyInput
+                    :model-value="form.command"
+                    name="mcp-command"
+                    placeholder="docs-mcp"
+                    @update:model-value="updateFormField('command', String($event))"
+                  />
+                </TinyFormItem>
 
-            <TinyFormItem
-              label="环境变量"
-              class="full-width"
-            >
-              <TinyInput
-                :model-value="form.envText"
-                name="mcp-env"
-                type="textarea"
-                :rows="3"
-                placeholder="每行一个 KEY=value"
-                @update:model-value="updateFormField('envText', String($event))"
-              />
-            </TinyFormItem>
-          </template>
+                <TinyFormItem label="参数列表">
+                  <TinyInput
+                    :model-value="form.argsText"
+                    name="mcp-args"
+                    type="textarea"
+                    :rows="3"
+                    placeholder="每行一个参数，例如 --stdio"
+                    @update:model-value="updateFormField('argsText', String($event))"
+                  />
+                </TinyFormItem>
 
-          <template v-else>
-            <TinyFormItem
-              label="服务地址"
-              class="full-width"
-            >
-              <TinyInput
-                :model-value="form.url"
-                name="mcp-url"
-                placeholder="https://example.com/mcp"
-                @update:model-value="updateFormField('url', String($event))"
-              />
-            </TinyFormItem>
+                <TinyFormItem
+                  label="环境变量"
+                  class="full-width"
+                >
+                  <TinyInput
+                    :model-value="form.envText"
+                    name="mcp-env"
+                    type="textarea"
+                    :rows="3"
+                    placeholder="每行一个 KEY=value"
+                    @update:model-value="updateFormField('envText', String($event))"
+                  />
+                </TinyFormItem>
+              </template>
 
-            <TinyFormItem
-              label="请求头"
-              class="full-width"
-            >
-              <TinyInput
-                :model-value="form.headersText"
-                name="mcp-headers"
-                type="textarea"
-                :rows="3"
-                placeholder="每行一个 Header=Value"
-                @update:model-value="updateFormField('headersText', String($event))"
-              />
-            </TinyFormItem>
-          </template>
+              <template v-else>
+                <TinyFormItem
+                  label="服务地址"
+                  class="full-width"
+                >
+                  <TinyInput
+                    :model-value="form.url"
+                    name="mcp-url"
+                    placeholder="https://example.com/mcp"
+                    @update:model-value="updateFormField('url', String($event))"
+                  />
+                </TinyFormItem>
 
-          <TinyFormItem label="连接超时">
-            <TinyNumeric
-              :model-value="form.timeout_ms"
-              name="mcp-timeout"
-              :min="1000"
-              :step="1000"
-              @update:model-value="updateTimeout"
-            />
-          </TinyFormItem>
+                <TinyFormItem
+                  label="请求头"
+                  class="full-width"
+                >
+                  <TinyInput
+                    :model-value="form.headersText"
+                    name="mcp-headers"
+                    type="textarea"
+                    :rows="3"
+                    placeholder="每行一个 Header=Value"
+                    @update:model-value="updateFormField('headersText', String($event))"
+                  />
+                </TinyFormItem>
+              </template>
 
-          <TinyFormItem label="启用服务">
-            <div class="mcp-form__switch">
-              <TinySwitch
-                :model-value="form.enabled"
-                name="mcp-enabled"
-                @update:model-value="updateFormField('enabled', Boolean($event))"
-              />
-              <span class="switch-hint">保存后参与运行时连接与工具发现</span>
+              <TinyFormItem label="连接超时">
+                <TinyNumeric
+                  :model-value="form.timeout_ms"
+                  name="mcp-timeout"
+                  :min="1000"
+                  :step="1000"
+                  @update:model-value="updateTimeout"
+                />
+              </TinyFormItem>
+
+              <TinyFormItem label="启用服务">
+                <div class="mcp-form__switch">
+                  <TinySwitch
+                    :model-value="form.enabled"
+                    name="mcp-enabled"
+                    @update:model-value="updateFormField('enabled', Boolean($event))"
+                  />
+                  <span class="switch-hint">保存后参与运行时连接与工具发现</span>
+                </div>
+              </TinyFormItem>
+            </TinyForm>
+
+            <div class="mcp-form__actions">
+              <TinyButton
+                native-type="submit"
+                type="primary"
+                :disabled="saving"
+              >
+                {{ submitLabel }}
+              </TinyButton>
+              <TinyButton
+                data-testid="test-mcp-draft"
+                type="default"
+                :disabled="testingDraft"
+                @click="testDraftMcpServer"
+              >
+                {{ testingDraft ? "测试中" : "测试当前配置" }}
+              </TinyButton>
+              <TinyButton
+                type="default"
+                @click="resetForm"
+              >
+                {{ isEditing ? "取消编辑" : "重置" }}
+              </TinyButton>
             </div>
-          </TinyFormItem>
-        </TinyForm>
+          </form>
+      </div>
 
-        <div class="mcp-form__actions">
-          <TinyButton
-            native-type="submit"
-            type="primary"
-            :disabled="saving"
-          >
-            {{ submitLabel }}
-          </TinyButton>
-          <TinyButton
-            data-testid="test-mcp-draft"
-            type="default"
-            :disabled="testingDraft"
-            @click="testDraftMcpServer"
-          >
-            {{ testingDraft ? "测试中" : "测试当前配置" }}
-          </TinyButton>
-          <TinyButton
-            type="default"
-            @click="resetForm"
-          >
-            {{ isEditing ? "取消编辑" : "重置" }}
-          </TinyButton>
-        </div>
-      </form>
+      <div
+        v-show="creationMode === 'json'"
+        class="creation-tab-panel import-tab-content"
+        role="tabpanel"
+      >
+            <p class="panel-description">
+              支持 Claude / MCP 常见配置片段，例如 { "brave-search": { "command": "npx", "args": ["-y", "..."], "env": { "KEY": "xxx" } } }。
+            </p>
+
+            <TinyInput
+              :model-value="importJsonText"
+              name="mcp-import-json"
+              type="textarea"
+              :rows="8"
+              placeholder='{ "brave-search": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-brave-search"], "env": { "BRAVE_API_KEY": "xxx" } } }'
+              @update:model-value="importJsonText = String($event)"
+            />
+
+            <div class="import-actions">
+              <TinyButton
+                data-testid="import-mcp-json"
+                type="primary"
+                :disabled="importingConfig"
+                @click="importMcpJson"
+              >
+                {{ importingConfig ? "导入中" : "导入配置" }}
+              </TinyButton>
+              <span class="import-hint">导入后会保存为 stdio MCP 服务，并使用默认 5000ms 超时。</span>
+            </div>
+      </div>
     </article>
   </section>
 </template>
@@ -955,8 +992,23 @@ onMounted(() => {
   color: var(--text-muted);
 }
 
-.import-panel {
+.create-panel,
+.creation-tab-panel,
+.import-tab-content {
   gap: var(--space-4);
+}
+
+.create-panel,
+.creation-tab-panel,
+.import-tab-content {
+  display: grid;
+}
+
+.creation-tabs {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
 }
 
 .import-actions {

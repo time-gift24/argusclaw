@@ -1,6 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { mount } from "@vue/test-utils";
 import { createRouter, createMemoryHistory } from "vue-router";
+
+vi.mock("@/lib/opentiny", async () => import("@/test/stubs/opentiny"));
 
 import AdminLayout from "./AdminLayout.vue";
 import HealthPage from "@/features/health/HealthPage.vue";
