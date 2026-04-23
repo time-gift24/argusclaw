@@ -71,7 +71,7 @@ onMounted(async () => {
 
 .metric-label {
   font-size: var(--text-xs);
-  font-weight: 500;
+  font-weight: 510;
   color: var(--text-muted);
   text-transform: uppercase;
   letter-spacing: 0.04em;
