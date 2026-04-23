@@ -98,6 +98,17 @@ onMounted(async () => {
   border: 1px solid var(--border-default);
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-xs);
+  transition:
+    border-color var(--transition-base),
+    transform var(--transition-fast);
+}
+
+.template-card:hover {
+  border-color: var(--border-strong);
+}
+
+.template-card:active {
+  transform: scale(0.99);
 }
 
 .template-header {
@@ -114,10 +125,10 @@ onMounted(async () => {
 
 .template-version {
   font-size: var(--text-xs);
-  font-weight: 500;
+  font-weight: 510;
   color: var(--text-muted);
   padding: var(--space-1) var(--space-2);
-  background: var(--app-bg);
+  background: var(--surface-raised);
   border-radius: var(--radius-sm);
 }
 
