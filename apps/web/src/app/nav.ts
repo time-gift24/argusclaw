@@ -54,10 +54,4 @@ export const adminNavItems: AdminNavItem[] = [
     description: "基于 Web REST API 的独立对话工作台",
     to: "/chat",
   },
-  {
-    key: "settings",
-    label: "系统设置",
-    description: "实例级管理偏好与默认行为",
-    to: "/settings",
-  },
 ];

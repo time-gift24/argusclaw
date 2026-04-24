@@ -71,14 +71,12 @@ git add Cargo.toml README.md crates/argus-server
 git commit -m "feat: scaffold argus server health api"
 ```
 
-### Task 2: Add bootstrap and settings REST routes for the admin console
+### Task 2: Add bootstrap REST route for the admin console
 
 **Files:**
 - Create: `crates/argus-server/src/routes/bootstrap.rs`
-- Create: `crates/argus-server/src/routes/settings.rs`
 - Create: `crates/argus-server/src/response.rs`
 - Create: `crates/argus-server/tests/bootstrap_api.rs`
-- Create: `crates/argus-server/tests/settings_api.rs`
 - Modify: `crates/argus-server/src/routes/mod.rs`
 - Modify: `crates/argus-server/src/lib.rs`
 
@@ -109,24 +107,22 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/api/v1/health", get(health))
         .route("/api/v1/bootstrap", get(get_bootstrap))
-        .route("/api/v1/settings", get(get_settings).put(update_settings))
         .with_state(state)
 }
 ```
 
-Make `bootstrap` return only the minimum data the web shell needs to render instance-level navigation and status. Keep settings scoped to instance management; do not add auth or per-user profile fields.
+Make `bootstrap` return only the minimum data the web shell needs to render instance-level navigation and status. Do not add instance settings or per-user profile fields.
 
 **Step 4: Run test to verify it passes**
 
 Run: `cargo test -p argus-server bootstrap_api -- --nocapture`
-Run: `cargo test -p argus-server settings_api -- --nocapture`
 Expected: PASS
 
 **Step 5: Commit**
 
 ```bash
-git add crates/argus-server/src/routes/bootstrap.rs crates/argus-server/src/routes/settings.rs crates/argus-server/src/response.rs crates/argus-server/tests/bootstrap_api.rs crates/argus-server/tests/settings_api.rs crates/argus-server/src/routes/mod.rs crates/argus-server/src/lib.rs
-git commit -m "feat: add bootstrap and settings admin routes"
+git add crates/argus-server/src/routes/bootstrap.rs crates/argus-server/src/response.rs crates/argus-server/tests/bootstrap_api.rs crates/argus-server/src/routes/mod.rs crates/argus-server/src/lib.rs
+git commit -m "feat: add bootstrap admin route"
 ```
 
 ### Task 3: Add provider management REST routes
@@ -371,15 +367,13 @@ git add apps/web/src/features/providers apps/web/src/router/index.ts apps/web/sr
 git commit -m "feat: add provider management flow to web admin"
 ```
 
-### Task 7: Implement templates, MCP, settings, and health pages
+### Task 7: Implement templates, MCP, tools, and health pages
 
 **Files:**
 - Create: `apps/web/src/features/templates/TemplatesPage.vue`
 - Create: `apps/web/src/features/templates/templates-page.test.ts`
 - Create: `apps/web/src/features/mcp/McpPage.vue`
 - Create: `apps/web/src/features/mcp/mcp-page.test.ts`
-- Create: `apps/web/src/features/settings/SettingsPage.vue`
-- Create: `apps/web/src/features/settings/settings-page.test.ts`
 - Create: `apps/web/src/features/health/HealthPage.vue`
 - Create: `apps/web/src/features/health/health-page.test.ts`
 - Modify: `apps/web/src/router/index.ts`
@@ -432,14 +426,13 @@ Complete the remaining management pages using the REST routes added in earlier t
 
 Run: `cd apps/web && pnpm exec vitest run src/features/templates/templates-page.test.ts`
 Run: `cd apps/web && pnpm exec vitest run src/features/mcp/mcp-page.test.ts`
-Run: `cd apps/web && pnpm exec vitest run src/features/settings/settings-page.test.ts`
 Run: `cd apps/web && pnpm exec vitest run src/features/health/health-page.test.ts`
 Expected: PASS
 
 **Step 5: Commit**
 
 ```bash
-git add apps/web/src/features/templates apps/web/src/features/mcp apps/web/src/features/settings apps/web/src/features/health apps/web/src/router/index.ts apps/web/src/lib/api.ts apps/web/src/styles/tokens.css
+git add apps/web/src/features/templates apps/web/src/features/mcp apps/web/src/features/tools apps/web/src/features/health apps/web/src/router/index.ts apps/web/src/lib/api.ts apps/web/src/styles/tokens.css
 git commit -m "feat: add remaining admin console pages"
 ```
 
@@ -544,7 +537,7 @@ Response should contain:
 - `ServerCore::init(database_path)` resolves database path, connects, migrates, assembles managers/runtimes, and seeds builtin templates
 - `ServerCore::with_pool(pool)` supports in-memory SQLite tests
 - `argus-server` depends directly on the required lower crates and does not depend on `argus-wing`
-- Phase 3B supersedes the initial settings note: `AdminSettings` is persisted through repository-backed SQLite storage with default `instance_name = "ArgusWing"`
+- Settings/admin_settings storage is intentionally omitted; bootstrap returns the product instance label without repository persistence
 
 **Expected validation:**
 
@@ -582,8 +575,7 @@ The endpoint should return `text/event-stream` and emit `runtime.snapshot` event
 
 **Expected server shape:**
 
-- `argus-repository` owns SQLite-backed single-row admin settings storage
-- `ServerCore` loads settings on startup and persists `PUT /settings`
+- No SQLite-backed admin settings storage or `/settings` API is exposed
 - Providers, templates, and MCP expose delete operations through narrow `ServerCore` methods
 - Providers and MCP expose connection test routes
 - MCP exposes discovered tools for an existing server

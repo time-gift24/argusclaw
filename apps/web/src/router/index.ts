@@ -12,7 +12,6 @@ import McpPage from "@/features/mcp/McpPage.vue";
 import McpEditPage from "@/features/mcp/McpEditPage.vue";
 import McpImportPage from "@/features/mcp/McpImportPage.vue";
 import ToolsPage from "@/features/tools/ToolsPage.vue";
-import SettingsPage from "@/features/settings/SettingsPage.vue";
 
 const ChatPage = () => import("@/features/chat/ChatPage.vue");
 
@@ -127,12 +126,6 @@ export const router = createRouter({
           name: "chat",
           component: ChatPage,
           meta: { breadcrumb: "对话" },
-        },
-        {
-          path: "settings",
-          name: "settings",
-          component: SettingsPage,
-          meta: { breadcrumb: "系统设置" },
         },
       ],
     },

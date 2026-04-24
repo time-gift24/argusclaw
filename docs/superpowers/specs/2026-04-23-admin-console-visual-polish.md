@@ -197,11 +197,10 @@ html {
 2. `apps/web/src/layouts/AdminLayout.vue` — 侧边栏 + 头部深色样式
 3. `apps/web/src/features/providers/ProvidersPage.vue` — 卡片样式更新
 4. `apps/web/src/features/providers/ProviderForm.vue` — 表单样式更新
-5. `apps/web/src/features/settings/SettingsPage.vue` — 设置页卡片
-6. `apps/web/src/features/templates/TemplatesPage.vue` — 模板卡片
-7. `apps/web/src/features/mcp/McpPage.vue` — MCP 页面
-8. `apps/web/src/features/health/HealthPage.vue` — 健康状态页
-9. `apps/web/src/features/bootstrap/BootstrapPage.vue` — 引导页
+5. `apps/web/src/features/templates/TemplatesPage.vue` — 模板卡片
+6. `apps/web/src/features/mcp/McpPage.vue` — MCP 页面
+7. `apps/web/src/features/health/HealthPage.vue` — 健康状态页
+8. `apps/web/src/features/bootstrap/BootstrapPage.vue` — 引导页
 
 ### 不涉及（明确排除）
 

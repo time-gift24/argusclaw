@@ -26,17 +26,6 @@ export interface BootstrapResponse {
   mcp_ready_count: number;
 }
 
-export interface SettingsResponse {
-  instance_name: string;
-  default_provider_id: number | null;
-  default_provider_name: string | null;
-}
-
-export interface UpdateSettingsRequest {
-  instance_name: string;
-  default_provider_id: number | null;
-}
-
 export interface LlmProviderRecord {
   id: number;
   kind: ProviderKind;
@@ -403,8 +392,6 @@ export interface ApiClient {
   getBootstrap(): Promise<BootstrapResponse>;
   getRuntimeState(): Promise<RuntimeStateResponse>;
   subscribeRuntimeState?(handlers: RuntimeEventHandlers): RuntimeEventSubscription;
-  getSettings(): Promise<SettingsResponse>;
-  updateSettings(input: UpdateSettingsRequest): Promise<SettingsResponse>;
   listProviders(): Promise<LlmProviderRecord[]>;
   saveProvider(input: SaveProviderRequest): Promise<LlmProviderRecord>;
   deleteProvider?(providerId: number): Promise<DeleteResponse>;
@@ -476,22 +463,6 @@ class HttpApiClient implements ApiClient {
         events.close();
       },
     };
-  }
-
-  getSettings(): Promise<SettingsResponse> {
-    return this.request("/settings");
-  }
-
-  async updateSettings(input: UpdateSettingsRequest): Promise<SettingsResponse> {
-    const response = await this.request<MutationResponse<SettingsResponse>>("/settings", {
-      body: JSON.stringify(input),
-      headers: {
-        "Content-Type": "application/json",
-      },
-      method: "PUT",
-    });
-
-    return response.item;
   }
 
   listProviders(): Promise<LlmProviderRecord[]> {

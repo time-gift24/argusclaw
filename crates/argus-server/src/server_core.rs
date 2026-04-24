@@ -13,10 +13,9 @@ use argus_protocol::{
     ThreadPoolState,
 };
 use argus_repository::traits::{
-    AccountRepository, AdminSettingsRepository, AgentRepository, JobRepository,
-    LlmProviderRepository, McpRepository, SessionRepository, ThreadRepository,
+    AccountRepository, AgentRepository, JobRepository, LlmProviderRepository, McpRepository,
+    SessionRepository, ThreadRepository,
 };
-use argus_repository::types::AdminSettingsRecord;
 use argus_repository::{ArgusSqlite, connect, connect_path, migrate};
 use argus_session::{SessionManager, SessionSummary, ThreadSummary};
 use argus_template::TemplateManager;
@@ -24,25 +23,13 @@ use argus_thread_pool::ThreadPool;
 use argus_tool::ToolManager;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
-use tokio::sync::{RwLock, broadcast};
+use tokio::sync::broadcast;
 
 use crate::db::{DatabaseTarget, default_trace_dir, ensure_parent_dir, resolve_database_target};
 use crate::resolver::ProviderManagerResolver;
 
 const DEFAULT_AGENT_DISPLAY_NAME: &str = "ArgusWing";
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AdminSettings {
-    pub instance_name: String,
-}
-
-impl Default for AdminSettings {
-    fn default() -> Self {
-        Self {
-            instance_name: "ArgusWing".to_string(),
-        }
-    }
-}
+const DEFAULT_INSTANCE_NAME: &str = "ArgusWing";
 
 pub struct ServerCore {
     provider_manager: Arc<ProviderManager>,
@@ -53,8 +40,6 @@ pub struct ServerCore {
     mcp_runtime: Arc<McpRuntime>,
     _account_manager: Arc<AccountManager>,
     mcp_repo: Arc<dyn McpRepository>,
-    admin_settings_repo: Arc<dyn AdminSettingsRepository>,
-    admin_settings: Arc<RwLock<AdminSettings>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -151,7 +136,6 @@ impl ServerCore {
         ));
 
         let mcp_repo: Arc<dyn McpRepository> = sqlite.clone();
-        let admin_settings_repo: Arc<dyn AdminSettingsRepository> = sqlite.clone();
         let mcp_runtime = Arc::new(McpRuntime::new(
             Arc::clone(&mcp_repo),
             Arc::new(RmcpConnector),
@@ -175,10 +159,6 @@ impl ServerCore {
             Arc::clone(&job_manager),
         ));
 
-        let admin_settings = Arc::new(RwLock::new(AdminSettings::from(
-            admin_settings_repo.get_admin_settings().await?,
-        )));
-
         Ok(Arc::new(Self {
             provider_manager,
             template_manager,
@@ -188,8 +168,6 @@ impl ServerCore {
             mcp_runtime,
             _account_manager: account_manager,
             mcp_repo,
-            admin_settings_repo,
-            admin_settings,
         }))
     }
 
@@ -217,18 +195,8 @@ impl ServerCore {
         tool_manager.register(Arc::new(ChromeTool::new_interactive()));
     }
 
-    pub async fn admin_settings(&self) -> AdminSettings {
-        self.admin_settings.read().await.clone()
-    }
-
-    pub async fn update_admin_settings(&self, settings: AdminSettings) -> Result<()> {
-        let saved = self
-            .admin_settings_repo
-            .upsert_admin_settings(&AdminSettingsRecord::from(settings))
-            .await
-            .map_err(database_error)?;
-        *self.admin_settings.write().await = AdminSettings::from(saved);
-        Ok(())
+    pub fn instance_name(&self) -> &'static str {
+        DEFAULT_INSTANCE_NAME
     }
 
     pub async fn list_providers(&self) -> Result<Vec<LlmProviderRecord>> {
@@ -655,21 +623,5 @@ fn database_error(error: impl std::fmt::Display) -> ArgusError {
 fn missing_after_mutation(kind: &str, id: impl std::fmt::Display) -> ArgusError {
     ArgusError::DatabaseError {
         reason: format!("{kind} not found after mutation: {id}"),
-    }
-}
-
-impl From<AdminSettingsRecord> for AdminSettings {
-    fn from(value: AdminSettingsRecord) -> Self {
-        Self {
-            instance_name: value.instance_name,
-        }
-    }
-}
-
-impl From<AdminSettings> for AdminSettingsRecord {
-    fn from(value: AdminSettings) -> Self {
-        Self {
-            instance_name: value.instance_name,
-        }
     }
 }

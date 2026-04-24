@@ -94,12 +94,6 @@ function createComposer(apiOverrides: Partial<ApiClient> = {}) {
     saveMcpServer: vi.fn(),
     saveTemplate: vi.fn(),
     listTools: vi.fn().mockResolvedValue([]),
-    getSettings: vi.fn().mockResolvedValue({
-      instance_name: "ArgusWing",
-      default_provider_id: 7,
-      default_provider_name: "Z.ai",
-    }),
-    updateSettings: vi.fn(),
     sendChatMessage: vi.fn().mockResolvedValue({ accepted: true }),
     ...apiOverrides,
   } as ApiClient);

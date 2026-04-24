@@ -14,7 +14,6 @@ import McpPage from "@/features/mcp/McpPage.vue";
 import ToolsPage from "@/features/tools/ToolsPage.vue";
 import ChatPage from "@/features/chat/ChatPage.vue";
 import RuntimePage from "@/features/runtime/RuntimePage.vue";
-import SettingsPage from "@/features/settings/SettingsPage.vue";
 
 describe("AdminLayout", () => {
   it("renders a left-nav management shell", async () => {
@@ -33,7 +32,6 @@ describe("AdminLayout", () => {
             { path: "mcp", component: McpPage },
             { path: "tools", component: ToolsPage },
             { path: "chat", component: ChatPage },
-            { path: "settings", component: SettingsPage },
           ],
         },
       ],

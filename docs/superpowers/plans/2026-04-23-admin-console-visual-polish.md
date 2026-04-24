@@ -18,7 +18,6 @@
 | `apps/web/src/layouts/AdminLayout.vue` | 侧边栏 + 主内容区样式（深色背景、微交互） |
 | `apps/web/src/features/providers/ProvidersPage.vue` | 提供方列表页（卡片、徽章） |
 | `apps/web/src/features/providers/ProviderForm.vue` | 提供方表单（输入框、按钮、选择器） |
-| `apps/web/src/features/settings/SettingsPage.vue` | 设置页（表单、标签） |
 | `apps/web/src/features/templates/TemplatesPage.vue` | 模板页（卡片、徽章） |
 | `apps/web/src/features/mcp/McpPage.vue` | MCP 服务页（卡片、徽章） |
 | `apps/web/src/features/health/HealthPage.vue` | 健康状态页（状态指示、指标卡） |
@@ -642,100 +641,6 @@ textarea {
 
 ---
 
-## Chunk 4: SettingsPage.vue 深色样式
-
-**Files:**
-- Modify: `apps/web/src/features/settings/SettingsPage.vue`
-
----
-
-- [ ] **Step 1: 更新 SettingsPage.vue 样式**
-
-将 `<style scoped>` 部分替换为：
-
-```css
-<style scoped>
-.page-section {
-  display: grid;
-  gap: var(--space-5);
-}
-
-.settings-card {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-5);
-  padding: var(--space-6);
-  background: var(--surface-base);
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-xs);
-}
-
-.card-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-
-.card-title {
-  margin: 0;
-  font-size: var(--text-base);
-  font-weight: 590;
-  color: var(--text-primary);
-}
-
-.settings-summary {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: var(--space-4);
-  padding: var(--space-4);
-  background: var(--surface-raised);
-  border-radius: var(--radius-md);
-}
-
-.summary-item {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
-}
-
-.summary-label {
-  font-size: var(--text-xs);
-  font-weight: 510;
-  color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
-
-.summary-value {
-  font-size: var(--text-sm);
-  font-weight: 590;
-  color: var(--text-primary);
-}
-
-.settings-form {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: var(--space-4);
-}
-
-.card-actions {
-  display: flex;
-  justify-content: flex-end;
-  padding-top: var(--space-4);
-  border-top: 1px solid var(--border-subtle);
-}
-
-@media (max-width: 960px) {
-  .settings-form {
-    grid-template-columns: 1fr;
-  }
-}
-</style>
-```
-
----
-
 ## Chunk 5: TemplatesPage.vue 深色样式
 
 **Files:**
@@ -1152,8 +1057,7 @@ cd /Users/wanyaozhong/Projects/argusclaw/.worktrees/desktop-server-web-design &&
 1. **Chunk 1** → tokens.css（全局变量，是所有其他样式的基础）
 2. **Chunk 2** → AdminLayout.vue（框架布局）
 3. **Chunk 3** → ProvidersPage.vue + ProviderForm.vue（复杂交互页）
-4. **Chunk 4** → SettingsPage.vue
-5. **Chunk 5** → TemplatesPage.vue
-6. **Chunk 6** → McpPage.vue
-7. **Chunk 7** → HealthPage.vue + BootstrapPage.vue
-8. **Chunk 8** → 验证构建
+4. **Chunk 5** → TemplatesPage.vue
+5. **Chunk 6** → McpPage.vue
+6. **Chunk 7** → HealthPage.vue + BootstrapPage.vue
+7. **Chunk 8** → 验证构建

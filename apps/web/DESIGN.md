@@ -258,12 +258,6 @@ Inter Variable, "Noto Sans SC", "PingFang SC", system-ui, sans-serif
 - 展开视图：参数 Schema 预览
 - 不提供执行按钮，管理台只做运维可见性，不扩大工具执行面
 
-### 系统设置（/settings）
-- 单卡片布局
-- 当前实例信息和默认提供方展示
-- 表单：实例名称（输入框）、默认提供方（下拉选择）
-- 保存按钮：加载状态、成功反馈、错误反馈
-
 ### 对话（/chat）
 - 独立 Web 对话页，不复用 desktop chat store，不引入 shared frontend core
 - 页面结构：参考 opencode desktop / Codex 对话风格，左侧为轻量上下文 rail，消息 timeline 是主舞台，底部固定 composer
@@ -331,8 +325,6 @@ Inter Variable, "Noto Sans SC", "PingFang SC", system-ui, sans-serif
 - `POST /api/v1/mcp/servers/test` - 测试 MCP 服务器草稿配置
 - `GET /api/v1/mcp/servers/:id/tools` - MCP 服务器工具列表
 - `GET /api/v1/tools` - 工具注册表
-- `GET /api/v1/settings` - 获取设置
-- `PUT /api/v1/settings` - 更新设置
 - `GET /api/v1/runtime` - 运行时快照
 - `GET /api/v1/runtime/events` - 运行时事件流（SSE）
 - `GET /api/v1/chat/sessions` - 对话会话列表

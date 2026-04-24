@@ -182,6 +182,7 @@ impl JobManager {
         Some(runtime)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn upsert_job_runtime_summary(
         &self,
         thread_id: ThreadId,

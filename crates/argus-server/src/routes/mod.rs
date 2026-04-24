@@ -4,7 +4,6 @@ pub mod health;
 pub mod mcp;
 pub mod providers;
 pub mod runtime;
-pub mod settings;
 pub mod templates;
 pub mod tools;
 
@@ -61,10 +60,6 @@ pub fn router() -> Router<AppState> {
         .route(
             "/api/v1/chat/sessions/{session_id}/threads/{thread_id}/events",
             get(chat::thread_events),
-        )
-        .route(
-            "/api/v1/settings",
-            get(settings::get_settings).put(settings::update_settings),
         )
         .route(
             "/api/v1/providers",

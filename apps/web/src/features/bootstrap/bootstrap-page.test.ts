@@ -61,16 +61,6 @@ describe("BootstrapPage", () => {
           runtimes: [],
         },
       }),
-      getSettings: async () => ({
-        instance_name: "",
-        default_provider_id: null,
-        default_provider_name: null,
-      }),
-      updateSettings: async () => ({
-        instance_name: "",
-        default_provider_id: null,
-        default_provider_name: null,
-      }),
       listProviders: async () => [],
       saveProvider: async (input) => input as LlmProviderRecord,
       listTemplates: async () => [],

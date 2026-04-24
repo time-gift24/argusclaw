@@ -107,8 +107,6 @@ Phase 3A 起，旧的 “server 只通过 `ArgusWing`” 规则废止：
 - `GET /api/v1/mcp/servers`
 - `POST /api/v1/mcp/servers`
 - `PATCH /api/v1/mcp/servers/:server_id`
-- `GET /api/v1/settings`
-- `PUT /api/v1/settings`
 
 `bootstrap` 的作用是给 web 管理台提供最小初始化数据，例如：
 
@@ -126,7 +124,6 @@ web 管理台应该按新的信息架构组织，建议至少包含：
 - Providers
 - Templates
 - MCP Servers
-- Settings
 
 这里的 `frontend-reset-first`，含义不是只做设计稿或壳子，而是：
 
@@ -186,7 +183,7 @@ desktop 在这轮里继续按原有方式工作：
 - 一台 `argus-server` 对应一个操作者环境
 - 不做业务登录
 - 不做多用户隔离
-- provider、template、MCP、settings 都按实例级资源处理
+- provider、template、MCP 都按实例级资源处理
 
 如果部署层需要保护，可依赖内网、反向代理或外层访问控制，但不把登录系统纳入本轮设计。
 
@@ -285,7 +282,7 @@ Phase 2 已拆成两批推进，避免重新把范围做大：
 首阶段测试不再围绕 chat store，而是围绕管理能力：
 
 1. Rust 服务端集成测试
-   覆盖 `health`、`bootstrap`、providers、templates、MCP、settings 的 REST 行为和错误 envelope。
+   覆盖 `health`、`bootstrap`、providers、templates、MCP 的 REST 行为和错误 envelope。
 
 2. Web 管理台页面测试
    覆盖 `Vue` 页面渲染、导航、表单提交、错误展示、成功回显。

@@ -15,8 +15,6 @@ import {
   type LlmProviderRecord,
   type McpServerRecord,
   type ProviderTestResult,
-  type SettingsResponse,
-  type UpdateSettingsRequest,
 } from "@/lib/api";
 
 const router = createRouter({
@@ -57,11 +55,6 @@ function makeApiClient(overrides: Partial<ApiClient>): ApiClient {
       default_provider_id: 1,
       default_template_id: null,
       mcp_ready_count: 0,
-    }),
-    getSettings: vi.fn<() => Promise<SettingsResponse>>().mockResolvedValue({
-      instance_name: "Argus",
-      default_provider_id: 1,
-      default_provider_name: "OpenAI",
     }),
     listProviders: vi.fn<() => Promise<LlmProviderRecord[]>>().mockResolvedValue([]),
     saveProvider: vi.fn<(input: LlmProviderRecord) => Promise<LlmProviderRecord>>().mockImplementation(

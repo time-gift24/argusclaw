@@ -22,7 +22,6 @@ pub async fn get_bootstrap(
     let providers = state.core().list_providers().await?;
     let templates = state.core().list_templates().await?;
     let mcp_servers = state.core().list_mcp_servers().await?;
-    let settings = state.core().admin_settings().await;
     let default_provider = state.core().get_default_provider_record().await?;
     let default_template_id = state
         .core()
@@ -35,7 +34,7 @@ pub async fn get_bootstrap(
         .count();
 
     Ok(Json(BootstrapResponse {
-        instance_name: settings.instance_name,
+        instance_name: state.core().instance_name().to_string(),
         provider_count: providers.len(),
         template_count: templates.len(),
         mcp_server_count: mcp_servers.len(),

@@ -59,16 +59,6 @@ describe("admin console", () => {
           runtimes: [],
         },
       }),
-      getSettings: async () => ({
-        instance_name: "Workspace Admin",
-        default_provider_id: 1,
-        default_provider_name: "OpenAI",
-      }),
-      updateSettings: async () => ({
-        instance_name: "Workspace Admin",
-        default_provider_id: 1,
-        default_provider_name: "OpenAI",
-      }),
       listProviders: async () => [],
       saveProvider: async (input) => input as LlmProviderRecord,
       listTemplates: async () => [],
@@ -97,7 +87,7 @@ describe("admin console", () => {
     expect(wrapper.text()).toContain("MCP 服务");
     expect(wrapper.text()).toContain("工具注册表");
     expect(wrapper.text()).toContain("对话");
-    expect(wrapper.text()).toContain("系统设置");
+    expect(wrapper.text()).not.toContain("系统设置");
 
     resetApiClient();
   });

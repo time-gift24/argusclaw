@@ -51,26 +51,12 @@ use argus_session::{SessionManager, SessionSummary, ThreadSummary};
 use argus_template::TemplateManager;
 use argus_tool::ToolManager;
 use sqlx::SqlitePool;
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::broadcast;
 
 pub use resolver::ProviderManagerResolver;
 
 /// Default agent display name for the ArgusWing template.
 const DEFAULT_AGENT_DISPLAY_NAME: &str = "ArgusWing";
-
-/// Instance-level admin settings exposed through facade transports.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct AdminSettings {
-    pub instance_name: String,
-}
-
-impl Default for AdminSettings {
-    fn default() -> Self {
-        Self {
-            instance_name: "ArgusWing".to_string(),
-        }
-    }
-}
 
 /// Unified entry point for the ArgusWing application.
 ///
@@ -89,7 +75,6 @@ pub struct ArgusWing {
     mcp_runtime: Arc<McpRuntime>,
     pub account_manager: Arc<AccountManager>,
     mcp_repo: Arc<dyn McpRepository>,
-    admin_settings: Arc<RwLock<AdminSettings>>,
 }
 
 impl ArgusWing {
@@ -203,7 +188,6 @@ impl ArgusWing {
         ));
 
         let mcp_repo: Arc<dyn McpRepository> = arc_sqlite.clone();
-        let admin_settings = Arc::new(RwLock::new(AdminSettings::default()));
 
         Ok(Arc::new(Self {
             pool,
@@ -215,7 +199,6 @@ impl ArgusWing {
             mcp_runtime,
             account_manager,
             mcp_repo,
-            admin_settings,
         }))
     }
 
@@ -283,7 +266,6 @@ impl ArgusWing {
             job_manager.clone(),
         ));
         let mcp_repo: Arc<dyn McpRepository> = arc_sqlite.clone();
-        let admin_settings = Arc::new(RwLock::new(AdminSettings::default()));
 
         Arc::new(Self {
             pool,
@@ -295,7 +277,6 @@ impl ArgusWing {
             mcp_runtime,
             account_manager,
             mcp_repo,
-            admin_settings,
         })
     }
 
@@ -364,16 +345,6 @@ impl ArgusWing {
     #[must_use]
     pub fn account_manager(&self) -> &Arc<AccountManager> {
         &self.account_manager
-    }
-
-    /// Return the current instance-level admin settings snapshot.
-    pub async fn admin_settings(&self) -> AdminSettings {
-        self.admin_settings.read().await.clone()
-    }
-
-    /// Replace the current instance-level admin settings snapshot.
-    pub async fn update_admin_settings(&self, settings: AdminSettings) {
-        *self.admin_settings.write().await = settings;
     }
 
     // =========================================================================
@@ -865,20 +836,6 @@ mod tests {
         assert!(action_values.contains(&"install"));
         assert!(definition.parameters["properties"].get("text").is_some());
         assert!(wing.tool_manager().get("chrome_install").is_none());
-    }
-
-    #[tokio::test]
-    async fn admin_settings_round_trip() {
-        let wing = make_test_wing().await;
-
-        assert_eq!(wing.admin_settings().await.instance_name, "ArgusWing");
-
-        wing.update_admin_settings(AdminSettings {
-            instance_name: "Workspace Admin".to_string(),
-        })
-        .await;
-
-        assert_eq!(wing.admin_settings().await.instance_name, "Workspace Admin");
     }
 
     #[tokio::test]
