@@ -71,6 +71,9 @@ importers:
       '@opentiny/vue-theme':
         specifier: ~3.22.0
         version: 3.22.1
+      '@opentiny/vue-tooltip':
+        specifier: ~3.22.0
+        version: 3.22.0
       vue:
         specifier: ^3.5.13
         version: 3.5.33(typescript@5.9.3)

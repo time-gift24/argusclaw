@@ -15,3 +15,4 @@ export { default as TinyRow } from "./opentiny-container";
 export { default as TinySelect } from "./opentiny-select";
 export { default as TinySwitch } from "./opentiny-switch";
 export { default as TinyTag } from "./opentiny-container";
+export { default as TinyTooltip } from "./opentiny-container";

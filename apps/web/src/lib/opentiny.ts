@@ -15,3 +15,4 @@ export { default as TinyRow } from "@opentiny/vue-row";
 export { default as TinySelect } from "@opentiny/vue-select";
 export { default as TinySwitch } from "@opentiny/vue-switch";
 export { default as TinyTag } from "@opentiny/vue-tag";
+export { default as TinyTooltip } from "@opentiny/vue-tooltip";

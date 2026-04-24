@@ -11,6 +11,7 @@ import {
   type AgentRecord,
   type ApiClient,
   type LlmProviderRecord,
+  type ToolRegistryItem,
 } from "@/lib/api";
 
 const router = createRouter({
@@ -54,6 +55,16 @@ function providerRecord(overrides: Partial<LlmProviderRecord> = {}): LlmProvider
     extra_headers: {},
     secret_status: "ready",
     meta_data: {},
+    ...overrides,
+  };
+}
+
+function toolRecord(overrides: Partial<ToolRegistryItem> = {}): ToolRegistryItem {
+  return {
+    name: "shell",
+    description: "Execute shell commands",
+    risk_level: "critical",
+    parameters: {},
     ...overrides,
   };
 }
@@ -142,6 +153,44 @@ describe("TemplateEditPage", () => {
     expect(saveTemplate).toHaveBeenCalledWith(expect.objectContaining({
       id: 7,
       display_name: "Expert Planner",
+    }));
+  });
+
+  it("shows tool and subagent descriptions while preserving selected values", async () => {
+    const saveTemplate = vi.fn(async (input: AgentRecord) => templateRecord({ ...input, id: 12 }));
+
+    setApiClient(makeApiClient({
+      listTemplates: async () => [
+        templateRecord({ id: 7, display_name: "Planner", description: "Plans safely" }),
+        templateRecord({ id: 8, display_name: "Reviewer", description: "Reviews implementation risk" }),
+      ],
+      listTools: async () => [toolRecord()],
+      saveTemplate,
+    }));
+
+    router.push("/templates/new");
+    await router.isReady();
+
+    const wrapper = mount(TemplateEditPage, {
+      global: {
+        plugins: [router],
+      },
+    });
+    await flushPromises();
+
+    expect(wrapper.find('[content="Execute shell commands"]').exists()).toBe(true);
+    expect(wrapper.find('[content="Reviews implementation risk"]').exists()).toBe(true);
+
+    await wrapper.get('[data-testid="template-display-name"]').setValue("带工具模板");
+    await wrapper.get('[data-testid="template-system-prompt"]').setValue("Use tools carefully.");
+    await wrapper.get('[data-testid="template-tools"]').setValue(["shell"]);
+    await wrapper.get('[data-testid="template-subagents"]').setValue(["Reviewer"]);
+    await wrapper.get('[data-testid="save-template"]').trigger("click");
+    await flushPromises();
+
+    expect(saveTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      tool_names: ["shell"],
+      subagent_names: ["Reviewer"],
     }));
   });
 });

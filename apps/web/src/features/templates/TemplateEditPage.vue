@@ -3,7 +3,7 @@ import { computed, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 
 import { getApiClient, type AgentRecord, type LlmProviderRecord, type ToolRegistryItem } from "@/lib/api";
-import { TinyButton, TinyInput, TinyNumeric, TinyOption, TinySelect, TinySwitch } from "@/lib/opentiny";
+import { TinyButton, TinyInput, TinyNumeric, TinyOption, TinySelect, TinySwitch, TinyTooltip } from "@/lib/opentiny";
 
 const api = getApiClient();
 const route = useRoute();
@@ -44,12 +44,20 @@ const selectedProviderModels = computed(() => {
 const subagentOptions = computed(() => {
   const currentId = isEdit.value ? parseInt(route.params.templateId as string, 10) : -1;
   return allTemplates.value
-    .filter(t => t.id !== currentId)
-    .map(t => ({ label: t.display_name, value: t.display_name }));
+    .filter((t) => t.id !== currentId)
+    .map((t) => ({
+      label: t.display_name,
+      value: t.display_name,
+      description: t.description,
+    }));
 });
 
 const toolOptions = computed(() => {
-  return availableTools.value.map(t => ({ label: t.name, value: t.name }));
+  return availableTools.value.map((t) => ({
+    label: t.name,
+    value: t.name,
+    description: t.description,
+  }));
 });
 
 function createDefaultTemplateForm(): TemplateFormState {
@@ -78,7 +86,7 @@ async function loadData() {
     const [providersResult, templatesResult, toolsResult] = await Promise.all([
       api.listProviders(),
       api.listTemplates(),
-      api.listTools ? api.listTools() : Promise.resolve([])
+      api.listTools ? api.listTools() : Promise.resolve([]),
     ]);
 
     providers.value = providersResult;
@@ -87,7 +95,7 @@ async function loadData() {
 
     if (isEdit.value) {
       const templateId = parseInt(route.params.templateId as string, 10);
-      const found = templatesResult.find(t => t.id === templateId);
+      const found = templatesResult.find((t) => t.id === templateId);
       if (found) {
         templateForm.value = {
           display_name: found.display_name,
@@ -152,8 +160,8 @@ function buildTemplatePayload(): AgentRecord | null {
     provider_id: parseProviderId(templateForm.value.provider_id),
     model_id: templateForm.value.model_id.trim() || null,
     system_prompt: systemPrompt,
-    tool_names: templateForm.value.tool_names,
-    subagent_names: templateForm.value.subagent_names,
+    tool_names: normalizeStringSelection(templateForm.value.tool_names),
+    subagent_names: normalizeStringSelection(templateForm.value.subagent_names),
     max_tokens: templateForm.value.max_tokens,
     temperature: templateForm.value.temperature,
     thinking_config: templateForm.value.thinking_enabled
@@ -181,6 +189,14 @@ function parseProviderId(value: string) {
   if (!value) return null;
   const providerId = Number(value);
   return Number.isFinite(providerId) ? providerId : null;
+}
+
+function normalizeStringSelection(value: string[] | string) {
+  if (Array.isArray(value)) {
+    return value;
+  }
+
+  return value ? [value] : [];
 }
 
 function goBack() {
@@ -331,7 +347,11 @@ watch(
                 :key="item.value"
                 :label="item.label"
                 :value="item.value"
-              />
+              >
+                <TinyTooltip effect="light" placement="right" :content="item.description || '暂无描述'">
+                  <span>{{ item.label }}</span>
+                </TinyTooltip>
+              </TinyOption>
             </TinySelect>
           </label>
           <label>
@@ -348,7 +368,11 @@ watch(
                 :key="item.value"
                 :label="item.label"
                 :value="item.value"
-              />
+              >
+                <TinyTooltip effect="light" placement="right" :content="item.description || '暂无描述'">
+                  <span>{{ item.label }}</span>
+                </TinyTooltip>
+              </TinyOption>
             </TinySelect>
           </label>
         </div>
