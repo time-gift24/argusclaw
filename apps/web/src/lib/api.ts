@@ -270,6 +270,8 @@ export interface CreateChatThreadRequest {
   model: string | null;
 }
 
+export type CreateChatSessionWithThreadRequest = CreateChatThreadRequest;
+
 export interface UpdateChatThreadModelRequest {
   provider_id: number;
   model: string;
@@ -292,8 +294,87 @@ export interface ChatThreadBinding {
   effective_model: string | null;
 }
 
+export interface ChatSessionPayload extends ChatThreadBinding {
+  session_key: string;
+}
+
 export interface ChatActionResponse {
   accepted: boolean;
+}
+
+export type ChatThreadEventPayload =
+  | {
+      type: "reasoning_delta" | "content_delta";
+      delta: string;
+    }
+  | {
+      type: "retry_attempt";
+      attempt: number;
+      max_retries: number;
+      error: string;
+    }
+  | {
+      type: "tool_started";
+      tool_call_id: string;
+      tool_name: string;
+      arguments: unknown;
+    }
+  | {
+      type: "tool_completed";
+      tool_call_id: string;
+      tool_name: string;
+      result: unknown;
+      is_error: boolean;
+    }
+  | {
+      type: "turn_completed";
+      input_tokens: number;
+      output_tokens: number;
+      total_tokens: number;
+    }
+  | {
+      type: "turn_failed";
+      error: string;
+    }
+  | {
+      type:
+        | "turn_settled"
+        | "idle"
+        | "compaction_started"
+        | "compaction_finished"
+        | "compaction_failed"
+        | "compacted"
+        | "tool_call_delta"
+        | "llm_usage"
+        | "notice"
+        | "thread_bound_to_job"
+        | "thread_pool_queued"
+        | "thread_pool_started"
+        | "thread_pool_cooling"
+        | "thread_pool_evicted"
+        | "thread_pool_metrics_updated"
+        | "job_runtime_queued"
+        | "job_runtime_started"
+        | "job_runtime_cooling"
+        | "job_runtime_evicted"
+        | "job_runtime_updated"
+        | "job_runtime_metrics_updated"
+        | "job_dispatched"
+        | "job_result"
+        | "mailbox_message_queued";
+      [key: string]: unknown;
+    };
+
+export interface ChatThreadEventEnvelope {
+  session_id: string;
+  thread_id: string;
+  turn_number: number | null;
+  payload: ChatThreadEventPayload;
+}
+
+export interface ChatThreadEventHandlers {
+  onEvent(event: ChatThreadEventEnvelope): void;
+  onError(error: Error): void;
 }
 
 export interface RuntimeEventHandlers {
@@ -332,6 +413,7 @@ export interface ApiClient {
   listMcpServerTools?(serverId: number): Promise<McpDiscoveredToolRecord[]>;
   listTools?(): Promise<ToolRegistryItem[]>;
   listChatSessions?(): Promise<ChatSessionSummary[]>;
+  createChatSessionWithThread?(input: CreateChatSessionWithThreadRequest): Promise<ChatSessionPayload>;
   createChatSession?(name: string): Promise<ChatSessionSummary>;
   renameChatSession?(sessionId: string, name: string): Promise<ChatSessionSummary>;
   deleteChatSession?(sessionId: string): Promise<DeleteResponse>;
@@ -349,6 +431,7 @@ export interface ApiClient {
   listChatMessages?(sessionId: string, threadId: string): Promise<ChatMessageRecord[]>;
   sendChatMessage?(sessionId: string, threadId: string, message: string): Promise<ChatActionResponse>;
   cancelChatThread?(sessionId: string, threadId: string): Promise<ChatActionResponse>;
+  subscribeChatThread?(sessionId: string, threadId: string, handlers: ChatThreadEventHandlers): RuntimeEventSubscription;
 }
 
 class HttpApiClient implements ApiClient {
@@ -529,6 +612,18 @@ class HttpApiClient implements ApiClient {
     return this.request("/chat/sessions");
   }
 
+  async createChatSessionWithThread(input: CreateChatSessionWithThreadRequest): Promise<ChatSessionPayload> {
+    const response = await this.request<MutationResponse<ChatSessionPayload>>("/chat/sessions/with-thread", {
+      body: JSON.stringify(input),
+      headers: {
+        "Content-Type": "application/json",
+      },
+      method: "POST",
+    });
+
+    return response.item;
+  }
+
   async createChatSession(name: string): Promise<ChatSessionSummary> {
     const response = await this.request<MutationResponse<ChatSessionSummary>>("/chat/sessions", {
       body: JSON.stringify({ name }),
@@ -665,6 +760,34 @@ class HttpApiClient implements ApiClient {
     );
 
     return response.item;
+  }
+
+  subscribeChatThread(
+    sessionId: string,
+    threadId: string,
+    handlers: ChatThreadEventHandlers,
+  ): RuntimeEventSubscription {
+    const events = new EventSource(`${this.baseUrl}/chat/sessions/${sessionId}/threads/${threadId}/events`);
+
+    events.addEventListener("chat.thread_event", (event) => {
+      try {
+        handlers.onEvent(JSON.parse((event as MessageEvent<string>).data) as ChatThreadEventEnvelope);
+      } catch (reason) {
+        handlers.onError(reason instanceof Error ? reason : new Error("对话事件解析失败。"));
+      }
+    });
+    events.addEventListener("chat.error", (event) => {
+      handlers.onError(new Error((event as MessageEvent<string>).data || "对话事件流返回错误。"));
+    });
+    events.onerror = () => {
+      handlers.onError(new Error("对话事件流连接失败，已切换为刷新兜底。"));
+    };
+
+    return {
+      close() {
+        events.close();
+      },
+    };
   }
 
   private async request<T>(path: string, init?: RequestInit): Promise<T> {

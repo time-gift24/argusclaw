@@ -9,7 +9,8 @@ use argus_protocol::llm::ChatMessage;
 use argus_protocol::{
     AgentId, AgentRecord, ArgusError, JobRuntimeState, LlmProviderId, LlmProviderRecord,
     McpDiscoveredToolRecord, McpServerRecord, McpServerStatus, McpToolResolver, ProviderId,
-    ProviderResolver, ProviderTestResult, Result, RiskLevel, SessionId, ThreadId, ThreadPoolState,
+    ProviderResolver, ProviderTestResult, Result, RiskLevel, SessionId, ThreadEvent, ThreadId,
+    ThreadPoolState,
 };
 use argus_repository::traits::{
     AccountRepository, AdminSettingsRepository, AgentRepository, JobRepository,
@@ -23,7 +24,7 @@ use argus_thread_pool::ThreadPool;
 use argus_tool::ToolManager;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, broadcast};
 
 use crate::db::{DatabaseTarget, default_trace_dir, ensure_parent_dir, resolve_database_target};
 use crate::resolver::ProviderManagerResolver;
@@ -79,6 +80,16 @@ pub struct ChatThreadBinding {
     pub session_id: SessionId,
     pub thread_id: ThreadId,
     pub template_id: AgentId,
+    pub effective_provider_id: Option<ProviderId>,
+    pub effective_model: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatSessionPayload {
+    pub session_key: String,
+    pub session_id: SessionId,
+    pub template_id: AgentId,
+    pub thread_id: ThreadId,
     pub effective_provider_id: Option<ProviderId>,
     pub effective_model: Option<String>,
 }
@@ -477,6 +488,32 @@ impl ServerCore {
             .ok_or_else(|| missing_after_mutation("thread", thread_id))
     }
 
+    pub async fn create_chat_session_with_thread(
+        &self,
+        template_id: AgentId,
+        provider_id: Option<ProviderId>,
+        model: Option<String>,
+    ) -> Result<ChatSessionPayload> {
+        let session_id = self.session_manager.create(String::new()).await?;
+        let thread_id = self
+            .session_manager
+            .create_thread(session_id, template_id, provider_id, model.as_deref())
+            .await?;
+        let binding = self.activate_chat_thread(session_id, thread_id).await?;
+        let provider_key = provider_id
+            .map(|id| id.inner().to_string())
+            .unwrap_or_else(|| "__default__".to_string());
+
+        Ok(ChatSessionPayload {
+            session_key: format!("{}::{}", template_id.inner(), provider_key),
+            session_id,
+            template_id: binding.template_id,
+            thread_id,
+            effective_provider_id: binding.effective_provider_id,
+            effective_model: binding.effective_model,
+        })
+    }
+
     pub async fn delete_chat_thread(
         &self,
         session_id: SessionId,
@@ -594,6 +631,17 @@ impl ServerCore {
         self.session_manager
             .cancel_thread(session_id, &thread_id)
             .await
+    }
+
+    pub async fn subscribe_chat_thread(
+        &self,
+        session_id: SessionId,
+        thread_id: ThreadId,
+    ) -> Result<broadcast::Receiver<ThreadEvent>> {
+        self.session_manager
+            .subscribe(session_id, &thread_id)
+            .await
+            .ok_or_else(|| ArgusError::ThreadNotFound(thread_id.to_string()))
     }
 }
 

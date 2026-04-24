@@ -12,11 +12,14 @@ import {
   type ApiClient,
   type ChatActionResponse,
   type ChatMessageRecord,
+  type ChatSessionPayload,
   type ChatSessionSummary,
   type ChatThreadBinding,
+  type ChatThreadEventHandlers,
   type ChatThreadSnapshot,
   type ChatThreadSummary,
   type LlmProviderRecord,
+  type RuntimeEventSubscription,
 } from "@/lib/api";
 
 const capturedConsoleErrors: unknown[] = [];
@@ -162,6 +165,14 @@ function makeApiClient(overrides: Partial<ApiClient> = {}): ApiClient {
     listMcpServers: vi.fn().mockResolvedValue([]),
     saveMcpServer: vi.fn().mockImplementation(async (input) => input),
     listChatSessions: vi.fn().mockResolvedValue([]),
+    createChatSessionWithThread: vi.fn().mockResolvedValue({
+      session_key: "session-1",
+      session_id: "session-1",
+      template_id: 3,
+      thread_id: "thread-1",
+      effective_provider_id: 7,
+      effective_model: "glm-4.7",
+    }),
     createChatSession: vi.fn().mockResolvedValue(session()),
     renameChatSession: vi.fn().mockImplementation(async (_sessionId, name) => session({ name })),
     deleteChatSession: vi.fn().mockResolvedValue({ deleted: true }),
@@ -204,13 +215,34 @@ afterEach(() => {
 });
 
 describe("ChatPage", () => {
-  it("creates a session and thread, then sends a message through the Phase 5 API", async () => {
+  it("materializes a desktop-style session/thread on first send and renders streamed content in the active bubble", async () => {
+    const listTemplates = vi.fn().mockResolvedValue([
+      template(),
+      template({
+        id: 9,
+        display_name: "代码助手",
+        description: "适合代码审查和实现任务。",
+        version: "1.1.0",
+      }),
+    ]);
     const listChatSessions = vi.fn<() => Promise<ChatSessionSummary[]>>().mockResolvedValueOnce([]).mockResolvedValue([session()]);
-    const listChatThreads = vi.fn<(sessionId: string) => Promise<ChatThreadSummary[]>>().mockResolvedValueOnce([]).mockResolvedValue([thread()]);
-    const createChatSession = vi.fn<(name: string) => Promise<ChatSessionSummary>>().mockResolvedValue(session());
-    const createChatThread = vi
-      .fn<(sessionId: string, input: { template_id: number; provider_id: number | null; model: string | null }) => Promise<ChatThreadSummary>>()
-      .mockResolvedValue(thread());
+    const listChatThreads = vi.fn<(sessionId: string) => Promise<ChatThreadSummary[]>>().mockResolvedValue([thread()]);
+    const createChatSessionWithThread = vi
+      .fn<
+        (input: {
+          template_id: number;
+          provider_id: number | null;
+          model: string | null;
+        }) => Promise<ChatSessionPayload>
+      >()
+      .mockResolvedValue({
+        session_key: "9::7",
+        session_id: "session-1",
+        template_id: 9,
+        thread_id: "thread-1",
+        effective_provider_id: 7,
+        effective_model: "glm-4.7",
+      });
     const listChatMessages = vi
       .fn<(sessionId: string, threadId: string) => Promise<ChatMessageRecord[]>>()
       .mockResolvedValueOnce([])
@@ -228,16 +260,34 @@ describe("ChatPage", () => {
     const sendChatMessage = vi
       .fn<(sessionId: string, threadId: string, messageText: string) => Promise<ChatActionResponse>>()
       .mockResolvedValue({ accepted: true });
+    const streamHandlers: ChatThreadEventHandlers[] = [];
+    const subscribeChatThread = vi.fn(
+      (_sessionId: string, _threadId: string, handlers: ChatThreadEventHandlers): RuntimeEventSubscription => {
+        streamHandlers.push(handlers);
+        handlers.onEvent({
+          session_id: "session-1",
+          thread_id: "thread-1",
+          turn_number: 1,
+          payload: {
+            type: "content_delta",
+            delta: "流式片段",
+          },
+        });
+
+        return { close: vi.fn() };
+      },
+    );
 
     setApiClient(
       makeApiClient({
+        listTemplates,
         listChatSessions,
         listChatThreads,
-        createChatSession,
-        createChatThread,
+        createChatSessionWithThread,
         listChatMessages,
         getChatThreadSnapshot,
         sendChatMessage,
+        subscribeChatThread,
       }),
     );
 
@@ -245,29 +295,40 @@ describe("ChatPage", () => {
     await flushPromises();
 
     expect(wrapper.text()).toContain("暂无对话会话");
-    await wrapper.get('[data-testid="create-session"]').trigger("click");
+    expect(wrapper.text()).toContain("适合日常问答和轻量任务。");
+    await wrapper.get('[data-testid="conversation-template-select"]').setValue("9");
     await flushPromises();
-
-    expect(createChatSession).toHaveBeenCalledWith("新的 Web 对话");
-    expect(wrapper.text()).toContain("默认会话");
-
-    await wrapper.get('[data-testid="create-thread"]').trigger("click");
-    await flushPromises();
-
-    expect(createChatThread).toHaveBeenCalledWith("session-1", {
-      template_id: 3,
-      provider_id: 7,
-      model: "glm-4.7",
-    });
-    expect(wrapper.text()).toContain("产品讨论");
+    expect(wrapper.text()).toContain("适合代码审查和实现任务。");
 
     await wrapper.get("[data-testid='chat-input']").setValue("帮我总结 MCP 配置");
     await flushPromises();
     await wrapper.get(".tr-sender-stub button").trigger("click");
     await flushPromises();
 
+    expect(createChatSessionWithThread).toHaveBeenCalledWith({
+      template_id: 9,
+      provider_id: 7,
+      model: "glm-4.7",
+    });
+    expect(subscribeChatThread).toHaveBeenCalledWith("session-1", "thread-1", expect.any(Object));
     expect(sendChatMessage).toHaveBeenCalledWith("session-1", "thread-1", "帮我总结 MCP 配置");
     expect(wrapper.text()).toContain("消息已提交");
+    expect(wrapper.text()).toContain("流式片段");
+
+    const handlers = streamHandlers[0];
+    if (!handlers) {
+      throw new Error("chat event handlers should be registered");
+    }
+    handlers.onEvent({
+      session_id: "session-1",
+      thread_id: "thread-1",
+      turn_number: 1,
+      payload: {
+        type: "turn_settled",
+      },
+    });
+    await flushPromises();
+
     expect(wrapper.text()).toContain("可以，先检查已启用服务。");
   });
 
@@ -297,6 +358,31 @@ describe("ChatPage", () => {
 
     expect(cancelChatThread).toHaveBeenCalledWith("session-1", "thread-1");
     expect(wrapper.text()).toContain("已请求取消当前线程。");
+  });
+
+  it("keeps template and provider selectors usable when chat session loading fails", async () => {
+    const listProviders = vi.fn().mockResolvedValue([provider()]);
+    const listTemplates = vi.fn().mockResolvedValue([template()]);
+    const listChatSessions = vi.fn().mockRejectedValue(new Error("Request failed: 404"));
+
+    setApiClient(
+      makeApiClient({
+        listProviders,
+        listTemplates,
+        listChatSessions,
+      }),
+    );
+
+    const wrapper = mount(ChatPage);
+    await flushPromises();
+
+    expect(listProviders).toHaveBeenCalledOnce();
+    expect(listTemplates).toHaveBeenCalledOnce();
+    expect(listChatSessions).toHaveBeenCalledOnce();
+    expect(wrapper.text()).toContain("对话会话加载失败：Request failed: 404");
+    expect(wrapper.text()).toContain("适合日常问答和轻量任务。");
+    expect((wrapper.get('[data-testid="conversation-template-select"]').element as HTMLSelectElement).value).toBe("3");
+    expect((wrapper.get('select[name="provider"]').element as HTMLSelectElement).value).toBe("7");
   });
 
   it("shows starter prompts and applies a prompt to the sender", async () => {

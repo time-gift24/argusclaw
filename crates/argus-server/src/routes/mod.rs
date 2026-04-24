@@ -25,6 +25,10 @@ pub fn router() -> Router<AppState> {
             get(chat::list_sessions).post(chat::create_session),
         )
         .route(
+            "/api/v1/chat/sessions/with-thread",
+            post(chat::create_session_with_thread),
+        )
+        .route(
             "/api/v1/chat/sessions/{session_id}",
             patch(chat::rename_session).delete(chat::delete_session),
         )
@@ -53,6 +57,10 @@ pub fn router() -> Router<AppState> {
         .route(
             "/api/v1/chat/sessions/{session_id}/threads/{thread_id}/cancel",
             post(chat::cancel_thread),
+        )
+        .route(
+            "/api/v1/chat/sessions/{session_id}/threads/{thread_id}/events",
+            get(chat::thread_events),
         )
         .route(
             "/api/v1/settings",

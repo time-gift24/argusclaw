@@ -44,6 +44,90 @@ async fn chat_session_routes_create_list_and_show_empty_threads() {
 }
 
 #[tokio::test]
+async fn chat_session_route_materializes_session_and_thread_like_desktop() {
+    let ctx = support::TestContext::new().await;
+    let provider = create_test_provider(&ctx).await;
+    let template = first_template(&ctx).await;
+
+    let response = ctx
+        .post_json(
+            "/api/v1/chat/sessions/with-thread",
+            &json!({
+                "template_id": template.id,
+                "provider_id": provider.id,
+                "model": "alpha"
+            }),
+        )
+        .await;
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let created: MutationResponse<serde_json::Value> = support::json_body(response).await;
+    assert_eq!(created.item["template_id"], template.id.inner());
+    assert_eq!(created.item["effective_provider_id"], provider.id);
+    assert_eq!(created.item["effective_model"], "alpha");
+    assert!(created.item["session_key"].as_str().is_some_and(|value| {
+        value.contains(&template.id.inner().to_string()) && value.contains(&provider.id.to_string())
+    }));
+
+    let session_id = created.item["session_id"]
+        .as_str()
+        .expect("session_id should be a string");
+    let thread_id = created.item["thread_id"]
+        .as_str()
+        .expect("thread_id should be a string");
+
+    let threads_response = ctx
+        .get(&format!("/api/v1/chat/sessions/{session_id}/threads"))
+        .await;
+    assert_eq!(threads_response.status(), StatusCode::OK);
+    let threads: Vec<ThreadSummary> = support::json_body(threads_response).await;
+    assert!(
+        threads
+            .iter()
+            .any(|thread| thread.id.to_string() == thread_id)
+    );
+}
+
+#[tokio::test]
+async fn chat_thread_events_route_opens_stream_for_materialized_thread() {
+    let ctx = support::TestContext::new().await;
+    let provider = create_test_provider(&ctx).await;
+    let template = first_template(&ctx).await;
+
+    let create_response = ctx
+        .post_json(
+            "/api/v1/chat/sessions/with-thread",
+            &json!({
+                "template_id": template.id,
+                "provider_id": provider.id,
+                "model": "alpha"
+            }),
+        )
+        .await;
+    let created: MutationResponse<serde_json::Value> = support::json_body(create_response).await;
+    let session_id = created.item["session_id"]
+        .as_str()
+        .expect("session_id should be a string");
+    let thread_id = created.item["thread_id"]
+        .as_str()
+        .expect("thread_id should be a string");
+
+    let response = ctx
+        .get(&format!(
+            "/api/v1/chat/sessions/{session_id}/threads/{thread_id}/events"
+        ))
+        .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let content_type = response
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .expect("event stream should set content-type");
+    assert!(content_type.starts_with("text/event-stream"));
+}
+
+#[tokio::test]
 async fn chat_messages_route_errors_for_unknown_thread() {
     let ctx = support::TestContext::new().await;
     let create_response = ctx
