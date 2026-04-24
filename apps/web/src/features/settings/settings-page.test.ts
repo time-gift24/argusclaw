@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 vi.mock("@/lib/opentiny", async () => import("@/test/stubs/opentiny"));
 
 import SettingsPage from "./SettingsPage.vue";
-import { resetApiClient, setApiClient, type ApiClient } from "@/lib/api";
+import { resetApiClient, setApiClient, type ApiClient, type LlmProviderRecord } from "@/lib/api";
 
 describe("SettingsPage", () => {
   afterEach(() => {
@@ -74,7 +74,7 @@ describe("SettingsPage", () => {
       }),
       updateSettings,
       listProviders: async () => [],
-      saveProvider: async (input) => input,
+      saveProvider: async (input) => input as LlmProviderRecord,
       listTemplates: async () => [],
       saveTemplate: async (input) => input,
       listMcpServers: async () => [],
@@ -159,7 +159,7 @@ describe("SettingsPage", () => {
         throw new Error("settings write failed");
       },
       listProviders: async () => [],
-      saveProvider: async (input) => input,
+      saveProvider: async (input) => input as LlmProviderRecord,
       listTemplates: async () => [],
       saveTemplate: async (input) => input,
       listMcpServers: async () => [],

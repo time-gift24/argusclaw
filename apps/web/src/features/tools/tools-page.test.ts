@@ -4,7 +4,7 @@ import { flushPromises, mount } from "@vue/test-utils";
 vi.mock("@/lib/opentiny", async () => import("@/test/stubs/opentiny"));
 
 import ToolsPage from "./ToolsPage.vue";
-import { resetApiClient, setApiClient, type ApiClient, type ToolRegistryItem } from "@/lib/api";
+import { resetApiClient, setApiClient, type ApiClient, type LlmProviderRecord, type ToolRegistryItem } from "@/lib/api";
 
 function emptyRuntimeState() {
   return {
@@ -88,7 +88,7 @@ describe("ToolsPage", () => {
       getSettings: async () => ({ instance_name: "", default_provider_id: null, default_provider_name: null }),
       updateSettings: async () => ({ instance_name: "", default_provider_id: null, default_provider_name: null }),
       listProviders: async () => [],
-      saveProvider: async (input) => input,
+      saveProvider: async (input) => input as LlmProviderRecord,
       listTemplates: async () => [],
       saveTemplate: async (input) => input,
       listMcpServers: async () => [],

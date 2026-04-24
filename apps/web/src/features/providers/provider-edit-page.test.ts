@@ -127,9 +127,7 @@ describe("ProviderEditPage", () => {
   it("loads an existing provider and saves edits", async () => {
     const provider = makeProvider({ id: 1, display_name: "OpenAI" });
     const listProviders = vi.fn<() => Promise<LlmProviderRecord[]>>().mockResolvedValue([provider]);
-    const saveProvider = vi.fn<(input: LlmProviderRecord) => Promise<LlmProviderRecord>>().mockImplementation(
-      async (input) => input,
-    );
+    const saveProvider = vi.fn().mockImplementation(async (input) => makeProvider(input));
 
     setApiClient(
       makeApiClient({
@@ -164,6 +162,7 @@ describe("ProviderEditPage", () => {
     expect(saveProvider.mock.calls[0]?.[0]).toMatchObject({
       id: 1,
       display_name: "OpenAI Mirror",
+      api_key: null,
     });
   });
 });

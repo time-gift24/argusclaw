@@ -3,7 +3,7 @@ import { computed, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 
 import ProviderForm from "./ProviderForm.vue";
-import { getApiClient, type LlmProviderRecord } from "@/lib/api";
+import { getApiClient, type LlmProviderRecord, type SaveProviderRequest } from "@/lib/api";
 import { TinyButton } from "@/lib/opentiny";
 
 const api = getApiClient();
@@ -75,7 +75,10 @@ async function saveProvider() {
   error.value = "";
 
   try {
-    await api.saveProvider(draft.value);
+    const payload: SaveProviderRequest = isEdit.value && draft.value.api_key.trim() === ""
+      ? { ...draft.value, api_key: null }
+      : draft.value;
+    await api.saveProvider(payload);
     router.push("/providers");
   } catch (reason) {
     error.value = reason instanceof Error ? reason.message : "保存提供方失败。";

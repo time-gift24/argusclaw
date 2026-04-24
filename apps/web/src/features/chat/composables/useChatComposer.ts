@@ -133,10 +133,13 @@ export function useChatComposer(options: UseChatComposerOptions) {
     assistantCountAtStreamStart.value = assistantCountBeforeSend;
     streaming.value = true;
     clearPendingAssistant();
-    messages.value = [...messages.value, createLocalMessage("user", content)];
+    const previousMessages = messages.value;
+    let openedThreadEvents = false;
+    messages.value = [...previousMessages, createLocalMessage("user", content)];
     try {
       const target = await ensureActiveChatThread();
       openThreadEvents(target.sessionId, target.threadId);
+      openedThreadEvents = true;
       await api.sendChatMessage!(target.sessionId, target.threadId, content);
       draftMessage.value = "";
       if (!api.subscribeChatThread) {
@@ -144,6 +147,10 @@ export function useChatComposer(options: UseChatComposerOptions) {
       }
       actionMessage.value = "消息已提交，正在等待流式结果。";
     } catch (reason) {
+      messages.value = previousMessages;
+      if (openedThreadEvents) {
+        closeThreadEvents();
+      }
       streaming.value = false;
       clearPendingAssistant();
       setError(reason);

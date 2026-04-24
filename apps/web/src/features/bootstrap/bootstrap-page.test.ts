@@ -4,7 +4,7 @@ import { flushPromises, mount } from "@vue/test-utils";
 vi.mock("@/lib/opentiny", async () => import("@/test/stubs/opentiny"));
 
 import BootstrapPage from "./BootstrapPage.vue";
-import { resetApiClient, setApiClient, type ApiClient } from "@/lib/api";
+import { resetApiClient, setApiClient, type ApiClient, type LlmProviderRecord } from "@/lib/api";
 
 describe("BootstrapPage", () => {
   afterEach(() => {
@@ -72,7 +72,7 @@ describe("BootstrapPage", () => {
         default_provider_name: null,
       }),
       listProviders: async () => [],
-      saveProvider: async (input) => input,
+      saveProvider: async (input) => input as LlmProviderRecord,
       listTemplates: async () => [],
       saveTemplate: async (input) => input,
       listMcpServers: async () => [],

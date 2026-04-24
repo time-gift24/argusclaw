@@ -1,8 +1,9 @@
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
+use argus_protocol::llm::ModelConfig;
 use argus_protocol::{
     LlmProviderId, LlmProviderRecord, LlmProviderRecordJson, ProviderTestResult, SecretString,
 };
@@ -11,9 +12,25 @@ use crate::app_state::AppState;
 use crate::error::ApiError;
 use crate::response::{DeleteResponse, MutationResponse};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct ProviderConnectionTestRequest {
     pub model: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ProviderUpdateRequest {
+    pub id: i64,
+    pub kind: argus_protocol::LlmProviderKind,
+    pub display_name: String,
+    pub base_url: String,
+    pub api_key: Option<String>,
+    pub models: Vec<String>,
+    pub model_config: std::collections::HashMap<String, ModelConfig>,
+    pub default_model: String,
+    pub is_default: bool,
+    pub extra_headers: std::collections::HashMap<String, String>,
+    pub secret_status: argus_protocol::ProviderSecretStatus,
+    pub meta_data: std::collections::HashMap<String, String>,
 }
 
 pub async fn list_providers(
@@ -39,10 +56,17 @@ pub async fn create_provider(
 pub async fn update_provider(
     State(state): State<AppState>,
     Path(provider_id): Path<i64>,
-    Json(mut record): Json<LlmProviderRecordJson>,
+    Json(mut record): Json<ProviderUpdateRequest>,
 ) -> Result<Json<MutationResponse<LlmProviderRecordJson>>, ApiError> {
     record.id = provider_id;
-    let id = state.core().upsert_provider(from_json(record)).await?;
+    let existing = state
+        .core()
+        .get_provider_record(LlmProviderId::new(provider_id))
+        .await?;
+    let id = state
+        .core()
+        .upsert_provider(from_update_json(record, existing.api_key))
+        .await?;
     let saved = state.core().get_provider_record(id).await?;
     Ok(Json(MutationResponse::new(saved.into())))
 }
@@ -91,6 +115,29 @@ fn from_json(record: LlmProviderRecordJson) -> LlmProviderRecord {
         display_name: record.display_name,
         base_url: record.base_url,
         api_key: SecretString::new(record.api_key),
+        models: record.models,
+        model_config: record.model_config,
+        default_model: record.default_model,
+        is_default: record.is_default,
+        extra_headers: record.extra_headers,
+        secret_status: record.secret_status,
+        meta_data: record.meta_data,
+    }
+}
+
+fn from_update_json(
+    record: ProviderUpdateRequest,
+    existing_api_key: SecretString,
+) -> LlmProviderRecord {
+    LlmProviderRecord {
+        id: LlmProviderId::new(record.id),
+        kind: record.kind,
+        display_name: record.display_name,
+        base_url: record.base_url,
+        api_key: record
+            .api_key
+            .map(SecretString::new)
+            .unwrap_or(existing_api_key),
         models: record.models,
         model_config: record.model_config,
         default_model: record.default_model,

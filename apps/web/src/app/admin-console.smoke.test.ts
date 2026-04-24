@@ -6,7 +6,7 @@ vi.mock("@opentiny/tiny-robot", async () => import("@/test/stubs/tiny-robot"));
 
 import App from "@/App.vue";
 import router from "@/router";
-import { setApiClient, resetApiClient, type ApiClient } from "@/lib/api";
+import { setApiClient, resetApiClient, type ApiClient, type LlmProviderRecord } from "@/lib/api";
 
 describe("admin console", () => {
   it("exposes core management entry points", async () => {
@@ -70,7 +70,7 @@ describe("admin console", () => {
         default_provider_name: "OpenAI",
       }),
       listProviders: async () => [],
-      saveProvider: async (input) => input,
+      saveProvider: async (input) => input as LlmProviderRecord,
       listTemplates: async () => [],
       saveTemplate: async (input) => input,
       listMcpServers: async () => [],

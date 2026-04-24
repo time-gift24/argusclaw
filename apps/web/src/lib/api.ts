@@ -52,6 +52,12 @@ export interface LlmProviderRecord {
   meta_data: Record<string, string>;
 }
 
+export interface UpdateLlmProviderRequest extends Omit<LlmProviderRecord, "api_key"> {
+  api_key: string | null;
+}
+
+export type SaveProviderRequest = LlmProviderRecord | UpdateLlmProviderRequest;
+
 export interface AgentRecord {
   id: number;
   display_name: string;
@@ -400,7 +406,7 @@ export interface ApiClient {
   getSettings(): Promise<SettingsResponse>;
   updateSettings(input: UpdateSettingsRequest): Promise<SettingsResponse>;
   listProviders(): Promise<LlmProviderRecord[]>;
-  saveProvider(input: LlmProviderRecord): Promise<LlmProviderRecord>;
+  saveProvider(input: SaveProviderRequest): Promise<LlmProviderRecord>;
   deleteProvider?(providerId: number): Promise<DeleteResponse>;
   testProvider?(providerId: number, model?: string): Promise<ProviderTestResult>;
   testProviderDraft?(input: LlmProviderRecord): Promise<ProviderTestResult>;
@@ -492,7 +498,7 @@ class HttpApiClient implements ApiClient {
     return this.request("/providers");
   }
 
-  async saveProvider(input: LlmProviderRecord): Promise<LlmProviderRecord> {
+  async saveProvider(input: SaveProviderRequest): Promise<LlmProviderRecord> {
     const path = input.id > 0 ? `/providers/${input.id}` : "/providers";
     const method = input.id > 0 ? "PATCH" : "POST";
     const response = await this.request<MutationResponse<LlmProviderRecord>>(path, {

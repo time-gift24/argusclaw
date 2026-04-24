@@ -9,6 +9,7 @@ import {
   resetApiClient,
   setApiClient,
   type ApiClient,
+  type LlmProviderRecord,
   type McpDiscoveredToolRecord,
   type McpServerRecord,
 } from "@/lib/api";
@@ -75,7 +76,7 @@ function makeApiClient(overrides: Partial<ApiClient> = {}): ApiClient {
     getSettings: async () => ({ instance_name: "", default_provider_id: null, default_provider_name: null }),
     updateSettings: async () => ({ instance_name: "", default_provider_id: null, default_provider_name: null }),
     listProviders: async () => [],
-    saveProvider: async (input) => input,
+    saveProvider: async (input) => input as LlmProviderRecord,
     listTemplates: async () => [],
     saveTemplate: async (input) => input,
     listMcpServers: async () => [],

@@ -3,6 +3,7 @@ mod support;
 use std::collections::HashMap;
 
 use axum::http::StatusCode;
+use serde_json::json;
 
 use argus_protocol::llm::ModelConfig;
 use argus_protocol::{LlmProviderKind, LlmProviderRecordJson, ProviderSecretStatus};
@@ -63,6 +64,36 @@ async fn provider_routes_create_list_and_update() {
         support::json_body(update_response).await;
     assert_eq!(updated.item.id, created.item.id);
     assert_eq!(updated.item.display_name, "HTTP Provider Updated");
+    assert_eq!(updated.item.api_key, "sk-provider");
+
+    let preserved_secret_response = ctx
+        .patch_json(
+            &format!("/api/v1/providers/{}", created.item.id),
+            &json!({
+                "id": created.item.id,
+                "kind": created.item.kind,
+                "display_name": "HTTP Provider Preserved Secret",
+                "base_url": created.item.base_url,
+                "api_key": null,
+                "models": created.item.models,
+                "model_config": created.item.model_config,
+                "default_model": created.item.default_model,
+                "is_default": created.item.is_default,
+                "extra_headers": created.item.extra_headers,
+                "secret_status": created.item.secret_status,
+                "meta_data": created.item.meta_data,
+            }),
+        )
+        .await;
+
+    assert_eq!(preserved_secret_response.status(), StatusCode::OK);
+    let preserved_secret: MutationResponse<LlmProviderRecordJson> =
+        support::json_body(preserved_secret_response).await;
+    assert_eq!(preserved_secret.item.api_key, "sk-provider");
+    assert_eq!(
+        preserved_secret.item.display_name,
+        "HTTP Provider Preserved Secret"
+    );
 
     let final_response = ctx.get("/api/v1/providers").await;
     assert_eq!(final_response.status(), StatusCode::OK);
@@ -71,6 +102,6 @@ async fn provider_routes_create_list_and_update() {
     assert!(
         final_body
             .iter()
-            .any(|provider| provider.display_name == "HTTP Provider Updated")
+            .any(|provider| provider.display_name == "HTTP Provider Preserved Secret")
     );
 }
