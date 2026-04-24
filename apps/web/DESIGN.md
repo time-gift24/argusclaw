@@ -237,8 +237,9 @@ Inter Variable, "Noto Sans SC", "PingFang SC", system-ui, sans-serif
 
 ### 模板管理（/templates）
 - 页面标题 + 数量标签
+- 创建卡片：名称、描述、版本、Provider、模型、系统提示词、工具列表、子智能体、max tokens、temperature、thinking 配置
 - 2 列卡片网格：模板名称、版本标签、描述
-- 操作：删除（危险按钮风格）
+- 操作：创建、删除（危险按钮风格），成功/错误反馈使用统一 notice 样式
 
 ### MCP 服务（/mcp）
 - 顶部运维摘要：总服务、就绪服务、需关注、已发现工具
