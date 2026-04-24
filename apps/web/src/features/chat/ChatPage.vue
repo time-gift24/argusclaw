@@ -1,134 +1,96 @@
 <script setup lang="ts">
-import { computed, h, onBeforeUnmount, onMounted, ref } from "vue";
-import { TrBubbleList, TrPrompts, TrSender, type BubbleRoleConfig, type PromptProps } from "@opentiny/tiny-robot";
+import { computed, h, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { TrBubbleList, TrPrompts, type BubbleRoleConfig, type PromptProps } from "@opentiny/tiny-robot";
 
-import {
-  getApiClient,
-  type AgentRecord,
-  type ApiClient,
-  type ChatMessageRecord,
-  type ChatSessionPayload,
-  type ChatSessionSummary,
-  type ChatThreadBinding,
-  type ChatThreadEventEnvelope,
-  type ChatThreadEventPayload,
-  type ChatThreadSummary,
-  type LlmProviderRecord,
-  type RuntimeEventSubscription,
-} from "@/lib/api";
-import { TinyButton, TinyInput, TinyOption, TinySelect, TinyTag } from "@/lib/opentiny";
+import { getApiClient, type AgentRecord, type ChatMessageRecord, type ChatSessionSummary, type ChatThreadSummary, type LlmProviderRecord } from "@/lib/api";
+import { TinyButton, TinyTag } from "@/lib/opentiny";
+import { useChatSessions } from "./composables/useChatSessions";
+import { useChatThreadStream } from "./composables/useChatThreadStream";
+import { useChatComposer } from "./composables/useChatComposer";
+import ChatComposerBar from "./components/ChatComposerBar.vue";
+import ChatHistoryDialog from "./components/ChatHistoryDialog.vue";
 
-const api = getApiClient();
-type ChatApiMethods = Required<
-  Pick<
-    ApiClient,
-    | "listChatSessions"
-    | "createChatSessionWithThread"
-    | "renameChatSession"
-    | "deleteChatSession"
-    | "listChatThreads"
-    | "createChatThread"
-    | "renameChatThread"
-    | "deleteChatThread"
-    | "getChatThreadSnapshot"
-    | "updateChatThreadModel"
-    | "activateChatThread"
-    | "listChatMessages"
-    | "sendChatMessage"
-    | "cancelChatThread"
-  >
->;
+const chatSessions = useChatSessions();
+const chatThreadStream = useChatThreadStream({
+  activeSessionId: chatSessions.activeSessionId,
+  activeThreadId: chatSessions.activeThreadId,
+});
 
-const sessions = ref<ChatSessionSummary[]>([]);
-const threads = ref<ChatThreadSummary[]>([]);
-const messages = ref<ChatMessageRecord[]>([]);
 const providers = ref<LlmProviderRecord[]>([]);
 const templates = ref<AgentRecord[]>([]);
-const activeSessionId = ref("");
-const activeThreadId = ref("");
-const draftMessage = ref("");
-const sessionName = ref("新的 Web 对话");
-const threadTitle = ref("新的对话线程");
 const selectedTemplateId = ref<number | null>(null);
 const selectedProviderId = ref<number | null>(null);
 const selectedModel = ref("");
-const loading = ref(true);
-const threadLoading = ref(false);
-const sending = ref(false);
-const creatingThread = ref(false);
-const deleting = ref(false);
-const streaming = ref(false);
-const pendingAssistantContent = ref("");
-const pendingAssistantReasoning = ref("");
-const assistantCountAtStreamStart = ref(0);
-const actionMessage = ref("");
-const error = ref("");
-const activeBinding = ref<ChatThreadBinding | null>(null);
-const streamSubscription = ref<RuntimeEventSubscription | null>(null);
-const runtimeActivities = ref<ToolActivity[]>([]);
-const runtimeNotice = ref("");
 
-type ToolActivityStatus = "running" | "success" | "error";
+const chatComposer = useChatComposer({
+  activeSessionId: chatSessions.activeSessionId,
+  activeThreadId: chatSessions.activeThreadId,
+  activeBinding: chatSessions.activeBinding,
+  selectedTemplateId,
+  selectedProviderId,
+  selectedModel,
+  providers,
+  templates,
+  sessionName: chatSessions.sessionName,
+  threadTitle: chatSessions.threadTitle,
+  threads: chatSessions.threads,
+  refreshSessions: chatSessions.refreshSessions,
+  refreshThreads: chatSessions.refreshThreads,
+  applyChatSessionPayload: chatSessions.applyChatSessionPayload,
+  openThreadEvents: chatThreadStream.openThreadEvents,
+  closeThreadEvents: chatThreadStream.closeThreadEvents,
+  resetRuntimeActivity: chatThreadStream.resetRuntimeActivity,
+  refreshStreamUntilSettled: chatThreadStream.refreshStreamUntilSettled,
+  countAssistantMessages: chatThreadStream.countAssistantMessages,
+  clearPendingAssistant: chatThreadStream.clearPendingAssistant,
+  messages: chatThreadStream.messages,
+});
 
-interface ToolActivity {
-  id: string;
-  name: string;
-  status: ToolActivityStatus;
-  argumentsPreview: string;
-  resultPreview: string;
-}
+const historyDialogOpen = ref(false);
 
-const activeSession = computed(() => sessions.value.find((session) => session.id === activeSessionId.value) ?? null);
-const activeThread = computed(() => threads.value.find((thread) => thread.id === activeThreadId.value) ?? null);
-const selectedTemplate = computed(() => templates.value.find((item) => item.id === Number(selectedTemplateId.value)) ?? null);
-const hasActiveThread = computed(() => Boolean(activeSessionId.value && activeThreadId.value));
-const canMaterializeThread = computed(() => Boolean(selectedTemplateId.value));
-const canCreateThread = computed(() => Boolean(activeSession.value && selectedTemplateId.value));
-const canSendMessage = computed(() => hasActiveThread.value || canMaterializeThread.value);
-const activeProvider = computed(
-  () => providers.value.find((provider) => provider.id === Number(selectedProviderId.value)) ?? null,
-);
-const senderPlaceholder = computed(() => {
-  if (!hasActiveThread.value) {
-    return "输入第一条消息，将按当前模板创建新对话";
+const hasActiveThread = computed(() => Boolean(chatSessions.activeSessionId.value && chatSessions.activeThreadId.value));
+const activeProvider = computed(() => providers.value.find((p) => p.id === Number(selectedProviderId.value)) ?? null);
+const selectedTemplate = computed(() => templates.value.find((t) => t.id === Number(selectedTemplateId.value)) ?? null);
+
+const currentConversationTitle = computed(() => {
+  if (chatSessions.activeThread.value) {
+    return chatSessions.activeThread.value.title || `线程 ${chatSessions.activeThread.value.id.slice(0, 8)}`;
   }
-  if (sending.value) {
-    return "正在提交消息，可随时取消";
-  }
-
-  return "输入消息，Enter 发送";
+  return hasActiveThread.value ? "新的对话线程" : "新对话草稿";
 });
 
 const robotMessages = computed(() => {
-  const nextMessages = messages.value
-    .filter((message) => message.role !== "system")
-    .map((message) => ({
-      role: message.role,
-      content: displayMessageContent(message),
+  const msgs = chatThreadStream.messages.value
+    .filter((m) => m.role !== "system")
+    .map((m) => ({
+      role: m.role,
+      content: displayMessageContent(m),
     }));
 
-  if (streaming.value && (hasActiveThread.value || nextMessages.length > 0)) {
-    nextMessages.push({
+  if (chatThreadStream.streaming.value && (hasActiveThread.value || msgs.length > 0)) {
+    msgs.push({
       role: "assistant",
-      content: pendingAssistantContent.value || (pendingAssistantReasoning.value ? "正在思考…" : "正在生成回复…"),
+      content: chatThreadStream.pendingAssistantContent.value ||
+        (chatThreadStream.pendingAssistantReasoning.value ? "正在思考…" : "正在生成回复…"),
     });
   }
-
-  return nextMessages;
+  return msgs;
 });
 
-const stats = computed(() => ({
-  sessions: sessions.value.length,
-  threads: threads.value.length,
-  messages: messages.value.length,
-}));
-const currentConversationTitle = computed(() => {
-  if (activeThread.value) {
-    return formatThreadTitle(activeThread.value);
-  }
-
-  return hasActiveThread.value ? "新的对话线程" : "新对话草稿";
-});
+const bubbleRoles: Record<string, BubbleRoleConfig> = {
+  assistant: {
+    placement: "start",
+    avatar: h("span", { class: "chat-avatar chat-avatar--assistant" }, "AI"),
+  },
+  tool: {
+    placement: "start",
+    avatar: h("span", { class: "chat-avatar chat-avatar--tool" }, "T"),
+  },
+  user: {
+    placement: "end",
+    avatar: h("span", { class: "chat-avatar chat-avatar--user" }, "我"),
+  },
+};
 
 const starterPrompts: PromptProps[] = [
   {
@@ -151,842 +113,204 @@ const starterPrompts: PromptProps[] = [
   },
 ];
 
-const bubbleRoles: Record<string, BubbleRoleConfig> = {
-  assistant: {
-    placement: "start",
-    avatar: h("span", { class: "chat-avatar chat-avatar--assistant" }, "AI"),
-  },
-  tool: {
-    placement: "start",
-    avatar: h("span", { class: "chat-avatar chat-avatar--tool" }, "T"),
-  },
-  user: {
-    placement: "end",
-    avatar: h("span", { class: "chat-avatar chat-avatar--user" }, "我"),
-  },
-};
-
 onMounted(() => {
   void loadInitialState();
 });
 
 onBeforeUnmount(() => {
-  closeThreadEvents();
+  chatThreadStream.closeThreadEvents();
 });
 
 async function loadInitialState() {
-  loading.value = true;
-  error.value = "";
-  const loadErrors: string[] = [];
+  const api = getApiClient();
+  chatSessions.loading.value = true;
   try {
-    const [providersResult, templatesResult, sessionsResult] = await Promise.allSettled([
+    const [providersResult, templatesResult] = await Promise.allSettled([
       api.listProviders(),
       api.listTemplates(),
-      callChatApi("listChatSessions"),
     ]);
+    if (providersResult.status === "fulfilled") providers.value = providersResult.value;
+    if (templatesResult.status === "fulfilled") templates.value = templatesResult.value;
 
-    if (providersResult.status === "fulfilled") {
-      providers.value = providersResult.value;
-    } else {
-      loadErrors.push(`模型提供方加载失败：${errorMessage(providersResult.reason)}`);
+    const firstProvider = providers.value.find((p) => p.is_default) ?? providers.value[0] ?? null;
+    const firstTemplate = templates.value[0] ?? null;
+    selectedProviderId.value = firstProvider?.id ?? null;
+    selectedModel.value = firstProvider?.default_model ?? "";
+    selectedTemplateId.value = firstTemplate?.id ?? null;
+
+    await chatSessions.loadInitialState();
+  } finally {
+    chatSessions.loading.value = false;
+  }
+}
+
+// When a thread is selected via sessions, open its events stream
+watch(
+  () => chatSessions.activeThreadId.value,
+  (threadId) => {
+    if (threadId && chatSessions.activeSessionId.value) {
+      chatThreadStream.resetRuntimeActivity();
+      chatThreadStream.openThreadEvents(chatSessions.activeSessionId.value, threadId);
     }
+  },
+);
 
-    if (templatesResult.status === "fulfilled") {
-      templates.value = templatesResult.value;
-    } else {
-      loadErrors.push(`智能体模板加载失败：${errorMessage(templatesResult.reason)}`);
-    }
+// When active thread changes in sessions, refresh messages
+async function handleSelectThreadFromDialog(sessionId: string, threadId: string) {
+  chatThreadStream.closeThreadEvents();
+  chatSessions.activeSessionId.value = sessionId;
+  chatSessions.activeThreadId.value = threadId;
+  const session = chatSessions.sessions.value.find((s: ChatSessionSummary) => s.id === sessionId);
+  if (session) chatSessions.sessionName.value = session.name || `会话 ${session.id.slice(0, 8)}`;
+  // Threads already loaded in dialog - just find the title
+  const thread = chatSessions.threads.value.find((t: ChatThreadSummary) => t.id === threadId);
+  if (thread) chatSessions.threadTitle.value = thread.title ?? "新的对话线程";
+  else chatSessions.threadTitle.value = "新的对话线程";
+  await chatThreadStream.refreshActiveThread();
+  chatThreadStream.openThreadEvents(sessionId, threadId);
+}
 
-    selectDefaultTemplateAndProvider();
+async function handleRenameSession(sessionId: string, name: string) {
+  const api = getApiClient();
+  try {
+    const renamed = await api.renameChatSession!(sessionId, name);
+    chatSessions.sessions.value = chatSessions.sessions.value.map((s: ChatSessionSummary) =>
+      s.id === renamed.id ? renamed : s,
+    );
+  } catch (reason) {
+    chatComposer.error.value = reason instanceof Error ? reason.message : String(reason);
+  }
+}
 
-    if (sessionsResult.status === "fulfilled") {
-      const nextSessions = sessionsResult.value;
-      sessions.value = nextSessions;
-      if (nextSessions.length > 0) {
-        try {
-          await selectSession(nextSessions[0].id);
-        } catch (reason) {
-          loadErrors.push(`对话线程加载失败：${errorMessage(reason)}`);
-        }
-      }
-    } else {
-      loadErrors.push(`对话会话加载失败：${errorMessage(sessionsResult.reason)}`);
-    }
-
-    if (loadErrors.length > 0) {
-      error.value = loadErrors.join("；");
+async function handleDeleteSession(sessionId: string) {
+  const api = getApiClient();
+  try {
+    await api.deleteChatSession!(sessionId);
+    await chatSessions.refreshSessions();
+    chatSessions.activeSessionId.value = "";
+    chatSessions.activeThreadId.value = "";
+    chatSessions.threads.value = [];
+    if (chatSessions.sessions.value.length > 0) {
+      await handleSelectThreadFromDialog(
+        chatSessions.sessions.value[0].id,
+        chatSessions.threads.value[0]?.id ?? "",
+      );
     }
   } catch (reason) {
-    setError(reason);
-  } finally {
-    loading.value = false;
+    chatComposer.error.value = reason instanceof Error ? reason.message : String(reason);
   }
 }
 
-async function refreshSessions() {
-  sessions.value = await callChatApi("listChatSessions");
+function handleNewChat() {
+  chatThreadStream.closeThreadEvents();
+  chatSessions.startNewChatDraft();
+  chatComposer.draftMessage.value = "";
+  chatThreadStream.messages.value = [];
+  chatThreadStream.resetRuntimeActivity();
 }
 
-async function selectSession(sessionId: string) {
-  streaming.value = false;
-  closeThreadEvents();
-  activeSessionId.value = sessionId;
-  activeThreadId.value = "";
-  messages.value = [];
-  activeBinding.value = null;
-  resetRuntimeActivity();
-  const session = sessions.value.find((item) => item.id === sessionId);
-  if (session) {
-    sessionName.value = formatSessionName(session);
-  }
-  await refreshThreads();
-  if (threads.value.length > 0) {
-    await selectThread(threads.value[0].id);
-  }
+function handleTemplateChange(value: number | null) {
+  selectedTemplateId.value = value;
 }
 
-async function refreshThreads() {
-  if (!activeSessionId.value) {
-    threads.value = [];
-    return;
-  }
-
-  threads.value = await callChatApi("listChatThreads", activeSessionId.value);
+function handleProviderChange(value: number | null) {
+  selectedProviderId.value = value;
+  const provider = providers.value.find((p) => p.id === value);
+  if (provider) selectedModel.value = provider.default_model;
 }
 
-async function selectThread(threadId: string) {
-  streaming.value = false;
-  closeThreadEvents();
-  activeThreadId.value = threadId;
-  resetRuntimeActivity();
-  const thread = threads.value.find((item) => item.id === threadId);
-  threadTitle.value = thread?.title ?? "新的对话线程";
-  await refreshActiveThread();
-  openThreadEvents(activeSessionId.value, threadId);
-}
-
-async function refreshActiveThread(options: { silent?: boolean } = {}) {
-  if (!activeSessionId.value || !activeThreadId.value) {
-    messages.value = [];
-    return;
-  }
-
-  if (!options.silent) {
-    threadLoading.value = true;
-  }
-  try {
-    const [snapshot, nextMessages] = await Promise.all([
-      callChatApi("getChatThreadSnapshot", activeSessionId.value, activeThreadId.value),
-      callChatApi("listChatMessages", activeSessionId.value, activeThreadId.value),
-    ]);
-    messages.value = nextMessages.length > 0 ? nextMessages : snapshot.messages;
-  } catch (reason) {
-    setError(reason);
-  } finally {
-    if (!options.silent) {
-      threadLoading.value = false;
-    }
-  }
-}
-
-function startNewChatDraft() {
-  streaming.value = false;
-  pendingAssistantContent.value = "";
-  pendingAssistantReasoning.value = "";
-  closeThreadEvents();
-  activeSessionId.value = "";
-  activeThreadId.value = "";
-  activeBinding.value = null;
-  messages.value = [];
-  threads.value = [];
-  resetRuntimeActivity();
-  sessionName.value = "新的 Web 对话";
-  threadTitle.value = "新的对话线程";
-  actionMessage.value = "已准备新对话草稿，发送第一条消息后会创建会话和线程。";
-  error.value = "";
-}
-
-async function renameSession() {
-  if (!activeSessionId.value) {
-    return;
-  }
-  await runAction(async () => {
-    const renamed = await callChatApi("renameChatSession", activeSessionId.value, sessionName.value);
-    sessions.value = sessions.value.map((session) => (session.id === renamed.id ? renamed : session));
-  }, "会话名称已更新。");
-}
-
-async function deleteSession() {
-  if (!activeSessionId.value || deleting.value) {
-    return;
-  }
-  deleting.value = true;
-  try {
-    await runAction(async () => {
-      await callChatApi("deleteChatSession", activeSessionId.value);
-      await refreshSessions();
-      activeSessionId.value = "";
-      activeThreadId.value = "";
-      threads.value = [];
-      messages.value = [];
-      if (sessions.value.length > 0) {
-        await selectSession(sessions.value[0].id);
-      }
-    }, "会话已删除。");
-  } finally {
-    deleting.value = false;
-  }
-}
-
-async function createThread() {
-  if (!activeSessionId.value || !selectedTemplateId.value) {
-    setError("请先选择会话和智能体模板。");
-    return;
-  }
-
-  creatingThread.value = true;
-  try {
-    await runAction(async () => {
-      const templateId = Number(selectedTemplateId.value);
-      const providerId = selectedProviderId.value === null ? null : Number(selectedProviderId.value);
-      const created = await callChatApi("createChatThread", activeSessionId.value, {
-        template_id: templateId,
-        provider_id: Number.isFinite(providerId) ? providerId : null,
-        model: selectedModel.value || activeProvider.value?.default_model || null,
-      });
-      await refreshThreads();
-      if (!threads.value.some((thread) => thread.id === created.id)) {
-        threads.value = [created, ...threads.value];
-      }
-      await selectThread(created.id);
-    }, "线程已创建，可以开始对话。");
-  } finally {
-    creatingThread.value = false;
-  }
-}
-
-async function renameThread() {
-  if (!activeSessionId.value || !activeThreadId.value) {
-    return;
-  }
-  await runAction(async () => {
-    const renamed = await callChatApi("renameChatThread", activeSessionId.value, activeThreadId.value, threadTitle.value);
-    threads.value = threads.value.map((thread) => (thread.id === renamed.id ? renamed : thread));
-  }, "线程标题已更新。");
-}
-
-async function deleteThread() {
-  if (!activeSessionId.value || !activeThreadId.value || deleting.value) {
-    return;
-  }
-  deleting.value = true;
-  try {
-    await runAction(async () => {
-      await callChatApi("deleteChatThread", activeSessionId.value, activeThreadId.value);
-      await refreshThreads();
-      activeThreadId.value = "";
-      messages.value = [];
-      if (threads.value.length > 0) {
-        await selectThread(threads.value[0].id);
-      }
-    }, "线程已删除。");
-  } finally {
-    deleting.value = false;
-  }
-}
-
-async function applyModelBinding() {
-  if (!activeSessionId.value || !activeThreadId.value || !selectedProviderId.value || !selectedModel.value) {
-    setError("请选择线程、提供方和模型后再应用。");
-    return;
-  }
-
-  await runAction(async () => {
-    const providerId = Number(selectedProviderId.value);
-    activeBinding.value = await callChatApi("updateChatThreadModel", activeSessionId.value, activeThreadId.value, {
-      provider_id: providerId,
-      model: selectedModel.value,
-    });
-  }, "模型绑定已更新。");
-}
-
-async function activateThread() {
-  if (!activeSessionId.value || !activeThreadId.value) {
-    return;
-  }
-  await runAction(async () => {
-    activeBinding.value = await callChatApi("activateChatThread", activeSessionId.value, activeThreadId.value);
-  }, "线程已激活。");
-}
-
-async function sendMessage(value: string) {
-  const content = value.trim();
-  if (!content || sending.value) {
-    return;
-  }
-
-  sending.value = true;
-  streaming.value = true;
-  pendingAssistantContent.value = "";
-  pendingAssistantReasoning.value = "";
-  resetRuntimeActivity();
-  const assistantCountBeforeSend = countAssistantMessages();
-  assistantCountAtStreamStart.value = assistantCountBeforeSend;
-  messages.value = [...messages.value, createLocalMessage("user", content)];
-  try {
-    await runAction(async () => {
-      const target = await ensureActiveChatThread();
-      openThreadEvents(target.sessionId, target.threadId);
-      await callChatApi("sendChatMessage", target.sessionId, target.threadId, content);
-      draftMessage.value = "";
-      if (!streamSubscription.value) {
-        void refreshStreamUntilSettled(assistantCountBeforeSend);
-      }
-    }, "消息已提交，正在等待流式结果。");
-    if (error.value) {
-      streaming.value = false;
-      clearPendingAssistant();
-    }
-  } finally {
-    sending.value = false;
-  }
-}
-
-async function cancelThread() {
-  if (!activeSessionId.value || !activeThreadId.value) {
-    return;
-  }
-  await runAction(async () => {
-    streaming.value = false;
-    closeThreadEvents();
-    await callChatApi("cancelChatThread", activeSessionId.value, activeThreadId.value);
-  }, "已请求取消当前线程。");
-}
-
-async function ensureActiveChatThread() {
-  if (activeSessionId.value && activeThreadId.value) {
-    return {
-      sessionId: activeSessionId.value,
-      threadId: activeThreadId.value,
-    };
-  }
-
-  if (!selectedTemplateId.value) {
-    throw new Error("请先选择智能体模板。");
-  }
-
-  const providerId = selectedProviderId.value === null ? null : Number(selectedProviderId.value);
-  const payload = await callChatApi("createChatSessionWithThread", {
-    name: normalizedSessionName(),
-    template_id: Number(selectedTemplateId.value),
-    provider_id: Number.isFinite(providerId) ? providerId : null,
-    model: selectedModel.value || activeProvider.value?.default_model || null,
-  });
-  applyChatSessionPayload(payload);
-  await refreshSessions();
-  await refreshThreads();
-
-  return {
-    sessionId: payload.session_id,
-    threadId: payload.thread_id,
-  };
-}
-
-function applyChatSessionPayload(payload: ChatSessionPayload) {
-  activeSessionId.value = payload.session_id;
-  activeThreadId.value = payload.thread_id;
-  activeBinding.value = {
-    session_id: payload.session_id,
-    thread_id: payload.thread_id,
-    template_id: payload.template_id,
-    effective_provider_id: payload.effective_provider_id,
-    effective_model: payload.effective_model,
-  };
-  threadTitle.value = "新的对话线程";
-  selectedTemplateId.value = payload.template_id;
-  selectedProviderId.value = payload.effective_provider_id;
-  selectedModel.value = payload.effective_model ?? selectedModel.value;
-  if (!threads.value.some((thread) => thread.id === payload.thread_id)) {
-    threads.value = [
-      {
-        id: payload.thread_id,
-        title: null,
-        turn_count: 0,
-        token_count: 0,
-        updated_at: new Date().toISOString(),
-      },
-      ...threads.value,
-    ];
-  }
-}
-
-function openThreadEvents(sessionId: string, threadId: string) {
-  closeThreadEvents();
-  if (!api.subscribeChatThread) {
-    return;
-  }
-
-  try {
-    streamSubscription.value = api.subscribeChatThread(sessionId, threadId, {
-      onEvent: handleThreadEvent,
-      onError: (reason) => {
-        closeThreadEvents();
-        if (streaming.value) {
-          actionMessage.value = reason.message;
-          void refreshStreamUntilSettled(countAssistantMessages());
-        } else {
-          setError(reason);
-        }
-      },
-    });
-  } catch (reason) {
-    setError(reason);
-  }
-}
-
-function closeThreadEvents() {
-  streamSubscription.value?.close();
-  streamSubscription.value = null;
-}
-
-function handleThreadEvent(event: ChatThreadEventEnvelope) {
-  if (event.session_id !== activeSessionId.value || event.thread_id !== activeThreadId.value) {
-    return;
-  }
-
-  applyThreadEventPayload(event.payload);
-}
-
-function applyThreadEventPayload(payload: ChatThreadEventPayload) {
-  switch (payload.type) {
-    case "content_delta":
-      streaming.value = true;
-      pendingAssistantContent.value += payload.delta;
-      break;
-    case "reasoning_delta":
-      streaming.value = true;
-      pendingAssistantReasoning.value += payload.delta;
-      break;
-    case "retry_attempt":
-      actionMessage.value = `正在重试第 ${payload.attempt}/${payload.max_retries} 次：${payload.error}`;
-      runtimeNotice.value = `重试 ${payload.attempt}/${payload.max_retries}：${payload.error}`;
-      break;
-    case "tool_started":
-      streaming.value = true;
-      upsertToolActivity({
-        id: payload.tool_call_id,
-        name: payload.tool_name,
-        status: "running",
-        argumentsPreview: previewValue(payload.arguments),
-        resultPreview: "",
-      });
-      if (!pendingAssistantContent.value) {
-        pendingAssistantContent.value = `正在调用工具：${payload.tool_name}`;
-      }
-      break;
-    case "tool_completed":
-      upsertToolActivity({
-        id: payload.tool_call_id,
-        name: payload.tool_name,
-        status: payload.is_error ? "error" : "success",
-        argumentsPreview: "",
-        resultPreview: previewValue(payload.result),
-      });
-      break;
-    case "turn_failed":
-      streaming.value = false;
-      runtimeNotice.value = `运行失败：${payload.error}`;
-      clearPendingAssistant();
-      setError(payload.error);
-      closeThreadEvents();
-      void refreshActiveThread({ silent: true });
-      break;
-    case "turn_settled":
-    case "idle":
-      void settleThreadAfterStream();
-      break;
-    default:
-      break;
-  }
-}
-
-function upsertToolActivity(nextActivity: ToolActivity) {
-  const existingIndex = runtimeActivities.value.findIndex((item) => item.id === nextActivity.id);
-  if (existingIndex === -1) {
-    runtimeActivities.value = [nextActivity, ...runtimeActivities.value];
-    return;
-  }
-
-  const existing = runtimeActivities.value[existingIndex];
-  runtimeActivities.value = runtimeActivities.value.map((item, index) =>
-    index === existingIndex
-      ? {
-          ...existing,
-          ...nextActivity,
-          argumentsPreview: nextActivity.argumentsPreview || existing.argumentsPreview,
-          resultPreview: nextActivity.resultPreview || existing.resultPreview,
-        }
-      : item,
-  );
-}
-
-function resetRuntimeActivity() {
-  runtimeActivities.value = [];
-  runtimeNotice.value = "";
-}
-
-function runtimeActivityStatusLabel(status: ToolActivityStatus) {
-  if (status === "success") {
-    return "完成";
-  }
-  if (status === "error") {
-    return "失败";
-  }
-
-  return "运行中";
-}
-
-function previewValue(value: unknown) {
-  if (value === null || value === undefined) {
-    return "";
-  }
-
-  if (typeof value === "string") {
-    return value;
-  }
-
-  try {
-    return JSON.stringify(value, null, 2);
-  } catch {
-    return String(value);
-  }
-}
-
-async function settleThreadAfterStream() {
-  await refreshActiveThread({ silent: true });
-  if (countAssistantMessages() <= assistantCountAtStreamStart.value) {
-    void refreshStreamUntilSettled(assistantCountAtStreamStart.value);
-    return;
-  }
-  streaming.value = false;
-  clearPendingAssistant();
-  actionMessage.value = "回复已刷新。";
-}
-
-function applyPrompt(_event: MouseEvent, item: PromptProps) {
-  if (item.id === "provider") {
-    draftMessage.value = "请检查当前默认模型、提供方和智能体模板是否适合继续这个任务。";
-    return;
-  }
-  if (item.id === "mcp") {
-    draftMessage.value = "请帮我梳理当前 MCP 服务的运行风险、可用工具和下一步运维动作。";
-    return;
-  }
-
-  draftMessage.value = "请基于当前智能体模板，给出系统提示词和工具配置的改进建议。";
-}
-
-async function runAction(action: () => Promise<void>, successMessage: string) {
-  error.value = "";
-  actionMessage.value = "";
-  try {
-    await action();
-    actionMessage.value = successMessage;
-  } catch (reason) {
-    setError(reason);
-  }
-}
-
-function setError(reason: unknown) {
-  error.value = errorMessage(reason);
-}
-
-function errorMessage(reason: unknown) {
-  return reason instanceof Error ? reason.message : String(reason);
-}
-
-async function refreshStreamUntilSettled(assistantCountBeforeSend: number) {
-  for (let attempt = 0; attempt < 8; attempt += 1) {
-    if (!streaming.value || !activeSessionId.value || !activeThreadId.value) {
-      return;
-    }
-
-    await refreshActiveThread({ silent: true });
-    if (countAssistantMessages() > assistantCountBeforeSend) {
-      streaming.value = false;
-      clearPendingAssistant();
-      actionMessage.value = "回复已刷新。";
-      return;
-    }
-
-    await waitForStreamTick();
-  }
-
-  streaming.value = false;
-  clearPendingAssistant();
-  actionMessage.value = "消息已提交，后端仍在处理；可点击刷新获取最新回复。";
-}
-
-function clearPendingAssistant() {
-  pendingAssistantContent.value = "";
-  pendingAssistantReasoning.value = "";
-}
-
-function waitForStreamTick() {
-  if (import.meta.env.MODE === "test") {
-    return Promise.resolve();
-  }
-
-  return new Promise<void>((resolve) => {
-    window.setTimeout(resolve, 900);
-  });
-}
-
-function countAssistantMessages() {
-  return messages.value.filter((message) => message.role === "assistant").length;
-}
-
-function createLocalMessage(role: ChatMessageRecord["role"], content: string): ChatMessageRecord {
-  return {
-    role,
-    content,
-    reasoning_content: null,
-    content_parts: [],
-    tool_call_id: null,
-    name: null,
-    tool_calls: null,
-    metadata: null,
-  };
-}
-
-function selectDefaultTemplateAndProvider() {
-  const firstProvider = providers.value.find((provider) => provider.is_default) ?? providers.value[0] ?? null;
-  const firstTemplate = templates.value[0] ?? null;
-  selectedProviderId.value = firstProvider?.id ?? null;
-  selectedModel.value = firstProvider?.default_model ?? "";
-  selectedTemplateId.value = firstTemplate?.id ?? null;
-}
-
-function emptyContentForRole(role: ChatMessageRecord["role"]) {
-  if (role === "tool") {
-    return "工具调用结果为空。";
-  }
-
-  return "消息内容为空。";
+function handleModelChange(value: string) {
+  selectedModel.value = value;
 }
 
 function displayMessageContent(message: ChatMessageRecord) {
   const content = message.content?.trim();
-  if (content) {
-    return message.content;
-  }
+  if (content) return message.content;
 
   if (message.role === "assistant") {
     const names = toolCallNames(message.tool_calls);
-    if (names.length > 0) {
-      return `正在调用工具：${names.join("、")}`;
-    }
-
-    if (message.reasoning_content?.trim()) {
-      return "助手正在思考，等待可见回复。";
-    }
+    if (names.length > 0) return `正在调用工具：${names.join("、")}`;
+    if (message.reasoning_content?.trim()) return "助手正在思考，等待可见回复。";
   }
 
   if (message.role === "tool" && message.name?.trim()) {
     return `工具 ${message.name} 返回为空。`;
   }
 
-  return emptyContentForRole(message.role);
+  if (message.role === "tool") return "工具调用结果为空。";
+  return "消息内容为空。";
 }
 
-function toolCallNames(toolCalls: unknown[] | null | undefined) {
-  if (!Array.isArray(toolCalls)) {
-    return [];
-  }
-
+function toolCallNames(toolCalls: unknown[] | null | undefined): string[] {
+  if (!Array.isArray(toolCalls)) return [];
   return toolCalls
-    .map((toolCall) => {
-      if (!toolCall || typeof toolCall !== "object" || !("name" in toolCall)) {
-        return "";
-      }
-
-      const name = (toolCall as { name?: unknown }).name;
+    .map((tc) => {
+      if (!tc || typeof tc !== "object" || !("name" in tc)) return "";
+      const name = (tc as { name?: unknown }).name;
       return typeof name === "string" ? name.trim() : "";
     })
-    .filter((name) => name.length > 0);
+    .filter((n) => n.length > 0);
 }
 
-function normalizedSessionName() {
-  return sessionName.value.trim() || "新的 Web 对话";
-}
-
-function formatSessionName(session: ChatSessionSummary) {
-  const name = session.name.trim();
-  return name || `会话 ${session.id.slice(0, 8)}`;
-}
-
-function formatThreadTitle(thread: ChatThreadSummary) {
-  return thread.title || `线程 ${thread.id.slice(0, 8)}`;
-}
-
-function formatDate(value: string) {
-  return new Intl.DateTimeFormat("zh-CN", {
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(new Date(value));
-}
-
-async function callChatApi<K extends keyof ChatApiMethods>(
-  method: K,
-  ...args: Parameters<ChatApiMethods[K]>
-): Promise<Awaited<ReturnType<ChatApiMethods[K]>>> {
-  const fn = api[method] as ChatApiMethods[K] | undefined;
-  if (typeof fn !== "function") {
-    throw new Error(`当前 API client 未实现 ${String(method)}。`);
+function applyPrompt(_event: MouseEvent, item: PromptProps) {
+  if (item.id === "provider") {
+    chatComposer.draftMessage.value = "请检查当前默认模型、提供方和智能体模板是否适合继续这个任务。";
+    return;
   }
+  if (item.id === "mcp") {
+    chatComposer.draftMessage.value = "请帮我梳理当前 MCP 服务的运行风险、可用工具和下一步运维动作。";
+    return;
+  }
+  chatComposer.draftMessage.value = "请基于当前智能体模板，给出系统提示词和工具配置的改进建议。";
+}
 
-  const bound = fn.bind(api) as (...nextArgs: Parameters<ChatApiMethods[K]>) => ReturnType<ChatApiMethods[K]>;
-  return (await bound(...args)) as Awaited<ReturnType<ChatApiMethods[K]>>;
+function runtimeActivityStatusLabel(status: "running" | "success" | "error") {
+  if (status === "success") return "完成";
+  if (status === "error") return "失败";
+  return "运行中";
 }
 </script>
 
 <template>
   <section class="chat-page">
     <div class="chat-workspace">
-      <aside class="chat-sidebar shell-card">
-        <section class="sidebar-pane">
-          <div class="panel-heading">
-            <div>
-              <p class="eyebrow">Session</p>
-              <h3 class="section-heading">会话</h3>
-            </div>
-            <TinyTag type="info">{{ stats.sessions }} 个</TinyTag>
-          </div>
-
-          <div class="create-row">
-            <TinyInput v-model="sessionName" name="session-name" placeholder="当前会话名称" />
-            <TinyButton data-testid="create-session" type="primary" @click="startNewChatDraft">新对话</TinyButton>
-          </div>
-
-          <div class="conversation-config">
-            <label>
-              <span>智能体模板</span>
-              <TinySelect v-model="selectedTemplateId" data-testid="conversation-template-select" name="conversation-template">
-                <TinyOption v-for="item in templates" :key="item.id" :label="item.display_name" :value="item.id" />
-              </TinySelect>
-            </label>
-            <p v-if="selectedTemplate" class="template-hint">
-              {{ selectedTemplate.description || `模板版本 ${selectedTemplate.version}` }}
-            </p>
-            <p v-else class="template-hint template-hint--warning">暂无可用智能体模板，无法创建新对话。</p>
-          </div>
-
-          <div v-if="loading" class="empty-state">正在加载对话会话…</div>
-          <div v-else-if="sessions.length === 0" class="empty-state">暂无对话会话，发送第一条消息后会自动创建。</div>
-          <div v-else class="session-list">
-            <button
-              v-for="sessionItem in sessions"
-              :key="sessionItem.id"
-              class="session-item"
-              :class="{ active: sessionItem.id === activeSessionId }"
-              type="button"
-              @click="selectSession(sessionItem.id)"
-            >
-              <span>{{ formatSessionName(sessionItem) }}</span>
-              <small>{{ sessionItem.thread_count }} 线程 · {{ formatDate(sessionItem.updated_at) }}</small>
-            </button>
-          </div>
-
-          <div v-if="activeSession" class="rail-actions">
-            <TinyButton @click="renameSession">保存会话名</TinyButton>
-            <TinyButton :disabled="deleting" @click="deleteSession">删除会话</TinyButton>
-          </div>
-        </section>
-
-        <section class="sidebar-pane">
-          <div class="panel-heading">
-            <div>
-              <p class="eyebrow">Thread</p>
-              <h3 class="section-heading">线程</h3>
-            </div>
-            <TinyTag type="info">{{ stats.threads }} 个</TinyTag>
-          </div>
-
-          <div class="thread-config">
-            <label>
-              <span>模型提供方</span>
-              <TinySelect v-model="selectedProviderId" name="provider">
-                <TinyOption v-for="item in providers" :key="item.id" :label="item.display_name" :value="item.id" />
-              </TinySelect>
-            </label>
-            <label>
-              <span>模型</span>
-              <TinyInput v-model="selectedModel" name="model" placeholder="例如 glm-4.7" />
-            </label>
-            <TinyButton data-testid="create-thread" :disabled="!canCreateThread || creatingThread" type="primary" @click="createThread">
-              {{ creatingThread ? "创建中" : "创建线程" }}
-            </TinyButton>
-          </div>
-
-          <div v-if="!activeSession" class="empty-state">当前是草稿对话，发送第一条消息后会创建线程。</div>
-          <div v-else-if="threads.length === 0" class="empty-state">当前会话还没有线程。</div>
-          <div v-else class="thread-list">
-            <button
-              v-for="threadItem in threads"
-              :key="threadItem.id"
-              class="thread-item"
-              :class="{ active: threadItem.id === activeThreadId }"
-              type="button"
-              @click="selectThread(threadItem.id)"
-            >
-              <span>{{ formatThreadTitle(threadItem) }}</span>
-              <small>{{ threadItem.turn_count }} turn · {{ threadItem.token_count }} token</small>
-            </button>
-          </div>
-
-          <div v-if="hasActiveThread" class="thread-editor">
-            <TinyInput v-model="threadTitle" name="thread-title" placeholder="线程标题" />
-            <TinyButton @click="renameThread">保存标题</TinyButton>
-            <TinyButton @click="applyModelBinding">应用模型</TinyButton>
-            <TinyButton :disabled="deleting" @click="deleteThread">删除线程</TinyButton>
-          </div>
-        </section>
-      </aside>
-
       <div class="chat-main-column">
+        <!-- Message panel -->
         <article class="chat-panel shell-card">
           <header class="chat-panel__header">
             <div>
               <p class="eyebrow">Conversation</p>
               <h3 class="section-heading">{{ currentConversationTitle }}</h3>
               <p class="section-copy">
-                {{ activeBinding?.effective_model || selectedModel || "未绑定模型" }}
+                {{ chatSessions.activeBinding.value?.effective_model || selectedModel || "未绑定模型" }}
                 <span v-if="activeProvider"> · {{ activeProvider.display_name }}</span>
               </p>
             </div>
             <div class="chat-actions">
-              <TinyButton :disabled="!hasActiveThread" @click="refreshActiveThread">刷新</TinyButton>
-              <TinyButton :disabled="!hasActiveThread" @click="activateThread">激活</TinyButton>
-              <TinyButton data-testid="cancel-thread" :disabled="!hasActiveThread" @click="cancelThread">取消运行</TinyButton>
+              <TinyButton :disabled="!hasActiveThread" @click="chatThreadStream.refreshActiveThread()">刷新</TinyButton>
+              <TinyButton :disabled="!hasActiveThread" @click="chatSessions.activateThread()">激活</TinyButton>
+              <TinyButton data-testid="cancel-thread" :disabled="!hasActiveThread" @click="chatComposer.cancelThread()">取消运行</TinyButton>
             </div>
           </header>
 
-          <div v-if="error" class="notice notice--danger">{{ error }}</div>
-          <div v-if="actionMessage" class="notice notice--success">{{ actionMessage }}</div>
-          <div v-if="runtimeNotice || runtimeActivities.length > 0" class="runtime-activity-panel">
+          <div v-if="chatComposer.error.value" class="notice notice--danger">{{ chatComposer.error.value }}</div>
+          <div v-if="chatComposer.actionMessage.value" class="notice notice--success">{{ chatComposer.actionMessage.value }}</div>
+
+          <!-- Runtime activity panel -->
+          <div v-if="chatThreadStream.runtimeNotice.value || chatThreadStream.runtimeActivities.value.length > 0" class="runtime-activity-panel">
             <div class="runtime-activity-header">
               <div>
                 <p class="eyebrow">Runtime</p>
                 <strong>本轮运行活动</strong>
               </div>
-              <TinyTag v-if="runtimeActivities.length > 0" type="info">{{ runtimeActivities.length }} 项</TinyTag>
+              <TinyTag v-if="chatThreadStream.runtimeActivities.value.length > 0" type="info">
+                {{ chatThreadStream.runtimeActivities.value.length }} 项
+              </TinyTag>
             </div>
-            <p v-if="runtimeNotice" class="runtime-notice">{{ runtimeNotice }}</p>
-            <div v-if="runtimeActivities.length > 0" class="tool-activity-list">
+            <p v-if="chatThreadStream.runtimeNotice.value" class="runtime-notice">{{ chatThreadStream.runtimeNotice.value }}</p>
+            <div v-if="chatThreadStream.runtimeActivities.value.length > 0" class="tool-activity-list">
               <article
-                v-for="activity in runtimeActivities"
+                v-for="activity in chatThreadStream.runtimeActivities.value"
                 :key="activity.id"
                 class="tool-activity-card"
                 :class="`tool-activity-card--${activity.status}`"
@@ -1001,8 +325,11 @@ async function callChatApi<K extends keyof ChatApiMethods>(
             </div>
           </div>
 
+          <!-- Message stage -->
           <div class="message-stage">
-            <div v-if="threadLoading && robotMessages.length === 0" class="empty-state">正在刷新消息…</div>
+            <div v-if="chatThreadStream.threadLoading.value && robotMessages.length === 0" class="empty-state">
+              正在刷新消息…
+            </div>
             <TrBubbleList
               v-else-if="robotMessages.length > 0"
               class="bubble-list"
@@ -1018,21 +345,39 @@ async function callChatApi<K extends keyof ChatApiMethods>(
           </div>
         </article>
 
-        <footer class="composer-panel shell-card">
-          <TrSender
-            v-model="draftMessage"
-            class="chat-sender"
-            :clearable="true"
-            :disabled="!canSendMessage"
-            :loading="sending"
-            :placeholder="senderPlaceholder"
-            stop-text="取消运行"
-            @submit="sendMessage"
-            @cancel="cancelThread"
-          />
-        </footer>
+        <!-- Composer bar -->
+        <ChatComposerBar
+          v-model="chatComposer.draftMessage.value"
+          :templates="templates"
+          :providers="providers"
+          v-model:selected-template-id="selectedTemplateId"
+          v-model:selected-provider-id="selectedProviderId"
+          v-model:selected-model="selectedModel"
+          :disabled="!chatComposer.canSendMessage.value"
+          :loading="chatComposer.sending.value"
+          :placeholder="chatComposer.senderPlaceholder.value"
+          :has-active-thread="hasActiveThread"
+          :active-provider="activeProvider"
+          :selected-template="selectedTemplate"
+          @submit="chatComposer.sendMessage"
+          @cancel="chatComposer.cancelThread"
+          @new-chat="handleNewChat"
+          @open-history="historyDialogOpen = true"
+        />
       </div>
     </div>
+
+    <!-- History dialog -->
+    <ChatHistoryDialog
+      v-model="historyDialogOpen"
+      :sessions="chatSessions.sessions.value"
+      :active-session-id="chatSessions.activeSessionId.value"
+      :active-thread-id="chatSessions.activeThreadId.value"
+      :session-list-loading="chatSessions.loading.value"
+      @select-thread="handleSelectThreadFromDialog"
+      @delete-session="handleDeleteSession"
+      @rename-session="handleRenameSession"
+    />
   </section>
 </template>
 
@@ -1044,7 +389,7 @@ async function callChatApi<K extends keyof ChatApiMethods>(
 
 .chat-workspace {
   display: grid;
-  grid-template-columns: minmax(260px, 320px) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--space-5);
   min-height: 760px;
 }
@@ -1057,30 +402,8 @@ async function callChatApi<K extends keyof ChatApiMethods>(
 }
 
 .chat-panel,
-.chat-sidebar,
-.composer-panel {
+.composer-bar {
   padding: var(--space-5);
-}
-
-.chat-sidebar {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-5);
-  min-height: 0;
-  max-height: 760px;
-  overflow: auto;
-}
-
-.sidebar-pane {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-4);
-}
-
-.composer-panel {
-  position: sticky;
-  bottom: var(--space-4);
-  z-index: 2;
 }
 
 .chat-panel {
@@ -1114,96 +437,6 @@ async function callChatApi<K extends keyof ChatApiMethods>(
   gap: var(--space-4);
 }
 
-.create-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: var(--space-2);
-}
-
-.session-list,
-.thread-list {
-  display: flex;
-  flex: 1;
-  flex-direction: column;
-  gap: var(--space-2);
-  min-height: 0;
-  overflow: auto;
-}
-
-.session-item,
-.thread-item {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
-  width: 100%;
-  padding: var(--space-3);
-  background: transparent;
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-md);
-  color: var(--text-secondary);
-  text-align: left;
-  transition:
-    background var(--transition-base),
-    border-color var(--transition-base),
-    color var(--transition-base);
-}
-
-.session-item span,
-.thread-item span {
-  color: var(--text-primary);
-  font-weight: 590;
-}
-
-.session-item small,
-.thread-item small {
-  color: var(--text-muted);
-  font-size: var(--text-xs);
-}
-
-.session-item:hover,
-.thread-item:hover,
-.session-item.active,
-.thread-item.active {
-  background: var(--accent-subtle);
-  border-color: var(--accent);
-}
-
-.rail-actions,
-.chat-actions,
-.thread-editor {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-2);
-}
-
-.conversation-config,
-.thread-config {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-3);
-}
-
-.conversation-config label,
-.thread-config label {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-  color: var(--text-secondary);
-  font-size: var(--text-xs);
-  font-weight: 590;
-}
-
-.template-hint {
-  margin: 0;
-  color: var(--text-muted);
-  font-size: var(--text-xs);
-  line-height: 1.5;
-}
-
-.template-hint--warning {
-  color: var(--warning);
-}
-
 .notice {
   padding: var(--space-3);
   border-radius: var(--radius-md);
@@ -1212,15 +445,15 @@ async function callChatApi<K extends keyof ChatApiMethods>(
 }
 
 .notice--danger {
-  background: var(--danger-bg);
-  border: 1px solid var(--danger-border);
-  color: var(--danger);
+  background: var(--status-danger-bg);
+  border: 1px solid var(--status-danger);
+  color: var(--status-danger);
 }
 
 .notice--success {
-  background: var(--success-bg);
-  border: 1px solid var(--success-border);
-  color: var(--success);
+  background: var(--status-success-bg);
+  border: 1px solid var(--status-success);
+  color: var(--status-success);
 }
 
 .runtime-activity-panel {
@@ -1272,11 +505,11 @@ async function callChatApi<K extends keyof ChatApiMethods>(
 }
 
 .tool-activity-card--success {
-  border-color: var(--success-border);
+  border-color: var(--status-success);
 }
 
 .tool-activity-card--error {
-  border-color: var(--danger-border);
+  border-color: var(--status-danger);
 }
 
 .tool-activity-card__header span {
@@ -1336,11 +569,6 @@ async function callChatApi<K extends keyof ChatApiMethods>(
   text-align: center;
 }
 
-.chat-sender {
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-lg);
-}
-
 :deep([data-role="user"]) {
   --tr-bubble-box-bg: var(--accent-subtle);
   --tr-bubble-box-border: 1px solid rgba(94, 106, 210, 0.2);
@@ -1362,26 +590,18 @@ async function callChatApi<K extends keyof ChatApiMethods>(
 }
 
 .chat-avatar--user {
-  background: var(--success-bg);
-  color: var(--success);
+  background: var(--status-success-bg);
+  color: var(--status-success);
 }
 
 .chat-avatar--tool {
-  background: var(--warning-bg);
-  color: var(--warning);
+  background: var(--status-warning-bg);
+  color: var(--status-warning);
 }
 
 @media (max-width: 1180px) {
-  .chat-workspace {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
   .chat-main-column {
     min-height: 0;
-  }
-
-  .chat-sidebar {
-    max-height: none;
   }
 
   .message-stage {
