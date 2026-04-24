@@ -73,6 +73,7 @@ function makeApiClient(overrides: Partial<ApiClient> = {}): ApiClient {
     listProviders: async () => [providerRecord()],
     listTemplates: async () => [templateRecord()],
     saveTemplate: async (input) => input,
+    listTools: async () => [],
     ...overrides,
   } as ApiClient;
 }
@@ -107,6 +108,8 @@ describe("TemplateEditPage", () => {
     expect(saveTemplate).toHaveBeenCalledWith(expect.objectContaining({
       display_name: "代码助手",
       system_prompt: "You are a coding agent.",
+      tool_names: [],
+      subagent_names: [],
     }));
   });
 

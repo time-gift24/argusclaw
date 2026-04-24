@@ -5,7 +5,7 @@ export default defineComponent({
   inheritAttrs: false,
   props: {
     modelValue: {
-      type: [String, Number],
+      type: [String, Number, Array],
       default: "",
     },
   },

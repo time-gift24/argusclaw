@@ -2,7 +2,7 @@
 import { computed, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 
-import { getApiClient, type AgentRecord, type LlmProviderRecord } from "@/lib/api";
+import { getApiClient, type AgentRecord, type LlmProviderRecord, type ToolRegistryItem } from "@/lib/api";
 import { TinyButton, TinyInput, TinyNumeric, TinyOption, TinySelect, TinySwitch } from "@/lib/opentiny";
 
 const api = getApiClient();
@@ -11,8 +11,9 @@ const router = useRouter();
 
 const isEdit = ref(false);
 
-const templates = ref<AgentRecord[]>([]);
+const allTemplates = ref<AgentRecord[]>([]);
 const providers = ref<LlmProviderRecord[]>([]);
+const availableTools = ref<ToolRegistryItem[]>([]);
 const loading = ref(true);
 const error = ref("");
 const saving = ref(false);
@@ -24,8 +25,8 @@ interface TemplateFormState {
   provider_id: string;
   model_id: string;
   system_prompt: string;
-  tool_names: string;
-  subagent_names: string;
+  tool_names: string[];
+  subagent_names: string[];
   max_tokens: number | null;
   temperature: number | null;
   thinking_enabled: boolean;
@@ -40,6 +41,17 @@ const selectedProviderModels = computed(() => {
   return provider?.models ?? [];
 });
 
+const subagentOptions = computed(() => {
+  const currentId = isEdit.value ? parseInt(route.params.templateId as string, 10) : -1;
+  return allTemplates.value
+    .filter(t => t.id !== currentId)
+    .map(t => ({ label: t.display_name, value: t.display_name }));
+});
+
+const toolOptions = computed(() => {
+  return availableTools.value.map(t => ({ label: t.name, value: t.name }));
+});
+
 function createDefaultTemplateForm(): TemplateFormState {
   return {
     display_name: "",
@@ -48,8 +60,8 @@ function createDefaultTemplateForm(): TemplateFormState {
     provider_id: "",
     model_id: "",
     system_prompt: "",
-    tool_names: "",
-    subagent_names: "",
+    tool_names: [],
+    subagent_names: [],
     max_tokens: null,
     temperature: null,
     thinking_enabled: false,
@@ -59,39 +71,43 @@ function createDefaultTemplateForm(): TemplateFormState {
 
 async function loadData() {
   isEdit.value = !!route.params.templateId;
-  if (!isEdit.value) {
-    loading.value = false;
-    selectDefaultProvider();
-    return;
-  }
-
   loading.value = true;
   error.value = "";
 
   try {
-    const providersResult = await api.listProviders();
-    providers.value = providersResult;
+    const [providersResult, templatesResult, toolsResult] = await Promise.all([
+      api.listProviders(),
+      api.listTemplates(),
+      api.listTools ? api.listTools() : Promise.resolve([])
+    ]);
 
-    const templateId = parseInt(route.params.templateId as string, 10);
-    const templatesResult = await api.listTemplates();
-    const found = templatesResult.find(t => t.id === templateId);
-    if (found) {
-      templateForm.value = {
-        display_name: found.display_name,
-        description: found.description,
-        version: found.version,
-        provider_id: found.provider_id ? String(found.provider_id) : "",
-        model_id: found.model_id ?? "",
-        system_prompt: found.system_prompt,
-        tool_names: found.tool_names.join("\n"),
-        subagent_names: found.subagent_names.join("\n"),
-        max_tokens: found.max_tokens ?? null,
-        temperature: found.temperature ?? null,
-        thinking_enabled: found.thinking_config?.type === "enabled",
-        clear_thinking: found.thinking_config?.clear_thinking ?? true,
-      };
+    providers.value = providersResult;
+    allTemplates.value = templatesResult;
+    availableTools.value = toolsResult;
+
+    if (isEdit.value) {
+      const templateId = parseInt(route.params.templateId as string, 10);
+      const found = templatesResult.find(t => t.id === templateId);
+      if (found) {
+        templateForm.value = {
+          display_name: found.display_name,
+          description: found.description,
+          version: found.version,
+          provider_id: found.provider_id ? String(found.provider_id) : "",
+          model_id: found.model_id ?? "",
+          system_prompt: found.system_prompt,
+          tool_names: found.tool_names,
+          subagent_names: found.subagent_names,
+          max_tokens: found.max_tokens ?? null,
+          temperature: found.temperature ?? null,
+          thinking_enabled: found.thinking_config?.type === "enabled",
+          clear_thinking: found.thinking_config?.clear_thinking ?? true,
+        };
+      } else {
+        error.value = "未找到该模板。";
+      }
     } else {
-      error.value = "未找到该模板。";
+      selectDefaultProvider();
     }
   } catch (reason) {
     error.value = reason instanceof Error ? reason.message : "加载数据失败。";
@@ -136,8 +152,8 @@ function buildTemplatePayload(): AgentRecord | null {
     provider_id: parseProviderId(templateForm.value.provider_id),
     model_id: templateForm.value.model_id.trim() || null,
     system_prompt: systemPrompt,
-    tool_names: parseList(templateForm.value.tool_names),
-    subagent_names: parseList(templateForm.value.subagent_names),
+    tool_names: templateForm.value.tool_names,
+    subagent_names: templateForm.value.subagent_names,
     max_tokens: templateForm.value.max_tokens,
     temperature: templateForm.value.temperature,
     thinking_config: templateForm.value.thinking_enabled
@@ -165,13 +181,6 @@ function parseProviderId(value: string) {
   if (!value) return null;
   const providerId = Number(value);
   return Number.isFinite(providerId) ? providerId : null;
-}
-
-function parseList(value: string) {
-  return value
-    .split(/[\n,]/)
-    .map((item) => item.trim())
-    .filter(Boolean);
 }
 
 function goBack() {
@@ -220,7 +229,7 @@ watch(
               placeholder="1.0.0"
             />
           </label>
-          <label>
+          <label class="full-field">
             <span>描述</span>
             <TinyInput
               v-model="templateForm.description"
@@ -272,20 +281,26 @@ watch(
               placeholder="例如 glm-4.7"
             />
           </label>
-          <label>
+        </div>
+
+        <div class="config-row">
+          <label class="config-field">
             <span>最大 Tokens</span>
             <TinyNumeric
               v-model="templateForm.max_tokens"
               data-testid="template-max-tokens"
               placeholder="可选"
+              :controls="false"
             />
           </label>
-          <label>
+          <label class="config-field">
             <span>Temperature</span>
             <TinyNumeric
               v-model="templateForm.temperature"
               data-testid="template-temperature"
               placeholder="可选，例如 0.2"
+              :step="0.1"
+              :controls="false"
             />
           </label>
         </div>
@@ -304,23 +319,37 @@ watch(
         <div class="template-form-grid">
           <label>
             <span>工具列表</span>
-            <TinyInput
+            <TinySelect
               v-model="templateForm.tool_names"
+              multiple
+              filterable
               data-testid="template-tools"
-              type="textarea"
-              :rows="3"
-              placeholder="每行一个工具，例如 read"
-            />
+              placeholder="搜索并选择工具"
+            >
+              <TinyOption
+                v-for="item in toolOptions"
+                :key="item.value"
+                :label="item.label"
+                :value="item.value"
+              />
+            </TinySelect>
           </label>
           <label>
             <span>子智能体列表</span>
-            <TinyInput
+            <TinySelect
               v-model="templateForm.subagent_names"
+              multiple
+              filterable
               data-testid="template-subagents"
-              type="textarea"
-              :rows="3"
-              placeholder="每行一个子智能体"
-            />
+              placeholder="搜索并选择子智能体"
+            >
+              <TinyOption
+                v-for="item in subagentOptions"
+                :key="item.value"
+                :label="item.label"
+                :value="item.value"
+              />
+            </TinySelect>
           </label>
         </div>
 
@@ -399,6 +428,7 @@ watch(
 }
 
 .template-form-grid label,
+.config-field,
 .full-field {
   display: flex;
   flex-direction: column;
@@ -406,6 +436,30 @@ watch(
   color: var(--text-secondary);
   font-size: var(--text-xs);
   font-weight: 590;
+}
+
+.full-field {
+  grid-column: 1 / -1;
+}
+
+.config-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-6);
+  padding: var(--space-2) 0;
+}
+
+.config-field {
+  min-width: 200px;
+  flex: 1;
+}
+
+:deep(.tiny-numeric) {
+  width: 100%;
+}
+
+:deep(.tiny-numeric__input-inner) {
+  text-align: left;
 }
 
 .switch-row,
@@ -443,6 +497,11 @@ watch(
 @media (max-width: 960px) {
   .template-form-grid {
     grid-template-columns: 1fr;
+  }
+
+  .config-row {
+    flex-direction: column;
+    gap: var(--space-4);
   }
 }
 </style>
