@@ -7,9 +7,9 @@ import {
   type RuntimeEventSubscription,
 } from "@/lib/api";
 
-type ToolActivityStatus = "running" | "success" | "error";
+export type ToolActivityStatus = "running" | "success" | "error";
 
-interface ToolActivity {
+export interface ToolActivity {
   id: string;
   name: string;
   status: ToolActivityStatus;

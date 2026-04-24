@@ -1,7 +1,7 @@
 # ArgusWing 管理控制台设计系统
 
 **日期：** 2026-04-23
-**版本：** Phase 7
+**版本：** Phase 8
 
 ## 1. 设计原则
 
@@ -275,6 +275,7 @@ Inter Variable, "Noto Sans SC", "PingFang SC", system-ui, sans-serif
 - 流式反馈：优先订阅 thread event SSE，将 `content_delta` / `reasoning_delta` 累积在同一个 pending assistant bubble；事件流不可用时降级为短轮询刷新
 - 运行活动：thread event SSE 中的工具启动、工具完成、重试和失败事件展示在“本轮运行活动”面板；消息 timeline 仍以 REST snapshot/messages 为事实来源
 - 消息可读性：历史 assistant 消息若仅包含工具调用且正文为空，展示工具调用摘要；不要把真实工具调用回合显示成“消息内容为空”
+- 架构边界：`ChatPage` 只做 API 加载与 session/thread 编排；消息展示映射、运行活动、消息舞台和对话面板拆为独立 composable/组件
 - 空状态：无会话、无线程、无 provider/template 时提供中文引导和可执行按钮
 - 布局：桌面对话 split（左侧上下文区 + 主消息区 + 底部输入区），移动端堆叠为单列
 
