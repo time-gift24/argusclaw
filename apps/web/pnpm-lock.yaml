@@ -17,6 +17,12 @@ importers:
       '@opentiny/tiny-robot-svgs':
         specifier: ^0.4.1
         version: 0.4.1(vue@3.5.33(typescript@5.9.3))
+      '@opentiny/vue-breadcrumb':
+        specifier: ~3.22.0
+        version: 3.22.0
+      '@opentiny/vue-breadcrumb-item':
+        specifier: ~3.22.0
+        version: 3.22.0
       '@opentiny/vue-button':
         specifier: ~3.22.0
         version: 3.22.0
@@ -372,8 +378,14 @@ packages:
   '@opentiny/vue-base-select@3.30.0':
     resolution: {integrity: sha512-RfNrVNbia70eeOtXCBvyFZdTQ3nRivBTCrLN2WlokXkrJ29hnHVKorO1ioVFiWnF4Ods1huyEvB0K/rhebvNJQ==}
 
+  '@opentiny/vue-breadcrumb-item@3.22.0':
+    resolution: {integrity: sha512-eFAoNIUtE0iwEIyRXNzl9qp/wYGzImff6hGElQ2jjd7tzMQgMX82Y4hl3cTuGa0pZrSUEenJrWh0bn3hp8tp6w==}
+
   '@opentiny/vue-breadcrumb-item@3.30.0':
     resolution: {integrity: sha512-YpvFDwsXCORs+P3Ebm8ntiYQlWB8GYfUW3zfg/cfhrZzuWMJUcBvaG7V4KDAm2Q3zLtQ7MC+2s2F/VQ5zZC7RA==}
+
+  '@opentiny/vue-breadcrumb@3.22.0':
+    resolution: {integrity: sha512-nvJhjO7+Hf2/jfAMa2fQ9FFVmHut7N18mSZu3snWbXC1+U6cdbW9UlFyw7TvHB5y9ItrJ+4U/tGB8aekL1BSSA==}
 
   '@opentiny/vue-breadcrumb@3.30.0':
     resolution: {integrity: sha512-DM9gSJxHT5+YI9vsT/Dx6m0B3TAeAV/t88hbAJF+Sr8SbNmrryE0jITZq1lL7Nt0v4TyWlrk2ncbjYI9XAA9Ww==}
@@ -2685,11 +2697,24 @@ snapshots:
       '@opentiny/vue-tooltip': 3.30.0
       '@opentiny/vue-tree': 3.30.0
 
+  '@opentiny/vue-breadcrumb-item@3.22.0':
+    dependencies:
+      '@opentiny/vue-common': 3.22.0
+      '@opentiny/vue-renderless': 3.22.0
+      '@opentiny/vue-theme': 3.22.1
+
   '@opentiny/vue-breadcrumb-item@3.30.0':
     dependencies:
       '@opentiny/vue-common': 3.30.0
       '@opentiny/vue-renderless': 3.30.0
       '@opentiny/vue-theme': 3.30.0
+
+  '@opentiny/vue-breadcrumb@3.22.0':
+    dependencies:
+      '@opentiny/vue-breadcrumb-item': 3.22.0
+      '@opentiny/vue-common': 3.22.0
+      '@opentiny/vue-renderless': 3.22.0
+      '@opentiny/vue-theme': 3.22.1
 
   '@opentiny/vue-breadcrumb@3.30.0':
     dependencies:

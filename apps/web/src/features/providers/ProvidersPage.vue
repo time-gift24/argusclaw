@@ -1,46 +1,19 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { onMounted, ref } from "vue";
+import { useRouter } from "vue-router";
 
-import ProviderForm from "./ProviderForm.vue";
 import { getApiClient, type LlmProviderRecord } from "@/lib/api";
 import { TinyButton, TinyTag } from "@/lib/opentiny";
 
 const api = getApiClient();
-
-function createDraft(overrides: Partial<LlmProviderRecord> = {}): LlmProviderRecord {
-  return {
-    id: 0,
-    kind: "openai-compatible",
-    display_name: "",
-    base_url: "https://api.openai.com/v1",
-    api_key: "",
-    models: ["gpt-4.1"],
-    model_config: {},
-    default_model: "gpt-4.1",
-    is_default: false,
-    extra_headers: {},
-    secret_status: "ready",
-    meta_data: {},
-    ...overrides,
-  };
-}
+const router = useRouter();
 
 const providers = ref<LlmProviderRecord[]>([]);
-const saving = ref(false);
 const loading = ref(true);
 const error = ref("");
 const actionMessage = ref("");
 const testingProviderId = ref<number | null>(null);
 const deletingProviderId = ref<number | null>(null);
-const draft = ref<LlmProviderRecord>(createDraft());
-
-const submitLabel = computed(() => {
-  if (saving.value) {
-    return draft.value.id > 0 ? "更新中…" : "保存中…";
-  }
-
-  return draft.value.id > 0 ? "更新提供方" : "创建提供方";
-});
 
 async function loadProviders() {
   loading.value = true;
@@ -55,33 +28,12 @@ async function loadProviders() {
   }
 }
 
-function resetDraft() {
-  draft.value = createDraft();
+function goToCreate() {
+  router.push("/providers/new");
 }
 
 function editProvider(provider: LlmProviderRecord) {
-  error.value = "";
-  draft.value = createDraft({
-    ...provider,
-    api_key: "",
-  });
-}
-
-async function saveProvider() {
-  saving.value = true;
-  error.value = "";
-  actionMessage.value = "";
-
-  try {
-    await api.saveProvider(draft.value);
-    actionMessage.value = draft.value.id > 0 ? "提供方已更新。" : "提供方已创建。";
-    resetDraft();
-    await loadProviders();
-  } catch (reason) {
-    error.value = reason instanceof Error ? reason.message : "保存提供方失败。";
-  } finally {
-    saving.value = false;
-  }
+  router.push(`/providers/${provider.id}/edit`);
 }
 
 async function testProvider(provider: LlmProviderRecord) {
@@ -104,26 +56,6 @@ async function testProvider(provider: LlmProviderRecord) {
   }
 }
 
-async function testDraftProvider() {
-  if (!api.testProviderDraft) {
-    error.value = "当前 API 客户端不支持临时配置连接测试。";
-    return;
-  }
-
-  testingProviderId.value = 0;
-  error.value = "";
-  actionMessage.value = "";
-
-  try {
-    const result = await api.testProviderDraft(draft.value);
-    actionMessage.value = `当前配置测试：${result.message}`;
-  } catch (reason) {
-    error.value = reason instanceof Error ? reason.message : "当前配置测试失败。";
-  } finally {
-    testingProviderId.value = null;
-  }
-}
-
 async function deleteProvider(provider: LlmProviderRecord) {
   if (!api.deleteProvider) {
     error.value = "当前 API 客户端不支持删除提供方。";
@@ -137,9 +69,6 @@ async function deleteProvider(provider: LlmProviderRecord) {
   try {
     await api.deleteProvider(provider.id);
     actionMessage.value = "提供方已删除。";
-    if (draft.value.id === provider.id) {
-      resetDraft();
-    }
     await loadProviders();
   } catch (reason) {
     error.value = reason instanceof Error ? reason.message : "删除提供方失败。";
@@ -154,7 +83,7 @@ onMounted(() => {
 </script>
 
 <template>
-  <section class="page-grid">
+  <div class="page-container">
     <article class="list-panel">
       <div class="panel-header">
         <div class="panel-header-left">
@@ -171,6 +100,11 @@ onMounted(() => {
           >
             {{ providers.length }} 项
           </TinyTag>
+        </div>
+        <div class="panel-header-right">
+          <TinyButton type="primary" @click="goToCreate">
+            新增提供方
+          </TinyButton>
         </div>
       </div>
 
@@ -193,6 +127,7 @@ onMounted(() => {
         class="empty-state"
       >
         <p>暂无已配置的提供方</p>
+        <TinyButton type="primary" @click="goToCreate">立即创建</TinyButton>
       </div>
 
       <div
@@ -245,66 +180,19 @@ onMounted(() => {
         </div>
       </div>
     </article>
-
-    <article class="form-panel">
-      <div class="panel-header">
-        <h3 class="panel-title">新增提供方</h3>
-        <p class="panel-description">填写下方信息以添加新的模型提供方</p>
-      </div>
-
-      <ProviderForm
-        v-model="draft"
-        :submit-label="submitLabel"
-        @cancel="resetDraft"
-        @submit="saveProvider"
-      />
-
-      <div class="form-extra-actions">
-        <TinyButton
-          data-testid="test-provider-draft"
-          type="default"
-          :disabled="testingProviderId === 0"
-          @click="testDraftProvider"
-        >
-          {{ testingProviderId === 0 ? "测试中" : "测试当前配置" }}
-        </TinyButton>
-      </div>
-
-      <p
-        v-if="error"
-        class="error-message"
-      >
-        {{ error }}
-      </p>
-    </article>
-  </section>
+  </div>
 </template>
 
 <style scoped>
-.page-grid {
-  display: grid;
-  gap: var(--space-5);
-  align-items: start;
+.page-container {
   width: 100%;
 }
 
-.form-panel,
 .list-panel {
   background: var(--surface-base);
   border: 1px solid var(--border-default);
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-xs);
-  transition: border-color var(--transition-base);
-}
-
-.form-panel {
-  width: 100%;
-  padding: var(--space-5);
-  display: grid;
-  gap: var(--space-5);
-}
-
-.list-panel {
   padding: var(--space-5);
   display: grid;
   gap: var(--space-4);
@@ -312,8 +200,9 @@ onMounted(() => {
 
 .panel-header {
   display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
 }
 
 .panel-header-left {
@@ -327,12 +216,6 @@ onMounted(() => {
   font-size: var(--text-base);
   font-weight: 590;
   color: var(--text-primary);
-}
-
-.panel-description {
-  margin: 0;
-  font-size: var(--text-sm);
-  color: var(--text-muted);
 }
 
 .provider-list {
@@ -351,17 +234,11 @@ onMounted(() => {
   background: var(--surface-raised);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
-  transition:
-    border-color var(--transition-base),
-    transform var(--transition-fast);
+  transition: border-color var(--transition-base);
 }
 
 .provider-card:hover {
   border-color: var(--border-default);
-}
-
-.provider-card:active {
-  transform: scale(0.99);
 }
 
 .provider-info {
@@ -372,8 +249,7 @@ onMounted(() => {
   min-width: 0;
 }
 
-.provider-actions,
-.form-extra-actions {
+.provider-actions {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
@@ -410,6 +286,10 @@ onMounted(() => {
   text-align: center;
   color: var(--text-muted);
   font-size: var(--text-sm);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-4);
 }
 
 .error-message {
@@ -430,11 +310,5 @@ onMounted(() => {
   border-radius: var(--radius-md);
   color: var(--success);
   font-size: var(--text-sm);
-}
-
-@media (max-width: 1024px) {
-  .page-grid {
-    grid-template-columns: 1fr;
-  }
 }
 </style>

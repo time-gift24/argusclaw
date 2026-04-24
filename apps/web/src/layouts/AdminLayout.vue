@@ -2,6 +2,7 @@
 import { computed, ref, onMounted } from "vue";
 import { RouterLink, RouterView, useRoute } from "vue-router";
 
+import AppBreadcrumb from "@/components/AppBreadcrumb.vue";
 import { adminNavItems } from "@/app/nav";
 
 const route = useRoute();
@@ -104,7 +105,7 @@ function toggleTheme() {
     <main class="route-shell">
       <section class="route-header">
         <div class="header-content">
-          <p class="header-eyebrow">管理中心</p>
+          <AppBreadcrumb />
           <h2 class="header-title">{{ currentItem.label }}</h2>
           <p class="header-description">
             {{ currentItem.description }}

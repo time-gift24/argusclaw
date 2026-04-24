@@ -12,6 +12,8 @@
     "@opentiny/tiny-robot": "^0.4.1",
     "@opentiny/tiny-robot-kit": "^0.4.1",
     "@opentiny/tiny-robot-svgs": "^0.4.1",
+    "@opentiny/vue-breadcrumb": "~3.22.0",
+    "@opentiny/vue-breadcrumb-item": "~3.22.0",
     "@opentiny/vue-button": "~3.22.0",
     "@opentiny/vue-card": "~3.22.0",
     "@opentiny/vue-col": "~3.22.0",

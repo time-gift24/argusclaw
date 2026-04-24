@@ -1,3 +1,5 @@
+export { default as TinyBreadcrumb } from "@opentiny/vue-breadcrumb";
+export { default as TinyBreadcrumbItem } from "@opentiny/vue-breadcrumb-item";
 export { default as TinyButton } from "@opentiny/vue-button";
 export { default as TinyCard } from "@opentiny/vue-card";
 export { default as TinyCol } from "@opentiny/vue-col";

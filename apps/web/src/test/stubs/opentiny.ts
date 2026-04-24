@@ -1,3 +1,5 @@
+export { default as TinyBreadcrumb } from "./opentiny-container";
+export { default as TinyBreadcrumbItem } from "./opentiny-container";
 export { default as TinyButton } from "./opentiny-button";
 export { default as TinyCard } from "./opentiny-container";
 export { default as TinyCol } from "./opentiny-container";
