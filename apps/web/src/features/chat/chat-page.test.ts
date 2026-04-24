@@ -423,6 +423,80 @@ describe("ChatPage", () => {
     expect((wrapper.get('input[name="session-name"]').element as HTMLInputElement).value).toBe("新的 Web 对话");
   });
 
+  it("renders streaming tool activity and retry status while a thread is running", async () => {
+    const streamHandlers: ChatThreadEventHandlers[] = [];
+    const subscribeChatThread = vi.fn(
+      (_sessionId: string, _threadId: string, handlers: ChatThreadEventHandlers): RuntimeEventSubscription => {
+        streamHandlers.push(handlers);
+        return { close: vi.fn() };
+      },
+    );
+
+    setApiClient(
+      makeApiClient({
+        listChatSessions: vi.fn().mockResolvedValue([session()]),
+        listChatThreads: vi.fn().mockResolvedValue([thread()]),
+        listChatMessages: vi.fn().mockResolvedValue([]),
+        subscribeChatThread,
+      }),
+    );
+
+    const wrapper = mount(ChatPage);
+    await flushPromises();
+
+    const handlers = streamHandlers[0];
+    if (!handlers) {
+      throw new Error("chat event handlers should be registered");
+    }
+
+    handlers.onEvent({
+      session_id: "session-1",
+      thread_id: "thread-1",
+      turn_number: 1,
+      payload: {
+        type: "tool_started",
+        tool_call_id: "call-1",
+        tool_name: "scheduler",
+        arguments: { action: "list_subagents" },
+      },
+    });
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("本轮运行活动");
+    expect(wrapper.text()).toContain("scheduler");
+    expect(wrapper.text()).toContain("运行中");
+    expect(wrapper.text()).toContain("list_subagents");
+
+    handlers.onEvent({
+      session_id: "session-1",
+      thread_id: "thread-1",
+      turn_number: 1,
+      payload: {
+        type: "retry_attempt",
+        attempt: 1,
+        max_retries: 3,
+        error: "temporary provider failure",
+      },
+    });
+    handlers.onEvent({
+      session_id: "session-1",
+      thread_id: "thread-1",
+      turn_number: 1,
+      payload: {
+        type: "tool_completed",
+        tool_call_id: "call-1",
+        tool_name: "scheduler",
+        result: { ok: true },
+        is_error: false,
+      },
+    });
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("重试 1/3：temporary provider failure");
+    expect(wrapper.text()).toContain("完成");
+    expect(wrapper.text()).toContain('"ok": true');
+  });
+
   it("shows starter prompts and applies a prompt to the sender", async () => {
     setApiClient(
       makeApiClient({

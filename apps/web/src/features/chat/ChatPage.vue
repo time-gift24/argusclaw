@@ -65,6 +65,18 @@ const actionMessage = ref("");
 const error = ref("");
 const activeBinding = ref<ChatThreadBinding | null>(null);
 const streamSubscription = ref<RuntimeEventSubscription | null>(null);
+const runtimeActivities = ref<ToolActivity[]>([]);
+const runtimeNotice = ref("");
+
+type ToolActivityStatus = "running" | "success" | "error";
+
+interface ToolActivity {
+  id: string;
+  name: string;
+  status: ToolActivityStatus;
+  argumentsPreview: string;
+  resultPreview: string;
+}
 
 const activeSession = computed(() => sessions.value.find((session) => session.id === activeSessionId.value) ?? null);
 const activeThread = computed(() => threads.value.find((thread) => thread.id === activeThreadId.value) ?? null);
@@ -222,6 +234,7 @@ async function selectSession(sessionId: string) {
   activeThreadId.value = "";
   messages.value = [];
   activeBinding.value = null;
+  resetRuntimeActivity();
   const session = sessions.value.find((item) => item.id === sessionId);
   if (session) {
     sessionName.value = formatSessionName(session);
@@ -245,6 +258,7 @@ async function selectThread(threadId: string) {
   streaming.value = false;
   closeThreadEvents();
   activeThreadId.value = threadId;
+  resetRuntimeActivity();
   const thread = threads.value.find((item) => item.id === threadId);
   threadTitle.value = thread?.title ?? "新的对话线程";
   await refreshActiveThread();
@@ -285,6 +299,7 @@ function startNewChatDraft() {
   activeBinding.value = null;
   messages.value = [];
   threads.value = [];
+  resetRuntimeActivity();
   sessionName.value = "新的 Web 对话";
   threadTitle.value = "新的对话线程";
   actionMessage.value = "已准备新对话草稿，发送第一条消息后会创建会话和线程。";
@@ -414,6 +429,7 @@ async function sendMessage(value: string) {
   streaming.value = true;
   pendingAssistantContent.value = "";
   pendingAssistantReasoning.value = "";
+  resetRuntimeActivity();
   const assistantCountBeforeSend = countAssistantMessages();
   assistantCountAtStreamStart.value = assistantCountBeforeSend;
   messages.value = [...messages.value, createLocalMessage("user", content)];
@@ -553,15 +569,33 @@ function applyThreadEventPayload(payload: ChatThreadEventPayload) {
       break;
     case "retry_attempt":
       actionMessage.value = `正在重试第 ${payload.attempt}/${payload.max_retries} 次：${payload.error}`;
+      runtimeNotice.value = `重试 ${payload.attempt}/${payload.max_retries}：${payload.error}`;
       break;
     case "tool_started":
       streaming.value = true;
+      upsertToolActivity({
+        id: payload.tool_call_id,
+        name: payload.tool_name,
+        status: "running",
+        argumentsPreview: previewValue(payload.arguments),
+        resultPreview: "",
+      });
       if (!pendingAssistantContent.value) {
         pendingAssistantContent.value = `正在调用工具：${payload.tool_name}`;
       }
       break;
+    case "tool_completed":
+      upsertToolActivity({
+        id: payload.tool_call_id,
+        name: payload.tool_name,
+        status: payload.is_error ? "error" : "success",
+        argumentsPreview: "",
+        resultPreview: previewValue(payload.result),
+      });
+      break;
     case "turn_failed":
       streaming.value = false;
+      runtimeNotice.value = `运行失败：${payload.error}`;
       clearPendingAssistant();
       setError(payload.error);
       closeThreadEvents();
@@ -573,6 +607,58 @@ function applyThreadEventPayload(payload: ChatThreadEventPayload) {
       break;
     default:
       break;
+  }
+}
+
+function upsertToolActivity(nextActivity: ToolActivity) {
+  const existingIndex = runtimeActivities.value.findIndex((item) => item.id === nextActivity.id);
+  if (existingIndex === -1) {
+    runtimeActivities.value = [nextActivity, ...runtimeActivities.value];
+    return;
+  }
+
+  const existing = runtimeActivities.value[existingIndex];
+  runtimeActivities.value = runtimeActivities.value.map((item, index) =>
+    index === existingIndex
+      ? {
+          ...existing,
+          ...nextActivity,
+          argumentsPreview: nextActivity.argumentsPreview || existing.argumentsPreview,
+          resultPreview: nextActivity.resultPreview || existing.resultPreview,
+        }
+      : item,
+  );
+}
+
+function resetRuntimeActivity() {
+  runtimeActivities.value = [];
+  runtimeNotice.value = "";
+}
+
+function runtimeActivityStatusLabel(status: ToolActivityStatus) {
+  if (status === "success") {
+    return "完成";
+  }
+  if (status === "error") {
+    return "失败";
+  }
+
+  return "运行中";
+}
+
+function previewValue(value: unknown) {
+  if (value === null || value === undefined) {
+    return "";
+  }
+
+  if (typeof value === "string") {
+    return value;
+  }
+
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
   }
 }
 
@@ -889,6 +975,31 @@ async function callChatApi<K extends keyof ChatApiMethods>(
 
           <div v-if="error" class="notice notice--danger">{{ error }}</div>
           <div v-if="actionMessage" class="notice notice--success">{{ actionMessage }}</div>
+          <div v-if="runtimeNotice || runtimeActivities.length > 0" class="runtime-activity-panel">
+            <div class="runtime-activity-header">
+              <div>
+                <p class="eyebrow">Runtime</p>
+                <strong>本轮运行活动</strong>
+              </div>
+              <TinyTag v-if="runtimeActivities.length > 0" type="info">{{ runtimeActivities.length }} 项</TinyTag>
+            </div>
+            <p v-if="runtimeNotice" class="runtime-notice">{{ runtimeNotice }}</p>
+            <div v-if="runtimeActivities.length > 0" class="tool-activity-list">
+              <article
+                v-for="activity in runtimeActivities"
+                :key="activity.id"
+                class="tool-activity-card"
+                :class="`tool-activity-card--${activity.status}`"
+              >
+                <div class="tool-activity-card__header">
+                  <strong>{{ activity.name }}</strong>
+                  <span>{{ runtimeActivityStatusLabel(activity.status) }}</span>
+                </div>
+                <pre v-if="activity.argumentsPreview">{{ activity.argumentsPreview }}</pre>
+                <pre v-if="activity.resultPreview">{{ activity.resultPreview }}</pre>
+              </article>
+            </div>
+          </div>
 
           <div class="message-stage">
             <div v-if="threadLoading && robotMessages.length === 0" class="empty-state">正在刷新消息…</div>
@@ -1110,6 +1221,79 @@ async function callChatApi<K extends keyof ChatApiMethods>(
   background: var(--success-bg);
   border: 1px solid var(--success-border);
   color: var(--success);
+}
+
+.runtime-activity-panel {
+  display: grid;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  background: var(--surface-base);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+}
+
+.runtime-activity-header,
+.tool-activity-card__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.runtime-activity-header strong,
+.tool-activity-card__header strong {
+  color: var(--text-primary);
+  font-size: var(--text-sm);
+}
+
+.runtime-notice {
+  margin: 0;
+  color: var(--warning);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+}
+
+.tool-activity-list {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.tool-activity-card {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  background: var(--surface-overlay);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+}
+
+.tool-activity-card--running {
+  border-color: rgba(94, 106, 210, 0.35);
+}
+
+.tool-activity-card--success {
+  border-color: var(--success-border);
+}
+
+.tool-activity-card--error {
+  border-color: var(--danger-border);
+}
+
+.tool-activity-card__header span {
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  font-weight: 590;
+}
+
+.tool-activity-card pre {
+  max-height: 160px;
+  margin: 0;
+  overflow: auto;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  white-space: pre-wrap;
 }
 
 .message-stage {
