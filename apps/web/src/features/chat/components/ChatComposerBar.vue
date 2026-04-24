@@ -33,13 +33,28 @@ interface Emits {
 const props = defineProps<Props>();
 const emit = defineEmits<Emits>();
 
+type SelectValue = string | number | null | undefined;
+
 const templateOptions = computed(() =>
-  props.templates.map((t) => ({ label: t.display_name, value: t.id })),
+  props.templates.map((t) => ({ label: t.display_name, value: String(t.id) })),
 );
 
 const providerOptions = computed(() =>
-  props.providers.map((p) => ({ label: p.display_name, value: p.id })),
+  props.providers.map((p) => ({ label: p.display_name, value: String(p.id) })),
 );
+
+const selectedTemplateValue = computed(() => toSelectValue(props.selectedTemplateId));
+const selectedProviderValue = computed(() => toSelectValue(props.selectedProviderId));
+
+function toSelectValue(value: number | null) {
+  return value === null ? "" : String(value);
+}
+
+function parseSelectId(value: SelectValue) {
+  if (value === null || value === undefined || value === "") return null;
+  const next = Number(value);
+  return Number.isFinite(next) ? next : null;
+}
 
 function handleSubmit(text: string) {
   emit("submit", text);
@@ -49,13 +64,14 @@ function handleCancel() {
   emit("cancel");
 }
 
-function handleTemplateChange(value: number | null) {
-  emit("update:selectedTemplateId", value);
+function handleTemplateChange(value: SelectValue) {
+  emit("update:selectedTemplateId", parseSelectId(value));
 }
 
-function handleProviderChange(value: number | null) {
-  emit("update:selectedProviderId", value);
-  const provider = props.providers.find((p) => p.id === value);
+function handleProviderChange(value: SelectValue) {
+  const providerId = parseSelectId(value);
+  emit("update:selectedProviderId", providerId);
+  const provider = props.providers.find((p) => p.id === providerId);
   if (provider) {
     emit("update:selectedModel", provider.default_model);
   }
@@ -75,7 +91,7 @@ function handleModelChange(value: string) {
         <div class="composer-bar__control-group">
           <label class="composer-bar__control-label">智能体</label>
           <TinySelect
-            :model-value="selectedTemplateId"
+            :model-value="selectedTemplateValue"
             placeholder="选择模板"
             size="small"
             @update:model-value="handleTemplateChange"
@@ -93,7 +109,7 @@ function handleModelChange(value: string) {
         <div class="composer-bar__control-group">
           <label class="composer-bar__control-label">提供方</label>
           <TinySelect
-            :model-value="selectedProviderId"
+            :model-value="selectedProviderValue"
             placeholder="选择提供方"
             size="small"
             @update:model-value="handleProviderChange"

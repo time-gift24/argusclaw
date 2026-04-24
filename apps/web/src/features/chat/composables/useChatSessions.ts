@@ -4,9 +4,9 @@ import {
   type ChatSessionSummary,
   type ChatThreadSummary,
   type ChatThreadBinding,
+  type ChatSessionPayload,
   type ApiClient,
 } from "@/lib/api";
-
 
 type ChatApiMethods = Required<
   Pick<
@@ -24,26 +24,6 @@ type ChatApiMethods = Required<
     | "activateChatThread"
   >
 >;
-
-const sessions = ref<ChatSessionSummary[]>([]);
-const threads = ref<ChatThreadSummary[]>([]);
-const activeSessionId = ref("");
-const activeThreadId = ref("");
-const activeBinding = ref<ChatThreadBinding | null>(null);
-const loading = ref(true);
-const threadLoading = ref(false);
-const creatingThread = ref(false);
-const deleting = ref(false);
-const sessionName = ref("新的 Web 对话");
-const threadTitle = ref("新的对话线程");
-
-const hasActiveThread = computed(() => Boolean(activeSessionId.value && activeThreadId.value));
-const activeSession = computed(() => sessions.value.find((s) => s.id === activeSessionId.value) ?? null);
-const activeThread = computed(() => threads.value.find((t) => t.id === activeThreadId.value) ?? null);
-const stats = computed(() => ({
-  sessions: sessions.value.length,
-  threads: threads.value.length,
-}));
 
 function formatSessionName(session: ChatSessionSummary) {
   const name = session.name.trim();
@@ -77,6 +57,26 @@ async function callChatApi<K extends keyof ChatApiMethods>(
 }
 
 export function useChatSessions() {
+  const sessions = ref<ChatSessionSummary[]>([]);
+  const threads = ref<ChatThreadSummary[]>([]);
+  const activeSessionId = ref("");
+  const activeThreadId = ref("");
+  const activeBinding = ref<ChatThreadBinding | null>(null);
+  const loading = ref(true);
+  const threadLoading = ref(false);
+  const creatingThread = ref(false);
+  const deleting = ref(false);
+  const sessionName = ref("新的 Web 对话");
+  const threadTitle = ref("新的对话线程");
+
+  const hasActiveThread = computed(() => Boolean(activeSessionId.value && activeThreadId.value));
+  const activeSession = computed(() => sessions.value.find((s) => s.id === activeSessionId.value) ?? null);
+  const activeThread = computed(() => threads.value.find((t) => t.id === activeThreadId.value) ?? null);
+  const stats = computed(() => ({
+    sessions: sessions.value.length,
+    threads: threads.value.length,
+  }));
+
   async function loadInitialState() {
     loading.value = true;
     try {
@@ -206,7 +206,7 @@ export function useChatSessions() {
     threadTitle.value = "新的对话线程";
   }
 
-  function applyChatSessionPayload(payload: import("@/lib/api").ChatSessionPayload) {
+  function applyChatSessionPayload(payload: ChatSessionPayload) {
     activeSessionId.value = payload.session_id;
     activeThreadId.value = payload.thread_id;
     activeBinding.value = {

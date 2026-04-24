@@ -43,6 +43,8 @@ const chatComposer = useChatComposer({
   refreshStreamUntilSettled: chatThreadStream.refreshStreamUntilSettled,
   countAssistantMessages: chatThreadStream.countAssistantMessages,
   clearPendingAssistant: chatThreadStream.clearPendingAssistant,
+  streaming: chatThreadStream.streaming,
+  assistantCountAtStreamStart: chatThreadStream.assistantCountAtStreamStart,
   messages: chatThreadStream.messages,
 });
 
@@ -123,14 +125,18 @@ onBeforeUnmount(() => {
 
 async function loadInitialState() {
   const api = getApiClient();
+  const loadErrors: string[] = [];
   chatSessions.loading.value = true;
+  chatComposer.error.value = "";
   try {
     const [providersResult, templatesResult] = await Promise.allSettled([
       api.listProviders(),
       api.listTemplates(),
     ]);
     if (providersResult.status === "fulfilled") providers.value = providersResult.value;
+    else loadErrors.push(`模型提供方加载失败：${formatErrorMessage(providersResult.reason)}`);
     if (templatesResult.status === "fulfilled") templates.value = templatesResult.value;
+    else loadErrors.push(`智能体模板加载失败：${formatErrorMessage(templatesResult.reason)}`);
 
     const firstProvider = providers.value.find((p) => p.is_default) ?? providers.value[0] ?? null;
     const firstTemplate = templates.value[0] ?? null;
@@ -138,10 +144,25 @@ async function loadInitialState() {
     selectedModel.value = firstProvider?.default_model ?? "";
     selectedTemplateId.value = firstTemplate?.id ?? null;
 
-    await chatSessions.loadInitialState();
+    try {
+      await chatSessions.loadInitialState();
+      if (chatSessions.activeSessionId.value && chatSessions.activeThreadId.value) {
+        await chatThreadStream.refreshActiveThread({ silent: true });
+      }
+    } catch (reason) {
+      loadErrors.push(`对话会话加载失败：${formatErrorMessage(reason)}`);
+    }
+
+    if (loadErrors.length > 0) {
+      chatComposer.error.value = loadErrors.join("；");
+    }
   } finally {
     chatSessions.loading.value = false;
   }
+}
+
+function formatErrorMessage(reason: unknown) {
+  return reason instanceof Error ? reason.message : String(reason);
 }
 
 // When a thread is selected via sessions, open its events stream

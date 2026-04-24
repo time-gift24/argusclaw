@@ -158,6 +158,7 @@ function makeApiClient(overrides: Partial<ApiClient> = {}): ApiClient {
 
 afterEach(() => {
   resetApiClient();
+  document.body.innerHTML = "";
 });
 
 describe("ChatPage", () => {
@@ -188,6 +189,23 @@ describe("ChatPage", () => {
     expect(wrapper.find(".composer-bar").exists()).toBe(true);
   });
 
+  it("passes string values to OpenTiny selects in the composer", async () => {
+    setApiClient(
+      makeApiClient({
+        listChatSessions: vi.fn().mockResolvedValue([]),
+        listTemplates: vi.fn().mockResolvedValue([template()]),
+        listProviders: vi.fn().mockResolvedValue([provider()]),
+      }),
+    );
+    const wrapper = mount(ChatPage);
+    await flushPromises();
+
+    const selects = wrapper.findAllComponents({ name: "OpenTinySelectStub" });
+    expect(selects).toHaveLength(2);
+    expect(selects[0].props("modelValue")).toBe("3");
+    expect(selects[1].props("modelValue")).toBe("7");
+  });
+
   it("opens history dialog when clicking the history button", async () => {
     setApiClient(
       makeApiClient({
@@ -212,6 +230,84 @@ describe("ChatPage", () => {
     expect(dialog?.textContent).toContain("会话列表");
     expect(dialog?.textContent).toContain("默认会话");
     expect(dialog?.textContent).toContain("另一个会话");
+  });
+
+  it("closes history dialog after selecting a thread", async () => {
+    setApiClient(
+      makeApiClient({
+        listChatSessions: vi.fn().mockResolvedValue([session()]),
+        listChatThreads: vi.fn().mockResolvedValue([thread({ id: "thread-2", title: "二号线程" })]),
+        listChatMessages: vi.fn().mockResolvedValue([]),
+      }),
+    );
+    const wrapper = mount(ChatPage);
+    await flushPromises();
+
+    const historyBtn = wrapper.findAll("button").find((b) => b.text().includes("历史"));
+    await historyBtn!.trigger("click");
+    await flushPromises();
+
+    const threadButton = Array.from(document.querySelectorAll(".history-dialog__session-item")).find((item) =>
+      item.textContent?.includes("二号线程"),
+    ) as HTMLElement | undefined;
+    expect(threadButton).toBeDefined();
+    threadButton!.click();
+    await flushPromises();
+
+    expect(document.querySelector(".history-dialog")).toBeNull();
+  });
+
+  it("shows an error state when chat sessions fail to load", async () => {
+    setApiClient(
+      makeApiClient({
+        listChatSessions: vi.fn().mockRejectedValue(new Error("Request failed: 502")),
+      }),
+    );
+    const wrapper = mount(ChatPage);
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("对话会话加载失败：Request failed: 502");
+  });
+
+  it("keeps polling after stream settles until a new assistant reply appears", async () => {
+    let handlers: ChatThreadEventHandlers | undefined;
+    const oldAssistant = message("assistant", "旧回复");
+    const newAssistant = message("assistant", "新回复");
+    const listChatMessages = vi
+      .fn()
+      .mockResolvedValueOnce([oldAssistant])
+      .mockResolvedValueOnce([oldAssistant])
+      .mockResolvedValueOnce([oldAssistant, newAssistant]);
+
+    setApiClient(
+      makeApiClient({
+        listChatSessions: vi.fn().mockResolvedValue([session()]),
+        listChatThreads: vi.fn().mockResolvedValue([thread()]),
+        listChatMessages,
+        subscribeChatThread: vi.fn((_sessionId, _threadId, nextHandlers) => {
+          handlers = nextHandlers;
+          return { close: vi.fn() } as RuntimeEventSubscription;
+        }),
+      }),
+    );
+    const wrapper = mount(ChatPage);
+    await flushPromises();
+
+    await wrapper.get("[data-testid='chat-input']").setValue("继续");
+    await wrapper.get("[data-testid='chat-input']").trigger("keydown", { key: "Enter" });
+    await flushPromises();
+
+    expect(handlers).toBeDefined();
+    handlers!.onEvent({
+      session_id: "session-1",
+      thread_id: "thread-1",
+      turn_number: null,
+      payload: { type: "turn_settled" },
+    });
+    await flushPromises();
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("新回复");
   });
 
   it("shows appropriate placeholder when no active thread vs when thread is active", async () => {

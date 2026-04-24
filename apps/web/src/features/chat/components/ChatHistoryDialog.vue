@@ -220,7 +220,7 @@ function closeDialog() {
                   :key="thread.id"
                   class="history-dialog__session-item"
                   :class="{ active: thread.id === activeThreadId && selectedSessionId === activeSessionId }"
-                  @click="emit('selectThread', selectedSessionId!, thread.id)"
+                  @click="handleSelectThread(selectedSessionId!, thread.id)"
                 >
                   <div class="history-dialog__session-info">
                     <span class="history-dialog__session-name">

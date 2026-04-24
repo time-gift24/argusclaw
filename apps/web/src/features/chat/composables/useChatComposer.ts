@@ -27,6 +27,8 @@ export interface UseChatComposerOptions {
   refreshStreamUntilSettled: (assistantCountBeforeSend: number) => Promise<void>;
   countAssistantMessages: () => number;
   clearPendingAssistant: () => void;
+  streaming: Ref<boolean>;
+  assistantCountAtStreamStart: Ref<number>;
   messages: Ref<import("@/lib/api").ChatMessageRecord[]>;
 }
 
@@ -52,6 +54,8 @@ export function useChatComposer(options: UseChatComposerOptions) {
     refreshStreamUntilSettled,
     countAssistantMessages,
     clearPendingAssistant,
+    streaming,
+    assistantCountAtStreamStart,
     messages,
   } = options;
 
@@ -126,6 +130,9 @@ export function useChatComposer(options: UseChatComposerOptions) {
     resetRuntimeActivity();
 
     const assistantCountBeforeSend = countAssistantMessages();
+    assistantCountAtStreamStart.value = assistantCountBeforeSend;
+    streaming.value = true;
+    clearPendingAssistant();
     messages.value = [...messages.value, createLocalMessage("user", content)];
     try {
       const target = await ensureActiveChatThread();
@@ -137,6 +144,8 @@ export function useChatComposer(options: UseChatComposerOptions) {
       }
       actionMessage.value = "消息已提交，正在等待流式结果。";
     } catch (reason) {
+      streaming.value = false;
+      clearPendingAssistant();
       setError(reason);
       actionMessage.value = "";
     } finally {
