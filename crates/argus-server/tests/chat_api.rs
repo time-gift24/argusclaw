@@ -53,6 +53,7 @@ async fn chat_session_route_materializes_session_and_thread_like_desktop() {
         .post_json(
             "/api/v1/chat/sessions/with-thread",
             &json!({
+                "name": "Web Draft",
                 "template_id": template.id,
                 "provider_id": provider.id,
                 "model": "alpha"
@@ -75,6 +76,15 @@ async fn chat_session_route_materializes_session_and_thread_like_desktop() {
     let thread_id = created.item["thread_id"]
         .as_str()
         .expect("thread_id should be a string");
+
+    let sessions_response = ctx.get("/api/v1/chat/sessions").await;
+    assert_eq!(sessions_response.status(), StatusCode::OK);
+    let sessions: Vec<SessionSummary> = support::json_body(sessions_response).await;
+    assert!(
+        sessions
+            .iter()
+            .any(|session| session.id.to_string() == session_id && session.name == "Web Draft")
+    );
 
     let threads_response = ctx
         .get(&format!("/api/v1/chat/sessions/{session_id}/threads"))
@@ -111,6 +121,15 @@ async fn chat_thread_events_route_opens_stream_for_materialized_thread() {
     let thread_id = created.item["thread_id"]
         .as_str()
         .expect("thread_id should be a string");
+
+    let sessions_response = ctx.get("/api/v1/chat/sessions").await;
+    assert_eq!(sessions_response.status(), StatusCode::OK);
+    let sessions: Vec<SessionSummary> = support::json_body(sessions_response).await;
+    assert!(
+        sessions
+            .iter()
+            .any(|session| session.id.to_string() == session_id && session.name == "Web Chat")
+    );
 
     let response = ctx
         .get(&format!(

@@ -490,11 +490,12 @@ impl ServerCore {
 
     pub async fn create_chat_session_with_thread(
         &self,
+        session_name: String,
         template_id: AgentId,
         provider_id: Option<ProviderId>,
         model: Option<String>,
     ) -> Result<ChatSessionPayload> {
-        let session_id = self.session_manager.create(String::new()).await?;
+        let session_id = self.session_manager.create(session_name).await?;
         let thread_id = self
             .session_manager
             .create_thread(session_id, template_id, provider_id, model.as_deref())

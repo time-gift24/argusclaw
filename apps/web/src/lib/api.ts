@@ -270,7 +270,9 @@ export interface CreateChatThreadRequest {
   model: string | null;
 }
 
-export type CreateChatSessionWithThreadRequest = CreateChatThreadRequest;
+export interface CreateChatSessionWithThreadRequest extends CreateChatThreadRequest {
+  name?: string | null;
+}
 
 export interface UpdateChatThreadModelRequest {
   provider_id: number;

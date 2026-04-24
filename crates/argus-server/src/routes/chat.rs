@@ -60,6 +60,7 @@ pub struct ChatActionResponse {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateSessionWithThreadRequest {
+    pub name: Option<String>,
     pub template_id: i64,
     pub provider_id: Option<i64>,
     pub model: Option<String>,
@@ -529,6 +530,7 @@ pub async fn create_session_with_thread(
     let payload = state
         .core()
         .create_chat_session_with_thread(
+            normalize_optional_string(request.name).unwrap_or_else(|| "Web Chat".to_string()),
             AgentId::new(request.template_id),
             request.provider_id.map(ProviderId::new),
             normalize_optional_string(request.model),

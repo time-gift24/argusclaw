@@ -81,7 +81,11 @@ function thread(overrides: Partial<ChatThreadSummary> = {}): ChatThreadSummary {
   };
 }
 
-function message(role: ChatMessageRecord["role"], content: string): ChatMessageRecord {
+function message(
+  role: ChatMessageRecord["role"],
+  content: string,
+  overrides: Partial<ChatMessageRecord> = {},
+): ChatMessageRecord {
   return {
     role,
     content,
@@ -91,6 +95,7 @@ function message(role: ChatMessageRecord["role"], content: string): ChatMessageR
     name: null,
     tool_calls: null,
     metadata: null,
+    ...overrides,
   };
 }
 
@@ -230,6 +235,7 @@ describe("ChatPage", () => {
     const createChatSessionWithThread = vi
       .fn<
         (input: {
+          name: string;
           template_id: number;
           provider_id: number | null;
           model: string | null;
@@ -306,6 +312,7 @@ describe("ChatPage", () => {
     await flushPromises();
 
     expect(createChatSessionWithThread).toHaveBeenCalledWith({
+      name: "新的 Web 对话",
       template_id: 9,
       provider_id: 7,
       model: "glm-4.7",
@@ -383,6 +390,37 @@ describe("ChatPage", () => {
     expect(wrapper.text()).toContain("适合日常问答和轻量任务。");
     expect((wrapper.get('[data-testid="conversation-template-select"]').element as HTMLSelectElement).value).toBe("3");
     expect((wrapper.get('select[name="provider"]').element as HTMLSelectElement).value).toBe("7");
+  });
+
+  it("renders legacy blank sessions and assistant tool calls with useful labels", async () => {
+    setApiClient(
+      makeApiClient({
+        listChatSessions: vi.fn().mockResolvedValue([session({ id: "session-empty-name", name: "" })]),
+        listChatThreads: vi.fn().mockResolvedValue([thread({ id: "thread-empty-title", title: null })]),
+        listChatMessages: vi.fn().mockResolvedValue([
+          message("assistant", "", {
+            tool_calls: [
+              {
+                id: "call-1",
+                name: "scheduler",
+                arguments: { action: "list_subagents" },
+              },
+            ],
+          }),
+        ]),
+      }),
+    );
+
+    const wrapper = mount(ChatPage);
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("会话 session-");
+    expect(wrapper.text()).toContain("线程 thread-e");
+    expect(wrapper.text()).toContain("正在调用工具：scheduler");
+    expect(wrapper.text()).not.toContain("消息内容为空。");
+
+    await wrapper.get('[data-testid="create-session"]').trigger("click");
+    expect((wrapper.get('input[name="session-name"]').element as HTMLInputElement).value).toBe("新的 Web 对话");
   });
 
   it("shows starter prompts and applies a prompt to the sender", async () => {

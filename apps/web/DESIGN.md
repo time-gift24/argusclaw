@@ -1,7 +1,7 @@
 # ArgusWing 管理控制台设计系统
 
 **日期：** 2026-04-23
-**版本：** Phase 5C
+**版本：** Phase 6
 
 ## 1. 设计原则
 
@@ -270,7 +270,9 @@ Inter Variable, "Noto Sans SC", "PingFang SC", system-ui, sans-serif
 - OpenTiny 控件：会话/线程创建、删除、刷新、模板/提供方/模型选择、状态反馈继续使用 OpenTiny Vue
 - 交互边界：通过 Phase 5 API 创建 session/thread、发送消息、取消运行、刷新消息，不使用 desktop chat store
 - 创建语义：首次发送时按 desktop 语义一次性创建 session + thread，并使用当前模板、提供方和模型绑定
+- 会话命名：首次发送创建 session + thread 时必须带上当前草稿会话名；历史空名称会话用 `会话 <id-prefix>` 展示，不能渲染成空白条目
 - 流式反馈：优先订阅 thread event SSE，将 `content_delta` / `reasoning_delta` 累积在同一个 pending assistant bubble；事件流不可用时降级为短轮询刷新
+- 消息可读性：历史 assistant 消息若仅包含工具调用且正文为空，展示工具调用摘要；不要把真实工具调用回合显示成“消息内容为空”
 - 空状态：无会话、无线程、无 provider/template 时提供中文引导和可执行按钮
 - 布局：桌面对话 split（左侧上下文区 + 主消息区 + 底部输入区），移动端堆叠为单列
 
@@ -303,7 +305,7 @@ Inter Variable, "Noto Sans SC", "PingFang SC", system-ui, sans-serif
 - `GET /api/v1/runtime/events` - 运行时事件流（SSE）
 - `GET /api/v1/chat/sessions` - 对话会话列表
 - `POST /api/v1/chat/sessions` - 创建对话会话
-- `POST /api/v1/chat/sessions/with-thread` - 按 desktop 语义创建会话并创建/激活首个线程
+- `POST /api/v1/chat/sessions/with-thread` - 按 desktop 语义创建会话并创建/激活首个线程，支持可选 `name`
 - `PATCH /api/v1/chat/sessions/:session_id` - 重命名对话会话
 - `DELETE /api/v1/chat/sessions/:session_id` - 删除对话会话
 - `GET /api/v1/chat/sessions/:session_id/threads` - 会话线程列表

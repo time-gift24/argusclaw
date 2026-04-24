@@ -92,7 +92,7 @@ const robotMessages = computed(() => {
     .filter((message) => message.role !== "system")
     .map((message) => ({
       role: message.role,
-      content: message.content || emptyContentForRole(message.role),
+      content: displayMessageContent(message),
     }));
 
   if (streaming.value && (hasActiveThread.value || nextMessages.length > 0)) {
@@ -224,7 +224,7 @@ async function selectSession(sessionId: string) {
   activeBinding.value = null;
   const session = sessions.value.find((item) => item.id === sessionId);
   if (session) {
-    sessionName.value = session.name;
+    sessionName.value = formatSessionName(session);
   }
   await refreshThreads();
   if (threads.value.length > 0) {
@@ -285,6 +285,7 @@ function startNewChatDraft() {
   activeBinding.value = null;
   messages.value = [];
   threads.value = [];
+  sessionName.value = "新的 Web 对话";
   threadTitle.value = "新的对话线程";
   actionMessage.value = "已准备新对话草稿，发送第一条消息后会创建会话和线程。";
   error.value = "";
@@ -460,6 +461,7 @@ async function ensureActiveChatThread() {
 
   const providerId = selectedProviderId.value === null ? null : Number(selectedProviderId.value);
   const payload = await callChatApi("createChatSessionWithThread", {
+    name: normalizedSessionName(),
     template_id: Number(selectedTemplateId.value),
     provider_id: Number.isFinite(providerId) ? providerId : null,
     model: selectedModel.value || activeProvider.value?.default_model || null,
@@ -687,6 +689,56 @@ function emptyContentForRole(role: ChatMessageRecord["role"]) {
   return "消息内容为空。";
 }
 
+function displayMessageContent(message: ChatMessageRecord) {
+  const content = message.content?.trim();
+  if (content) {
+    return message.content;
+  }
+
+  if (message.role === "assistant") {
+    const names = toolCallNames(message.tool_calls);
+    if (names.length > 0) {
+      return `正在调用工具：${names.join("、")}`;
+    }
+
+    if (message.reasoning_content?.trim()) {
+      return "助手正在思考，等待可见回复。";
+    }
+  }
+
+  if (message.role === "tool" && message.name?.trim()) {
+    return `工具 ${message.name} 返回为空。`;
+  }
+
+  return emptyContentForRole(message.role);
+}
+
+function toolCallNames(toolCalls: unknown[] | null | undefined) {
+  if (!Array.isArray(toolCalls)) {
+    return [];
+  }
+
+  return toolCalls
+    .map((toolCall) => {
+      if (!toolCall || typeof toolCall !== "object" || !("name" in toolCall)) {
+        return "";
+      }
+
+      const name = (toolCall as { name?: unknown }).name;
+      return typeof name === "string" ? name.trim() : "";
+    })
+    .filter((name) => name.length > 0);
+}
+
+function normalizedSessionName() {
+  return sessionName.value.trim() || "新的 Web 对话";
+}
+
+function formatSessionName(session: ChatSessionSummary) {
+  const name = session.name.trim();
+  return name || `会话 ${session.id.slice(0, 8)}`;
+}
+
 function formatThreadTitle(thread: ChatThreadSummary) {
   return thread.title || `线程 ${thread.id.slice(0, 8)}`;
 }
@@ -756,7 +808,7 @@ async function callChatApi<K extends keyof ChatApiMethods>(
               type="button"
               @click="selectSession(sessionItem.id)"
             >
-              <span>{{ sessionItem.name }}</span>
+              <span>{{ formatSessionName(sessionItem) }}</span>
               <small>{{ sessionItem.thread_count }} 线程 · {{ formatDate(sessionItem.updated_at) }}</small>
             </button>
           </div>
