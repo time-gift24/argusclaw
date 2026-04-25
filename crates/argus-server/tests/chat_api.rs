@@ -1,10 +1,13 @@
 mod support;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use argus_protocol::ThreadId;
 use argus_protocol::llm::ModelConfig;
-use argus_protocol::{AgentRecord, LlmProviderKind, LlmProviderRecordJson, ProviderSecretStatus};
+use argus_protocol::{
+    AgentRecord, LlmProviderKind, LlmProviderRecordJson, McpServerRecord, McpServerStatus,
+    McpTransportConfig, ProviderSecretStatus,
+};
 use argus_server::response::MutationResponse;
 use argus_session::{SessionSummary, ThreadSummary};
 use axum::http::StatusCode;
@@ -121,6 +124,74 @@ async fn agent_run_routes_do_not_treat_chat_thread_ids_as_run_ids() {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
     let body: serde_json::Value = support::json_body(response).await;
     assert_eq!(body["error"]["code"], "not_found");
+}
+
+#[tokio::test]
+async fn agent_run_accepts_runtime_mcp_headers_without_exposing_them() {
+    let ctx = support::TestContext::new().await;
+    let _provider = create_test_provider(&ctx).await;
+    let template = first_template(&ctx).await;
+    let mcp_server = create_http_mcp_server(&ctx, "tenant-mcp").await;
+    let mcp_server_id = mcp_server.id.expect("created MCP server should have id");
+
+    let response = ctx
+        .post_json(
+            "/api/v1/agents/runs",
+            &json!({
+                "agent_id": template.id,
+                "prompt": "Use tenant MCP",
+                "mcp_headers": {
+                    mcp_server_id.to_string(): {
+                        "Authorization": "Bearer runtime",
+                        "X-Tenant-ID": "tenant-a"
+                    }
+                }
+            }),
+        )
+        .await;
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let body: serde_json::Value = support::json_body(response).await;
+    assert!(body["data"]["run_id"].as_str().is_some());
+    let serialized = body.to_string();
+    assert!(!serialized.contains("Bearer runtime"));
+    assert!(!serialized.contains("tenant-a"));
+}
+
+#[tokio::test]
+async fn agent_run_rejects_runtime_mcp_headers_for_unknown_or_unsupported_server() {
+    let ctx = support::TestContext::new().await;
+    let template = first_template(&ctx).await;
+
+    let unknown_response = ctx
+        .post_json(
+            "/api/v1/agents/runs",
+            &json!({
+                "agent_id": template.id,
+                "prompt": "Use tenant MCP",
+                "mcp_headers": {
+                    "999999": { "Authorization": "Bearer runtime" }
+                }
+            }),
+        )
+        .await;
+    assert_eq!(unknown_response.status(), StatusCode::BAD_REQUEST);
+
+    let stdio_server = create_stdio_mcp_server(&ctx, "local-mcp").await;
+    let stdio_server_id = stdio_server.id.expect("created MCP server should have id");
+    let unsupported_response = ctx
+        .post_json(
+            "/api/v1/agents/runs",
+            &json!({
+                "agent_id": template.id,
+                "prompt": "Use local MCP",
+                "mcp_headers": {
+                    stdio_server_id.to_string(): { "Authorization": "Bearer runtime" }
+                }
+            }),
+        )
+        .await;
+    assert_eq!(unsupported_response.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
@@ -513,6 +584,61 @@ async fn create_test_thread(
         .await;
     assert_eq!(response.status(), StatusCode::CREATED);
     let created: MutationResponse<ThreadSummary> = support::json_body(response).await;
+    created.item
+}
+
+async fn create_http_mcp_server(ctx: &support::TestContext, display_name: &str) -> McpServerRecord {
+    create_mcp_server(
+        ctx,
+        McpServerRecord {
+            id: None,
+            display_name: display_name.to_string(),
+            enabled: true,
+            transport: McpTransportConfig::Http {
+                url: "https://example.invalid/mcp".to_string(),
+                headers: BTreeMap::new(),
+            },
+            timeout_ms: 30_000,
+            status: McpServerStatus::Connecting,
+            last_checked_at: None,
+            last_success_at: None,
+            last_error: None,
+            discovered_tool_count: 0,
+        },
+    )
+    .await
+}
+
+async fn create_stdio_mcp_server(
+    ctx: &support::TestContext,
+    display_name: &str,
+) -> McpServerRecord {
+    create_mcp_server(
+        ctx,
+        McpServerRecord {
+            id: None,
+            display_name: display_name.to_string(),
+            enabled: true,
+            transport: McpTransportConfig::Stdio {
+                command: "local-mcp".to_string(),
+                args: Vec::new(),
+                env: BTreeMap::new(),
+            },
+            timeout_ms: 30_000,
+            status: McpServerStatus::Connecting,
+            last_checked_at: None,
+            last_success_at: None,
+            last_error: None,
+            discovered_tool_count: 0,
+        },
+    )
+    .await
+}
+
+async fn create_mcp_server(ctx: &support::TestContext, record: McpServerRecord) -> McpServerRecord {
+    let response = ctx.post_json("/api/v1/mcp/servers", &record).await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let created: MutationResponse<McpServerRecord> = support::json_body(response).await;
     created.item
 }
 

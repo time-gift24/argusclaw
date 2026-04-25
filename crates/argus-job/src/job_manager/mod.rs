@@ -77,12 +77,14 @@ pub struct JobManager {
     tracked_jobs: Arc<StdMutex<tracking::TrackedJobsStore>>,
     job_runtime_store: Arc<StdMutex<runtime_state::JobRuntimeStore>>,
     chat_mailbox_forwarder: Arc<StdMutex<Option<Arc<ChatMailboxForwarder>>>>,
+    job_thread_created_hook: Arc<StdMutex<Option<Arc<JobThreadCreatedHook>>>>,
     job_repository: Option<Arc<dyn JobRepository>>,
 }
 
 type ChatMailboxForwarderFuture = Pin<Box<dyn Future<Output = bool> + Send>>;
 type ChatMailboxForwarder =
     dyn Fn(ThreadId, MailboxMessage) -> ChatMailboxForwarderFuture + Send + Sync;
+type JobThreadCreatedHook = dyn Fn(ThreadId, ThreadId) + Send + Sync;
 
 impl fmt::Debug for JobManager {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -139,6 +141,7 @@ impl JobManager {
             tracked_jobs: Arc::new(StdMutex::new(tracking::TrackedJobsStore::default())),
             job_runtime_store: Arc::new(StdMutex::new(runtime_state::JobRuntimeStore::default())),
             chat_mailbox_forwarder: Arc::new(StdMutex::new(None)),
+            job_thread_created_hook: Arc::new(StdMutex::new(None)),
             job_repository,
         };
         manager.install_runtime_lifecycle_bridge();
@@ -186,6 +189,24 @@ impl JobManager {
             .lock()
             .expect("mcp resolver mutex poisoned")
             .clone()
+    }
+
+    pub fn set_job_thread_created_hook(&self, hook: Option<Arc<JobThreadCreatedHook>>) {
+        *self
+            .job_thread_created_hook
+            .lock()
+            .expect("job thread created hook mutex poisoned") = hook;
+    }
+
+    fn notify_job_thread_created(&self, parent_thread_id: ThreadId, child_thread_id: ThreadId) {
+        let hook = self
+            .job_thread_created_hook
+            .lock()
+            .expect("job thread created hook mutex poisoned")
+            .clone();
+        if let Some(hook) = hook {
+            hook(parent_thread_id, child_thread_id);
+        }
     }
 
     fn thread_repository(&self) -> Option<Arc<dyn ThreadRepository>> {

@@ -61,6 +61,7 @@
 - `argus-server` 不依赖 `argus-wing`；两者是平等的应用入口
 - 下层 manager / repository 的直接装配只允许集中在 `ServerCore`，route handler 只调用 `ServerCore` 暴露的窄方法
 - agent run API 的 `run_id` 是独立资源 ID，不允许把普通 chat `thread_id` 当作 run 查询成功
+- agent run API 允许在 `POST /api/v1/agents/runs` 请求体中提供可选 `mcp_headers`，仅作为单次 run 的 HTTP/SSE MCP runtime header overlay；不得持久化、不得返回给客户端、不得支持 stdio
 - chat / thread / message API 仅按 server-only 边界扩展；不改 desktop 主流程；thread event SSE 只允许镜像现有 `ThreadEvent`，不新增 desktop rewiring
 - 不新增 settings/admin_settings 持久化、repository、migration 或 HTTP route；实例名作为产品展示文案由 bootstrap 返回
 - `bootstrap.rs` 只返回 web shell 需要的最小实例初始化摘要，不承担 settings/profile 语义

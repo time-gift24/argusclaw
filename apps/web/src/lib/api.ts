@@ -301,9 +301,12 @@ export interface ChatActionResponse {
 
 export type AgentRunStatus = "queued" | "running" | "completed" | "failed";
 
+export type McpRuntimeHeaderOverrides = Record<string, Record<string, string>>;
+
 export interface CreateAgentRunRequest {
   agent_id: number;
   prompt: string;
+  mcp_headers?: McpRuntimeHeaderOverrides;
 }
 
 export interface AgentRunSummary {

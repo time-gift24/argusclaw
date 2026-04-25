@@ -292,9 +292,9 @@ impl McpToolResolver for McpRuntimeHandle {
     async fn resolve_for_agent(
         &self,
         agent_id: AgentId,
-        _context: &McpToolResolutionContext,
+        context: &McpToolResolutionContext,
     ) -> argus_protocol::Result<ResolvedMcpTools> {
-        McpRuntimeHandle::resolve_for_agent(self, agent_id)
+        self.resolve_for_agent_with_runtime_headers(agent_id, context.runtime_headers.clone())
             .await
             .map_err(ArgusError::from)
     }
@@ -3468,6 +3468,59 @@ mod tests {
             Some(&"Bearer persisted".to_string())
         );
         assert!(!headers.contains_key("X-Run"));
+    }
+
+    #[tokio::test]
+    async fn resolver_trait_uses_runtime_headers_from_context() {
+        let mut persisted_headers = BTreeMap::new();
+        persisted_headers.insert("Authorization".to_string(), "Bearer persisted".to_string());
+        let repo = Arc::new(FakeRepo::new(vec![http_server_with_headers(
+            14,
+            "Trait MCP",
+            persisted_headers,
+        )]));
+        repo.set_agent_bindings(
+            AgentId::new(7),
+            vec![argus_protocol::AgentMcpBinding {
+                server: AgentMcpServerBinding {
+                    agent_id: AgentId::new(7),
+                    server_id: 14,
+                },
+                allowed_tools: None,
+            }],
+        )
+        .await;
+
+        let connector = Arc::new(FakeConnector::new());
+        connector
+            .push_success(14, vec![tool(14, "trait_tool", "Trait scoped tool")])
+            .await;
+        let runtime = Arc::new(McpRuntime::new(
+            repo,
+            connector.clone(),
+            McpRuntimeConfig::default(),
+        ));
+        let resolver: Arc<dyn McpToolResolver> = Arc::new(McpRuntime::handle(&runtime));
+
+        let mut headers = McpRuntimeHeaders::empty();
+        headers.insert("Authorization", "Bearer trait-runtime");
+        let mut overrides = McpRuntimeHeaderOverrides::empty();
+        overrides.insert(14, headers);
+        let context = McpToolResolutionContext::empty().with_runtime_headers(overrides);
+
+        let resolved = resolver
+            .resolve_for_agent(AgentId::new(7), &context)
+            .await
+            .expect("trait resolver should resolve with runtime headers");
+
+        assert_eq!(resolved.tools.len(), 1);
+        assert_eq!(
+            connector
+                .observed_connect_headers(14)
+                .await
+                .get("Authorization"),
+            Some(&"Bearer trait-runtime".to_string())
+        );
     }
 
     #[tokio::test]

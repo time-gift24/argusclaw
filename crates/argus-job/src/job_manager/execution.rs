@@ -28,6 +28,7 @@ impl JobManager {
         };
 
         let execution_thread_id = self.enqueue_job_runtime(&request).await?;
+        self.notify_job_thread_created(originating_thread_id, execution_thread_id);
 
         let cancellation = TurnCancellation::new();
         let spawn_cancellation = cancellation.clone();
