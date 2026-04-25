@@ -78,6 +78,26 @@ impl AgentRunContextRegistry {
             .unwrap_or_default()
     }
 
+    pub fn release_thread(&self, thread_id: ThreadId) {
+        let mut state = self
+            .inner
+            .write()
+            .expect("agent run context registry lock poisoned");
+        let Some(run_id) = state.thread_to_run.remove(&thread_id) else {
+            return;
+        };
+        let should_remove_run = match state.runs.get_mut(&run_id) {
+            Some(context) => {
+                context.threads.remove(&thread_id);
+                context.threads.is_empty()
+            }
+            None => false,
+        };
+        if should_remove_run {
+            state.runs.remove(&run_id);
+        }
+    }
+
     pub fn remove_run(&self, run_id: AgentRunId) {
         let mut state = self
             .inner
@@ -138,5 +158,55 @@ mod tests {
 
         assert!(registry.headers_for_thread(parent).is_empty());
         assert!(registry.headers_for_thread(child).is_empty());
+    }
+
+    #[tokio::test]
+    async fn releasing_parent_thread_keeps_child_context_until_child_finishes() {
+        let registry = AgentRunContextRegistry::default();
+        let run_id = AgentRunId::new();
+        let parent = ThreadId::new();
+        let child = ThreadId::new();
+        let headers = runtime_headers();
+
+        registry.register_run_thread(run_id, parent, headers.clone());
+        registry
+            .inherit_thread(parent, child)
+            .expect("child thread should inherit run context");
+
+        registry.release_thread(parent);
+        assert!(registry.headers_for_thread(parent).is_empty());
+        assert_eq!(registry.headers_for_thread(child), headers);
+
+        registry.release_thread(child);
+        assert!(registry.headers_for_thread(child).is_empty());
+    }
+
+    #[tokio::test]
+    async fn nested_child_threads_keep_context_until_last_descendant_finishes() {
+        let registry = AgentRunContextRegistry::default();
+        let run_id = AgentRunId::new();
+        let parent = ThreadId::new();
+        let child = ThreadId::new();
+        let grandchild = ThreadId::new();
+        let headers = runtime_headers();
+
+        registry.register_run_thread(run_id, parent, headers.clone());
+        registry
+            .inherit_thread(parent, child)
+            .expect("child thread should inherit run context");
+        registry
+            .inherit_thread(child, grandchild)
+            .expect("grandchild thread should inherit run context");
+
+        registry.release_thread(parent);
+        assert_eq!(registry.headers_for_thread(child), headers);
+        assert_eq!(registry.headers_for_thread(grandchild), headers);
+
+        registry.release_thread(child);
+        assert!(registry.headers_for_thread(child).is_empty());
+        assert_eq!(registry.headers_for_thread(grandchild), headers);
+
+        registry.release_thread(grandchild);
+        assert!(registry.headers_for_thread(grandchild).is_empty());
     }
 }

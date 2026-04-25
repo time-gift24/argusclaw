@@ -256,6 +256,10 @@ impl ServerCore {
                 tracing::debug!(%parent, %child, %error, "job thread has no agent run context to inherit");
             }
         })));
+        let finished_contexts = agent_run_contexts.clone();
+        job_manager.set_job_thread_finished_hook(Some(Arc::new(move |thread_id| {
+            finished_contexts.release_thread(thread_id);
+        })));
 
         let session_manager = Arc::new(SessionManager::new(
             sqlite.clone() as Arc<dyn SessionRepository>,
@@ -619,6 +623,22 @@ impl ServerCore {
         }
     }
 
+    async fn cleanup_failed_agent_run_session(&self, session_id: SessionId, thread_id: ThreadId) {
+        if let Err(error) = self
+            .session_manager
+            .delete_thread(session_id, &thread_id)
+            .await
+        {
+            tracing::warn!(
+                session_id = %session_id,
+                thread_id = %thread_id,
+                error = %error,
+                "failed to delete agent run thread after materialization error"
+            );
+        }
+        self.cleanup_failed_chat_session(session_id).await;
+    }
+
     pub async fn delete_chat_thread(
         &self,
         session_id: SessionId,
@@ -775,7 +795,8 @@ impl ServerCore {
         let mut events = match self.session_manager.subscribe(session_id, &thread_id).await {
             Some(events) => events,
             None => {
-                self.cleanup_failed_chat_session(session_id).await;
+                self.cleanup_failed_agent_run_session(session_id, thread_id)
+                    .await;
                 return Err(ArgusError::ThreadNotFound(thread_id.to_string()));
             }
         };
@@ -789,7 +810,8 @@ impl ServerCore {
                 if has_run_context {
                     self.agent_run_contexts.remove_run(run_id);
                 }
-                self.cleanup_failed_chat_session(session_id).await;
+                self.cleanup_failed_agent_run_session(session_id, thread_id)
+                    .await;
                 return Err(error);
             }
         };
@@ -807,10 +829,19 @@ impl ServerCore {
             updated_at: thread_record.updated_at.clone(),
             completed_at: None,
         };
-        self.agent_run_repo
+        if let Err(error) = self
+            .agent_run_repo
             .insert_agent_run(&record)
             .await
-            .map_err(database_error)?;
+            .map_err(database_error)
+        {
+            if has_run_context {
+                self.agent_run_contexts.remove_run(run_id);
+            }
+            self.cleanup_failed_agent_run_session(session_id, thread_id)
+                .await;
+            return Err(error);
+        }
 
         if let Err(error) = self
             .session_manager
@@ -821,7 +852,8 @@ impl ServerCore {
                 self.agent_run_contexts.remove_run(run_id);
             }
             let _ = self.agent_run_repo.delete_agent_run(&run_id).await;
-            self.cleanup_failed_chat_session(session_id).await;
+            self.cleanup_failed_agent_run_session(session_id, thread_id)
+                .await;
             return Err(error);
         }
 
@@ -1172,7 +1204,7 @@ async fn track_agent_run(
             Err(broadcast::error::RecvError::Closed) => break,
         }
     }
-    agent_run_contexts.remove_run(run_id);
+    agent_run_contexts.release_thread(tracked_thread_id);
 }
 
 #[cfg(test)]
@@ -1223,5 +1255,106 @@ mod tests {
         assert_eq!(contexts.len(), 1);
         assert_eq!(contexts[0].thread_id, Some(thread_id));
         assert_eq!(contexts[0].runtime_headers, overrides);
+    }
+
+    #[tokio::test]
+    async fn run_scoped_resolver_isolates_headers_between_concurrent_runs() {
+        let inner = Arc::new(RecordingMcpResolver::default());
+        let registry = AgentRunContextRegistry::default();
+        let first_run = AgentRunId::new();
+        let first_thread = ThreadId::new();
+        let second_run = AgentRunId::new();
+        let second_thread = ThreadId::new();
+
+        let mut first_headers = McpRuntimeHeaders::empty();
+        first_headers.insert("Authorization", "Bearer first");
+        let mut first_overrides = McpRuntimeHeaderOverrides::empty();
+        first_overrides.insert(12, first_headers);
+
+        let mut second_headers = McpRuntimeHeaders::empty();
+        second_headers.insert("Authorization", "Bearer second");
+        let mut second_overrides = McpRuntimeHeaderOverrides::empty();
+        second_overrides.insert(12, second_headers);
+
+        registry.register_run_thread(first_run, first_thread, first_overrides.clone());
+        registry.register_run_thread(second_run, second_thread, second_overrides.clone());
+
+        let resolver = RunScopedMcpToolResolver::new(inner.clone(), registry);
+        resolver
+            .resolve_for_agent(
+                AgentId::new(7),
+                &McpToolResolutionContext::for_thread(first_thread),
+            )
+            .await
+            .expect("first run should resolve with its own runtime headers");
+        resolver
+            .resolve_for_agent(
+                AgentId::new(7),
+                &McpToolResolutionContext::for_thread(second_thread),
+            )
+            .await
+            .expect("second run should resolve with its own runtime headers");
+
+        let contexts = inner.contexts.lock().unwrap();
+        assert_eq!(contexts.len(), 2);
+        assert_eq!(contexts[0].thread_id, Some(first_thread));
+        assert_eq!(contexts[0].runtime_headers, first_overrides);
+        assert_eq!(contexts[1].thread_id, Some(second_thread));
+        assert_eq!(contexts[1].runtime_headers, second_overrides);
+    }
+
+    #[tokio::test]
+    async fn track_agent_run_idle_keeps_child_thread_headers_alive() {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("sqlite pool should connect for tests");
+        migrate(&pool)
+            .await
+            .expect("test migrations should succeed");
+        let core = ServerCore::with_pool(pool)
+            .await
+            .expect("server core should initialize for tests");
+        let run_id = AgentRunId::new();
+        let parent_thread_id = ThreadId::new();
+        let child_thread_id = ThreadId::new();
+        let mut headers = McpRuntimeHeaders::empty();
+        headers.insert("Authorization", "Bearer runtime");
+        let mut overrides = McpRuntimeHeaderOverrides::empty();
+        overrides.insert(12, headers);
+        core.agent_run_contexts
+            .register_run_thread(run_id, parent_thread_id, overrides.clone());
+        core.agent_run_contexts
+            .inherit_thread(parent_thread_id, child_thread_id)
+            .expect("child thread should inherit run context");
+
+        let (events_tx, mut events_rx) = broadcast::channel(8);
+        let agent_run_repo = Arc::clone(&core.agent_run_repo);
+        let session_manager = Arc::clone(&core.session_manager);
+        let agent_run_contexts = core.agent_run_contexts.clone();
+        let task = tokio::spawn(async move {
+            track_agent_run(
+                &mut events_rx,
+                agent_run_repo,
+                session_manager,
+                SessionId::new(),
+                parent_thread_id,
+                run_id,
+                agent_run_contexts,
+            )
+            .await;
+        });
+
+        events_tx
+            .send(ThreadEvent::Idle {
+                thread_id: parent_thread_id.to_string(),
+            })
+            .expect("idle event should send");
+        task.await.expect("tracking task should complete");
+
+        assert_eq!(
+            core.agent_run_contexts.headers_for_thread(child_thread_id),
+            overrides,
+            "parent idle should not drop inherited child-thread headers"
+        );
     }
 }

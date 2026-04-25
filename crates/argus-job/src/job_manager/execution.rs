@@ -53,6 +53,7 @@ impl JobManager {
                 )
                 .await;
 
+            manager.notify_job_thread_finished(execution_thread_id);
             manager
                 .forward_job_result_to_runtime(
                     originating_thread_id,

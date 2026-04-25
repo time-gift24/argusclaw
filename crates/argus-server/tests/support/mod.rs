@@ -75,6 +75,21 @@ impl TestContext {
             .expect("mcp tools should seed");
     }
 
+    pub async fn execute_sql(&self, sql: &str) {
+        sqlx::query(sql)
+            .execute(&self.pool)
+            .await
+            .expect("test SQL should execute");
+    }
+
+    pub async fn count_rows(&self, table: &str) -> i64 {
+        let query = format!("SELECT COUNT(*) FROM {table}");
+        sqlx::query_scalar(&query)
+            .fetch_one(&self.pool)
+            .await
+            .expect("test SQL count should execute")
+    }
+
     async fn request<T>(&self, method: Method, path: &str, payload: Option<&T>) -> Response<Body>
     where
         T: Serialize,
