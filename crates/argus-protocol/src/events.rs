@@ -746,7 +746,7 @@ mod tests {
 
     #[test]
     fn thread_message_routes_fifo_payloads() {
-        let messages = vec![
+        let messages = [
             ThreadMessage::UserInput {
                 content: "a".into(),
                 msg_override: None,
@@ -782,7 +782,7 @@ mod tests {
 
     #[test]
     fn thread_message_interrupt_is_not_part_of_fifo_payload_flow() {
-        let messages = vec![
+        let messages = [
             ThreadMessage::Interrupt,
             ThreadMessage::UserInput {
                 content: "after-interrupt".into(),

@@ -83,15 +83,15 @@ pub(crate) enum ThreadLoopAction {
 }
 
 enum ThreadOwnerCommand {
-    SetTitle {
+    Title {
         title: Option<String>,
         ack: oneshot::Sender<()>,
     },
-    SetProvider {
+    Provider {
         provider: Arc<dyn LlmProvider>,
         ack: oneshot::Sender<()>,
     },
-    SetMcpToolResolver {
+    McpToolResolver {
         resolver: Option<Arc<dyn McpToolResolver>>,
         ack: oneshot::Sender<()>,
     },
@@ -491,13 +491,13 @@ impl ThreadOwnerHandle {
 
     /// Update the in-memory runtime title.
     pub async fn set_title(&self, title: Option<String>) -> Result<(), ThreadError> {
-        self.send_owner_command(|ack| ThreadOwnerCommand::SetTitle { title, ack })
+        self.send_owner_command(|ack| ThreadOwnerCommand::Title { title, ack })
             .await
     }
 
     /// Update the bound provider for subsequent turns.
     pub async fn set_provider(&self, provider: Arc<dyn LlmProvider>) -> Result<(), ThreadError> {
-        self.send_owner_command(|ack| ThreadOwnerCommand::SetProvider { provider, ack })
+        self.send_owner_command(|ack| ThreadOwnerCommand::Provider { provider, ack })
             .await
     }
 
@@ -506,7 +506,7 @@ impl ThreadOwnerHandle {
         &self,
         resolver: Option<Arc<dyn McpToolResolver>>,
     ) -> Result<(), ThreadError> {
-        self.send_owner_command(|ack| ThreadOwnerCommand::SetMcpToolResolver { resolver, ack })
+        self.send_owner_command(|ack| ThreadOwnerCommand::McpToolResolver { resolver, ack })
             .await
     }
 
@@ -958,15 +958,15 @@ impl Thread {
 
     fn handle_owner_command(&mut self, command: ThreadOwnerCommand) {
         match command {
-            ThreadOwnerCommand::SetTitle { title, ack } => {
+            ThreadOwnerCommand::Title { title, ack } => {
                 self.set_title(title);
                 let _ = ack.send(());
             }
-            ThreadOwnerCommand::SetProvider { provider, ack } => {
+            ThreadOwnerCommand::Provider { provider, ack } => {
                 self.set_provider(provider);
                 let _ = ack.send(());
             }
-            ThreadOwnerCommand::SetMcpToolResolver { resolver, ack } => {
+            ThreadOwnerCommand::McpToolResolver { resolver, ack } => {
                 self.set_mcp_tool_resolver(resolver);
                 let _ = ack.send(());
             }

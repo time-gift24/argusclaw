@@ -1,0 +1,31 @@
+[package]
+name = "argus-server"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+argus-auth = { path = "../argus-auth" }
+argus-crypto = { path = "../argus-crypto" }
+argus-job = { path = "../argus-job" }
+argus-llm = { path = "../argus-llm" }
+argus-mcp = { path = "../argus-mcp" }
+argus-protocol = { path = "../argus-protocol" }
+argus-repository = { path = "../argus-repository" }
+argus-session = { path = "../argus-session" }
+argus-template = { path = "../argus-template" }
+argus-thread-pool = { path = "../argus-thread-pool" }
+argus-tool = { path = "../argus-tool" }
+async-trait = { workspace = true }
+axum = { workspace = true }
+chrono = { workspace = true }
+dirs = { workspace = true }
+futures-util = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tower = { workspace = true }

@@ -27,6 +27,7 @@
 - `ArgusSqlite`
 - `connect`、`connect_path`、`migrate`
 - 所有 repository traits
+- `AgentRunRepository` 负责外部 agent run registry 的持久化状态，不与 chat `ThreadId` 混作公开 ID
 
 ## 修改守则
 

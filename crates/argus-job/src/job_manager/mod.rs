@@ -116,6 +116,7 @@ impl JobManager {
     }
 
     /// Create a new JobManager with optional repository backing.
+    #[allow(clippy::too_many_arguments)]
     pub fn new_with_persistence(
         thread_pool: Arc<ThreadPool>,
         template_manager: Arc<TemplateManager>,
