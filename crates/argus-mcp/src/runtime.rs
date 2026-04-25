@@ -22,7 +22,7 @@ use std::os::windows::process::CommandExt;
 use argus_protocol::tool::NamedTool;
 use argus_protocol::{
     AgentId, ArgusError, McpDiscoveredToolRecord, McpServerRecord, McpServerStatus,
-    McpToolResolver, McpTransportConfig, ResolvedMcpTools,
+    McpToolResolutionContext, McpToolResolver, McpTransportConfig, ResolvedMcpTools,
 };
 pub use argus_repository::traits::McpRepository;
 
@@ -222,6 +222,7 @@ impl McpToolResolver for McpRuntimeHandle {
     async fn resolve_for_agent(
         &self,
         agent_id: AgentId,
+        _context: &McpToolResolutionContext,
     ) -> argus_protocol::Result<ResolvedMcpTools> {
         self.resolve_for_agent(agent_id)
             .await

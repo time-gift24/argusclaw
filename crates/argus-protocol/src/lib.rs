@@ -29,7 +29,8 @@ pub use hooks::{HookAction, HookEvent, HookHandler, HookRegistry, ToolHookContex
 pub use ids::{AgentId, ProviderId, SessionId, ThreadId};
 pub use mcp::{
     AgentMcpBinding, AgentMcpServerBinding, AgentMcpToolBinding, McpDiscoveredToolRecord,
-    McpServerRecord, McpServerStatus, McpToolResolver, McpTransportConfig, McpTransportKind,
+    McpRuntimeHeaderOverrides, McpRuntimeHeaders, McpServerRecord, McpServerStatus,
+    McpToolResolutionContext, McpToolResolver, McpTransportConfig, McpTransportKind,
     McpUnavailableServerSummary, ResolvedMcpTools, ThreadNoticeLevel,
 };
 pub use message_override::MessageOverride;

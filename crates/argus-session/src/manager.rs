@@ -1855,6 +1855,7 @@ mod tests {
         async fn resolve_for_agent(
             &self,
             _agent_id: AgentId,
+            _context: &argus_protocol::McpToolResolutionContext,
         ) -> argus_protocol::Result<ResolvedMcpTools> {
             Ok(ResolvedMcpTools::default())
         }
