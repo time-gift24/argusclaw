@@ -93,7 +93,7 @@ export function useChatSessions() {
     sessions.value = await callChatApi("listChatSessions");
   }
 
-  async function selectSession(sessionId: string) {
+  async function selectSession(sessionId: string, preferredThreadId?: string) {
     activeSessionId.value = sessionId;
     activeThreadId.value = "";
     activeBinding.value = null;
@@ -101,18 +101,25 @@ export function useChatSessions() {
     if (session) {
       sessionName.value = formatSessionName(session);
     }
-    await refreshThreads();
-    if (threads.value.length > 0) {
-      selectThread(threads.value[0].id);
+    const nextThreads = await refreshThreads(sessionId);
+    const nextThreadId =
+      (preferredThreadId && nextThreads.find((thread) => thread.id === preferredThreadId)?.id) ||
+      nextThreads[0]?.id;
+    if (nextThreadId) {
+      selectThread(nextThreadId);
     }
   }
 
-  async function refreshThreads() {
-    if (!activeSessionId.value) {
+  async function refreshThreads(sessionId = activeSessionId.value) {
+    if (!sessionId) {
       threads.value = [];
-      return;
+      return [];
     }
-    threads.value = await callChatApi("listChatThreads", activeSessionId.value);
+    const nextThreads = await callChatApi("listChatThreads", sessionId);
+    if (sessionId === activeSessionId.value) {
+      threads.value = nextThreads;
+    }
+    return nextThreads;
   }
 
   function selectThread(threadId: string) {

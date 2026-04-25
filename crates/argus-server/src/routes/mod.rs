@@ -1,3 +1,4 @@
+pub mod agent_runs;
 pub mod bootstrap;
 pub mod chat;
 pub mod health;
@@ -19,6 +20,11 @@ pub fn router() -> Router<AppState> {
         .route("/api/v1/runtime", get(runtime::get_runtime_state))
         .route("/api/v1/runtime/events", get(runtime::runtime_events))
         .route("/api/v1/tools", get(tools::list_tools))
+        .route("/api/v1/agents/runs", post(agent_runs::create_agent_run))
+        .route(
+            "/api/v1/agents/runs/{run_id}",
+            get(agent_runs::get_agent_run),
+        )
         .route(
             "/api/v1/chat/sessions",
             get(chat::list_sessions).post(chat::create_session),

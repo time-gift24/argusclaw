@@ -19,7 +19,7 @@ export interface UseChatComposerOptions {
   threadTitle: Ref<string>;
   threads: Ref<import("@/lib/api").ChatThreadSummary[]>;
   refreshSessions: () => Promise<void>;
-  refreshThreads: () => Promise<void>;
+  refreshThreads: (sessionId?: string) => Promise<import("@/lib/api").ChatThreadSummary[]>;
   applyChatSessionPayload: (payload: ChatSessionPayload) => void;
   openThreadEvents: (sessionId: string, threadId: string) => void;
   closeThreadEvents: () => void;

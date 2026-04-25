@@ -2,6 +2,7 @@
 
 mod account;
 mod agent;
+mod agent_run;
 mod job;
 mod mcp;
 mod session;
@@ -9,6 +10,7 @@ mod thread;
 
 pub use account::AccountRepository;
 pub use agent::AgentRepository;
+pub use agent_run::AgentRunRepository;
 pub use job::JobRepository;
 pub use mcp::McpRepository;
 pub use session::{SessionRepository, SessionWithCount};

@@ -269,6 +269,118 @@ describe("ChatPage", () => {
     expect(wrapper.text()).toContain("对话会话加载失败：Request failed: 502");
   });
 
+  it("switches to the selected session thread from history and refreshes its messages", async () => {
+    const listChatThreads = vi.fn().mockImplementation(async (sessionId: string) => {
+      if (sessionId === "session-1") {
+        return [thread({ id: "thread-1", title: "一号线程" })];
+      }
+      return [thread({ id: "thread-2", title: "二号线程" })];
+    });
+    const listChatMessages = vi.fn().mockImplementation(async (sessionId: string, threadId: string) => {
+      if (sessionId === "session-1" && threadId === "thread-1") {
+        return [message("assistant", "一号回复")];
+      }
+      if (sessionId === "session-2" && threadId === "thread-2") {
+        return [message("assistant", "二号回复")];
+      }
+      return [];
+    });
+
+    setApiClient(
+      makeApiClient({
+        listChatSessions: vi.fn().mockResolvedValue([
+          session({ id: "session-1", name: "默认会话" }),
+          session({ id: "session-2", name: "二号会话" }),
+        ]),
+        listChatThreads,
+        listChatMessages,
+      }),
+    );
+    const wrapper = mount(ChatPage);
+    await flushPromises();
+
+    const historyBtn = wrapper.findAll("button").find((b) => b.text().includes("历史"));
+    await historyBtn!.trigger("click");
+    await flushPromises();
+
+    const secondSession = Array.from(document.querySelectorAll(".history-dialog__session-item")).find((item) =>
+      item.textContent?.includes("二号会话"),
+    ) as HTMLElement | undefined;
+    expect(secondSession).toBeDefined();
+    secondSession!.click();
+    await flushPromises();
+
+    const secondThread = Array.from(document.querySelectorAll(".history-dialog__session-item")).find((item) =>
+      item.textContent?.includes("二号线程"),
+    ) as HTMLElement | undefined;
+    expect(secondThread).toBeDefined();
+    secondThread!.click();
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("二号线程");
+    expect(wrapper.text()).toContain("二号回复");
+    expect(listChatMessages).toHaveBeenLastCalledWith("session-2", "thread-2");
+  });
+
+  it("selects the first remaining thread after deleting the active session", async () => {
+    const listChatSessions = vi
+      .fn()
+      .mockResolvedValueOnce([
+        session({ id: "session-1", name: "默认会话" }),
+        session({ id: "session-2", name: "二号会话" }),
+      ])
+      .mockResolvedValueOnce([session({ id: "session-2", name: "二号会话" })]);
+    const listChatThreads = vi.fn().mockImplementation(async (sessionId: string) => {
+      if (sessionId === "session-1") {
+        return [thread({ id: "thread-1", title: "一号线程" })];
+      }
+      if (sessionId === "session-2") {
+        return [thread({ id: "thread-2", title: "二号线程" })];
+      }
+      return [];
+    });
+    const listChatMessages = vi.fn().mockImplementation(async (sessionId: string, threadId: string) => {
+      if (sessionId === "session-1" && threadId === "thread-1") {
+        return [message("assistant", "一号回复")];
+      }
+      if (sessionId === "session-2" && threadId === "thread-2") {
+        return [message("assistant", "二号回复")];
+      }
+      return [];
+    });
+
+    setApiClient(
+      makeApiClient({
+        listChatSessions,
+        deleteChatSession: vi.fn().mockResolvedValue({ deleted: true }),
+        listChatThreads,
+        listChatMessages,
+      }),
+    );
+    const wrapper = mount(ChatPage);
+    await flushPromises();
+
+    const historyBtn = wrapper.findAll("button").find((b) => b.text().includes("历史"));
+    await historyBtn!.trigger("click");
+    await flushPromises();
+
+    const deleteButtons = Array.from(document.querySelectorAll(".history-dialog__action-btn--danger")) as HTMLElement[];
+    expect(deleteButtons.length).toBeGreaterThan(0);
+    deleteButtons[0].click();
+    await flushPromises();
+
+    const confirmDelete = Array.from(document.querySelectorAll(".history-dialog button")).find((item) =>
+      item.textContent?.includes("删除"),
+    ) as HTMLElement | undefined;
+    expect(confirmDelete).toBeDefined();
+    confirmDelete!.click();
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("二号线程");
+    expect(wrapper.text()).toContain("二号回复");
+    expect(listChatMessages).toHaveBeenLastCalledWith("session-2", "thread-2");
+  });
+
   it("keeps polling after stream settles until a new assistant reply appears", async () => {
     let handlers: ChatThreadEventHandlers | undefined;
     const oldAssistant = message("assistant", "旧回复");

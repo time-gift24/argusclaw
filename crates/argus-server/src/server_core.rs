@@ -10,17 +10,19 @@ use argus_protocol::{
     AgentId, AgentRecord, ArgusError, JobRuntimeState, LlmProviderId, LlmProviderRecord,
     McpDiscoveredToolRecord, McpServerRecord, McpServerStatus, McpToolResolver, ProviderId,
     ProviderResolver, ProviderTestResult, Result, RiskLevel, SessionId, ThreadEvent, ThreadId,
-    ThreadPoolState,
+    ThreadPoolState, ThreadRuntimeStatus,
 };
 use argus_repository::traits::{
-    AccountRepository, AgentRepository, JobRepository, LlmProviderRepository, McpRepository,
-    SessionRepository, ThreadRepository,
+    AccountRepository, AgentRepository, AgentRunRepository, JobRepository, LlmProviderRepository,
+    McpRepository, SessionRepository, ThreadRepository,
 };
+use argus_repository::types::{AgentRunId, AgentRunRecord, AgentRunStatus};
 use argus_repository::{ArgusSqlite, connect, connect_path, migrate};
 use argus_session::{SessionManager, SessionSummary, ThreadSummary};
 use argus_template::TemplateManager;
 use argus_thread_pool::ThreadPool;
 use argus_tool::ToolManager;
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use tokio::sync::broadcast;
@@ -40,6 +42,7 @@ pub struct ServerCore {
     mcp_runtime: Arc<McpRuntime>,
     _account_manager: Arc<AccountManager>,
     mcp_repo: Arc<dyn McpRepository>,
+    agent_run_repo: Arc<dyn AgentRunRepository>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -77,6 +80,56 @@ pub struct ChatSessionPayload {
     pub thread_id: ThreadId,
     pub effective_provider_id: Option<ProviderId>,
     pub effective_model: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentRunSummary {
+    pub run_id: AgentRunId,
+    pub agent_id: AgentId,
+    pub status: AgentRunStatus,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentRunDetail {
+    pub run_id: AgentRunId,
+    pub agent_id: AgentId,
+    pub status: AgentRunStatus,
+    pub prompt: String,
+    pub result: Option<String>,
+    pub error: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub completed_at: Option<String>,
+}
+
+impl From<&AgentRunRecord> for AgentRunSummary {
+    fn from(record: &AgentRunRecord) -> Self {
+        AgentRunSummary {
+            run_id: record.id,
+            agent_id: record.agent_id,
+            status: record.status,
+            created_at: record.created_at.clone(),
+            updated_at: record.updated_at.clone(),
+        }
+    }
+}
+
+impl From<&AgentRunRecord> for AgentRunDetail {
+    fn from(record: &AgentRunRecord) -> Self {
+        AgentRunDetail {
+            run_id: record.id,
+            agent_id: record.agent_id,
+            status: record.status,
+            prompt: record.prompt.clone(),
+            result: record.result.clone(),
+            error: record.error.clone(),
+            created_at: record.created_at.clone(),
+            updated_at: record.updated_at.clone(),
+            completed_at: record.completed_at.clone(),
+        }
+    }
 }
 
 impl ServerCore {
@@ -136,6 +189,7 @@ impl ServerCore {
         ));
 
         let mcp_repo: Arc<dyn McpRepository> = sqlite.clone();
+        let agent_run_repo: Arc<dyn AgentRunRepository> = sqlite.clone();
         let mcp_runtime = Arc::new(McpRuntime::new(
             Arc::clone(&mcp_repo),
             Arc::new(RmcpConnector),
@@ -168,6 +222,7 @@ impl ServerCore {
             mcp_runtime,
             _account_manager: account_manager,
             mcp_repo,
+            agent_run_repo,
         }))
     }
 
@@ -464,11 +519,24 @@ impl ServerCore {
         model: Option<String>,
     ) -> Result<ChatSessionPayload> {
         let session_id = self.session_manager.create(session_name).await?;
-        let thread_id = self
+        let thread_id = match self
             .session_manager
             .create_thread(session_id, template_id, provider_id, model.as_deref())
-            .await?;
-        let binding = self.activate_chat_thread(session_id, thread_id).await?;
+            .await
+        {
+            Ok(thread_id) => thread_id,
+            Err(error) => {
+                self.cleanup_failed_chat_session(session_id).await;
+                return Err(error);
+            }
+        };
+        let binding = match self.activate_chat_thread(session_id, thread_id).await {
+            Ok(binding) => binding,
+            Err(error) => {
+                self.cleanup_failed_chat_session(session_id).await;
+                return Err(error);
+            }
+        };
         let provider_key = provider_id
             .map(|id| id.inner().to_string())
             .unwrap_or_else(|| "__default__".to_string());
@@ -481,6 +549,16 @@ impl ServerCore {
             effective_provider_id: binding.effective_provider_id,
             effective_model: binding.effective_model,
         })
+    }
+
+    async fn cleanup_failed_chat_session(&self, session_id: SessionId) {
+        if let Err(error) = self.session_manager.delete(session_id).await {
+            tracing::warn!(
+                session_id = %session_id,
+                error = %error,
+                "failed to clean up chat session after materialization error"
+            );
+        }
     }
 
     pub async fn delete_chat_thread(
@@ -612,6 +690,153 @@ impl ServerCore {
             .await
             .ok_or_else(|| ArgusError::ThreadNotFound(thread_id.to_string()))
     }
+
+    pub async fn create_agent_run(
+        &self,
+        agent_id: AgentId,
+        prompt: String,
+    ) -> Result<AgentRunSummary> {
+        let session_id = self
+            .session_manager
+            .create(default_agent_run_session_name(agent_id))
+            .await?;
+        let thread_id = match self
+            .session_manager
+            .create_thread(session_id, agent_id, None, None)
+            .await
+        {
+            Ok(thread_id) => thread_id,
+            Err(error) => {
+                self.cleanup_failed_chat_session(session_id).await;
+                return Err(error);
+            }
+        };
+        let run_id = AgentRunId::new();
+        let mut events = match self.session_manager.subscribe(session_id, &thread_id).await {
+            Some(events) => events,
+            None => {
+                self.cleanup_failed_chat_session(session_id).await;
+                return Err(ArgusError::ThreadNotFound(thread_id.to_string()));
+            }
+        };
+        let thread_record = match self.session_manager.get_thread_record(&thread_id).await {
+            Ok(thread_record) => thread_record,
+            Err(error) => {
+                self.cleanup_failed_chat_session(session_id).await;
+                return Err(error);
+            }
+        };
+
+        let record = AgentRunRecord {
+            id: run_id,
+            agent_id,
+            session_id,
+            thread_id,
+            prompt: prompt.clone(),
+            status: AgentRunStatus::Queued,
+            result: None,
+            error: None,
+            created_at: thread_record.created_at.clone(),
+            updated_at: thread_record.updated_at.clone(),
+            completed_at: None,
+        };
+        self.agent_run_repo
+            .insert_agent_run(&record)
+            .await
+            .map_err(database_error)?;
+
+        if let Err(error) = self
+            .session_manager
+            .send_message(session_id, &thread_id, prompt)
+            .await
+        {
+            let _ = self.agent_run_repo.delete_agent_run(&run_id).await;
+            self.cleanup_failed_chat_session(session_id).await;
+            return Err(error);
+        }
+
+        let agent_run_repo = Arc::clone(&self.agent_run_repo);
+        let session_manager = Arc::clone(&self.session_manager);
+        tokio::spawn(async move {
+            track_agent_run(
+                &mut events,
+                agent_run_repo,
+                session_manager,
+                session_id,
+                thread_id,
+                run_id,
+            )
+            .await;
+        });
+
+        Ok(AgentRunSummary::from(&record))
+    }
+
+    pub async fn get_agent_run(&self, run_id: AgentRunId) -> Result<AgentRunDetail> {
+        let record = self
+            .agent_run_repo
+            .get_agent_run(&run_id)
+            .await
+            .map_err(database_error)?
+            .ok_or_else(|| ArgusError::ThreadNotFound(run_id.to_string()))?;
+
+        self.refresh_agent_run_detail(record).await
+    }
+
+    async fn refresh_agent_run_detail(&self, mut record: AgentRunRecord) -> Result<AgentRunDetail> {
+        if matches!(
+            record.status,
+            AgentRunStatus::Completed | AgentRunStatus::Failed
+        ) {
+            return Ok(AgentRunDetail::from(&record));
+        }
+
+        let messages = self
+            .session_manager
+            .get_thread_messages(record.session_id, &record.thread_id)
+            .await
+            .unwrap_or_default();
+        let result = record
+            .result
+            .clone()
+            .or_else(|| latest_assistant_message(&messages));
+        let runtime_status = self
+            .thread_pool_state()
+            .runtimes
+            .into_iter()
+            .find(|runtime| runtime.thread_id == record.thread_id)
+            .map(|runtime| runtime.status);
+        let status = preserve_running_without_runtime(
+            record.status,
+            derive_agent_run_status(runtime_status, result.as_ref()),
+        );
+
+        if status != record.status || result != record.result {
+            let now = timestamp_now();
+            let completed_at = if matches!(status, AgentRunStatus::Completed) {
+                record.completed_at.clone().or_else(|| Some(now.clone()))
+            } else {
+                record.completed_at.clone()
+            };
+            self.agent_run_repo
+                .update_agent_run_status(
+                    &record.id,
+                    status,
+                    result.as_deref(),
+                    record.error.as_deref(),
+                    completed_at.as_deref(),
+                    &now,
+                )
+                .await
+                .map_err(database_error)?;
+            record.status = status;
+            record.result = result;
+            record.updated_at = now;
+            record.completed_at = completed_at;
+        }
+
+        Ok(AgentRunDetail::from(&record))
+    }
 }
 
 fn database_error(error: impl std::fmt::Display) -> ArgusError {
@@ -623,5 +848,173 @@ fn database_error(error: impl std::fmt::Display) -> ArgusError {
 fn missing_after_mutation(kind: &str, id: impl std::fmt::Display) -> ArgusError {
     ArgusError::DatabaseError {
         reason: format!("{kind} not found after mutation: {id}"),
+    }
+}
+
+fn default_agent_run_session_name(agent_id: AgentId) -> String {
+    format!("Agent Run {}", agent_id.inner())
+}
+
+fn timestamp_now() -> String {
+    Utc::now().to_rfc3339()
+}
+
+fn latest_assistant_message(messages: &[ChatMessage]) -> Option<String> {
+    messages
+        .iter()
+        .rev()
+        .find(|message| {
+            matches!(message.role, argus_protocol::llm::Role::Assistant)
+                && !message.content.trim().is_empty()
+        })
+        .map(|message| message.content.clone())
+}
+
+fn derive_agent_run_status(
+    runtime_status: Option<ThreadRuntimeStatus>,
+    result: Option<&String>,
+) -> AgentRunStatus {
+    match runtime_status {
+        Some(ThreadRuntimeStatus::Loading | ThreadRuntimeStatus::Queued) => AgentRunStatus::Queued,
+        Some(ThreadRuntimeStatus::Running) => AgentRunStatus::Running,
+        Some(ThreadRuntimeStatus::Cooling) => {
+            if result.is_some() {
+                AgentRunStatus::Completed
+            } else {
+                AgentRunStatus::Running
+            }
+        }
+        Some(ThreadRuntimeStatus::Inactive | ThreadRuntimeStatus::Evicted) | None => {
+            if result.is_some() {
+                AgentRunStatus::Completed
+            } else {
+                AgentRunStatus::Queued
+            }
+        }
+    }
+}
+
+fn preserve_running_without_runtime(
+    current: AgentRunStatus,
+    derived: AgentRunStatus,
+) -> AgentRunStatus {
+    if matches!(current, AgentRunStatus::Running) && matches!(derived, AgentRunStatus::Queued) {
+        AgentRunStatus::Running
+    } else {
+        derived
+    }
+}
+
+async fn mark_agent_run_running(agent_run_repo: &Arc<dyn AgentRunRepository>, run_id: AgentRunId) {
+    let now = timestamp_now();
+    if let Err(error) = agent_run_repo
+        .update_agent_run_status(&run_id, AgentRunStatus::Running, None, None, None, &now)
+        .await
+    {
+        tracing::warn!(%run_id, %error, "failed to mark agent run running");
+    }
+}
+
+async fn mark_agent_run_failed(
+    agent_run_repo: &Arc<dyn AgentRunRepository>,
+    run_id: AgentRunId,
+    error: String,
+) {
+    let now = timestamp_now();
+    if let Err(db_error) = agent_run_repo
+        .update_agent_run_status(
+            &run_id,
+            AgentRunStatus::Failed,
+            None,
+            Some(&error),
+            Some(&now),
+            &now,
+        )
+        .await
+    {
+        tracing::warn!(%run_id, error = %db_error, "failed to mark agent run failed");
+    }
+}
+
+async fn mark_agent_run_completed(
+    agent_run_repo: &Arc<dyn AgentRunRepository>,
+    session_manager: &Arc<SessionManager>,
+    session_id: SessionId,
+    thread_id: ThreadId,
+    run_id: AgentRunId,
+) {
+    let messages = match session_manager
+        .get_thread_messages(session_id, &thread_id)
+        .await
+    {
+        Ok(messages) => messages,
+        Err(error) => {
+            mark_agent_run_failed(agent_run_repo, run_id, error.to_string()).await;
+            return;
+        }
+    };
+    let result = latest_assistant_message(&messages);
+    let now = timestamp_now();
+    if let Err(error) = agent_run_repo
+        .update_agent_run_status(
+            &run_id,
+            AgentRunStatus::Completed,
+            result.as_deref(),
+            None,
+            Some(&now),
+            &now,
+        )
+        .await
+    {
+        tracing::warn!(%run_id, %error, "failed to mark agent run completed");
+    }
+}
+
+async fn track_agent_run(
+    events: &mut broadcast::Receiver<ThreadEvent>,
+    agent_run_repo: Arc<dyn AgentRunRepository>,
+    session_manager: Arc<SessionManager>,
+    session_id: SessionId,
+    tracked_thread_id: ThreadId,
+    run_id: AgentRunId,
+) {
+    let thread_id_text = tracked_thread_id.to_string();
+    loop {
+        match events.recv().await {
+            Ok(ThreadEvent::Processing { thread_id, .. })
+            | Ok(ThreadEvent::ToolStarted { thread_id, .. })
+            | Ok(ThreadEvent::ToolCompleted { thread_id, .. }) => {
+                if thread_id == thread_id_text {
+                    mark_agent_run_running(&agent_run_repo, run_id).await;
+                }
+            }
+            Ok(ThreadEvent::TurnFailed {
+                thread_id, error, ..
+            }) => {
+                if thread_id == thread_id_text {
+                    mark_agent_run_failed(&agent_run_repo, run_id, error).await;
+                }
+            }
+            Ok(ThreadEvent::TurnSettled { thread_id, .. }) => {
+                if thread_id == thread_id_text {
+                    mark_agent_run_completed(
+                        &agent_run_repo,
+                        &session_manager,
+                        session_id,
+                        tracked_thread_id,
+                        run_id,
+                    )
+                    .await;
+                }
+            }
+            Ok(ThreadEvent::Idle { thread_id }) => {
+                if thread_id == thread_id_text {
+                    break;
+                }
+            }
+            Ok(_) => {}
+            Err(broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(broadcast::error::RecvError::Closed) => break,
+        }
     }
 }

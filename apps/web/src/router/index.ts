@@ -12,6 +12,7 @@ import McpPage from "@/features/mcp/McpPage.vue";
 import McpEditPage from "@/features/mcp/McpEditPage.vue";
 import McpImportPage from "@/features/mcp/McpImportPage.vue";
 import ToolsPage from "@/features/tools/ToolsPage.vue";
+import AgentRunsPage from "@/features/agent-runs/AgentRunsPage.vue";
 
 const ChatPage = () => import("@/features/chat/ChatPage.vue");
 
@@ -120,6 +121,12 @@ export const router = createRouter({
           name: "tools",
           component: ToolsPage,
           meta: { breadcrumb: "工具注册表" },
+        },
+        {
+          path: "agent-runs",
+          name: "agent-runs",
+          component: AgentRunsPage,
+          meta: { breadcrumb: "Agent Runs" },
         },
         {
           path: "chat",

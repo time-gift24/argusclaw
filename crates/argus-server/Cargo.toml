@@ -17,6 +17,7 @@ argus-thread-pool = { path = "../argus-thread-pool" }
 argus-tool = { path = "../argus-tool" }
 async-trait = { workspace = true }
 axum = { workspace = true }
+chrono = { workspace = true }
 dirs = { workspace = true }
 futures-util = { workspace = true }
 serde = { workspace = true }

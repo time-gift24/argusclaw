@@ -299,6 +299,28 @@ export interface ChatActionResponse {
   accepted: boolean;
 }
 
+export type AgentRunStatus = "queued" | "running" | "completed" | "failed";
+
+export interface CreateAgentRunRequest {
+  agent_id: number;
+  prompt: string;
+}
+
+export interface AgentRunSummary {
+  run_id: string;
+  agent_id: number;
+  status: AgentRunStatus;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AgentRunDetail extends AgentRunSummary {
+  prompt: string;
+  result: string | null;
+  error: string | null;
+  completed_at: string | null;
+}
+
 export type ChatThreadEventPayload =
   | {
       type: "reasoning_delta" | "content_delta";
@@ -387,6 +409,17 @@ interface MutationResponse<T> {
   item: T;
 }
 
+interface DataResponse<T> {
+  data: T;
+}
+
+interface ErrorResponse {
+  error?: {
+    code?: string;
+    message?: string;
+  };
+}
+
 export interface ApiClient {
   getHealth(): Promise<HealthResponse>;
   getBootstrap(): Promise<BootstrapResponse>;
@@ -427,6 +460,8 @@ export interface ApiClient {
   sendChatMessage?(sessionId: string, threadId: string, message: string): Promise<ChatActionResponse>;
   cancelChatThread?(sessionId: string, threadId: string): Promise<ChatActionResponse>;
   subscribeChatThread?(sessionId: string, threadId: string, handlers: ChatThreadEventHandlers): RuntimeEventSubscription;
+  createAgentRun?(input: CreateAgentRunRequest): Promise<AgentRunSummary>;
+  getAgentRun?(runId: string): Promise<AgentRunDetail>;
 }
 
 class HttpApiClient implements ApiClient {
@@ -585,6 +620,22 @@ class HttpApiClient implements ApiClient {
 
   listTools(): Promise<ToolRegistryItem[]> {
     return this.request("/tools");
+  }
+
+  async createAgentRun(input: CreateAgentRunRequest): Promise<AgentRunSummary> {
+    const response = await this.request<DataResponse<AgentRunSummary>>("/agents/runs", {
+      body: JSON.stringify(input),
+      headers: {
+        "Content-Type": "application/json",
+      },
+      method: "POST",
+    });
+
+    return response.data;
+  }
+
+  getAgentRun(runId: string): Promise<AgentRunDetail> {
+    return this.request(`/agents/runs/${runId}`);
   }
 
   listChatSessions(): Promise<ChatSessionSummary[]> {
@@ -772,10 +823,26 @@ class HttpApiClient implements ApiClient {
   private async request<T>(path: string, init?: RequestInit): Promise<T> {
     const response = await fetch(`${this.baseUrl}${path}`, init);
     if (!response.ok) {
-      throw new Error(`Request failed: ${response.status}`);
+      throw new Error(await this.readErrorMessage(response));
     }
 
     return (await response.json()) as T;
+  }
+
+  private async readErrorMessage(response: Response): Promise<string> {
+    const fallback = `Request failed: ${response.status}`;
+    const contentType = response.headers.get("content-type") ?? "";
+    if (!contentType.includes("application/json")) {
+      return fallback;
+    }
+
+    try {
+      const body = (await response.json()) as ErrorResponse;
+      const message = body.error?.message?.trim();
+      return message || fallback;
+    } catch {
+      return fallback;
+    }
   }
 }
 

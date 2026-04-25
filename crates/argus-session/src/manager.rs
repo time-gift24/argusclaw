@@ -1567,6 +1567,20 @@ impl SessionManager {
         Ok(threads)
     }
 
+    /// Load a persisted thread record by ID.
+    pub async fn get_thread_record(
+        &self,
+        thread_id: &ThreadId,
+    ) -> Result<argus_repository::types::ThreadRecord> {
+        self.thread_repo
+            .get_thread(thread_id)
+            .await
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })?
+            .ok_or_else(|| ArgusError::ThreadNotFound(thread_id.inner().to_string()))
+    }
+
     /// Send a message to a thread via the unified pipe.
     pub async fn send_message(
         &self,

@@ -131,6 +131,7 @@ function formatErrorMessage(reason: unknown) {
 watch(
   () => chatSessions.activeThreadId.value,
   (threadId) => {
+    chatThreadStream.resetTransientState();
     if (threadId && chatSessions.activeSessionId.value) {
       chatThreadStream.resetRuntimeActivity();
       chatThreadStream.openThreadEvents(chatSessions.activeSessionId.value, threadId);
@@ -140,15 +141,8 @@ watch(
 
 async function handleSelectThreadFromDialog(sessionId: string, threadId: string) {
   chatThreadStream.closeThreadEvents();
-  chatSessions.activeSessionId.value = sessionId;
-  chatSessions.activeThreadId.value = threadId;
-  const session = chatSessions.sessions.value.find((s: ChatSessionSummary) => s.id === sessionId);
-  if (session) chatSessions.sessionName.value = session.name || `会话 ${session.id.slice(0, 8)}`;
-  const thread = chatSessions.threads.value.find((t: ChatThreadSummary) => t.id === threadId);
-  if (thread) chatSessions.threadTitle.value = thread.title ?? "新的对话线程";
-  else chatSessions.threadTitle.value = "新的对话线程";
+  await chatSessions.selectSession(sessionId, threadId);
   await chatThreadStream.refreshActiveThread();
-  chatThreadStream.openThreadEvents(sessionId, threadId);
 }
 
 async function handleRenameSession(sessionId: string, name: string) {
@@ -166,16 +160,17 @@ async function handleRenameSession(sessionId: string, name: string) {
 async function handleDeleteSession(sessionId: string) {
   const api = getApiClient();
   try {
+    chatThreadStream.closeThreadEvents();
+    chatThreadStream.resetTransientState();
+    chatThreadStream.resetRuntimeActivity();
     await api.deleteChatSession!(sessionId);
     await chatSessions.refreshSessions();
     chatSessions.activeSessionId.value = "";
     chatSessions.activeThreadId.value = "";
     chatSessions.threads.value = [];
     if (chatSessions.sessions.value.length > 0) {
-      await handleSelectThreadFromDialog(
-        chatSessions.sessions.value[0].id,
-        chatSessions.threads.value[0]?.id ?? "",
-      );
+      await chatSessions.selectSession(chatSessions.sessions.value[0].id);
+      await chatThreadStream.refreshActiveThread();
     }
   } catch (reason) {
     chatComposer.error.value = reason instanceof Error ? reason.message : String(reason);
@@ -184,6 +179,7 @@ async function handleDeleteSession(sessionId: string) {
 
 function handleNewChat() {
   chatThreadStream.closeThreadEvents();
+  chatThreadStream.resetTransientState();
   chatSessions.startNewChatDraft();
   chatComposer.draftMessage.value = "";
   chatThreadStream.messages.value = [];

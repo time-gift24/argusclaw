@@ -22,6 +22,7 @@
 - Phase 3B/4：补齐 providers/templates/MCP 删除、测试连接、MCP tools 发现，以及 tools 注册表可见性。
 - Phase 5A/5B：新增 server-only chat REST API，覆盖 session/thread/message/send/cancel/rename/model binding/snapshot/activate/thread events。
 - Phase 6：`POST /api/v1/chat/sessions/with-thread` 接受可选 `name`，旧客户端缺省时使用非空默认名。
+- Phase 7：新增 server-only agent run API，支持按 `agent_id + prompt` 触发外部 run，并通过独立持久化 `run_id` 查询运行状态。
 - 后续 Web chat 的 TinyRobot、runtime activity 和组件拆分属于 `apps/web` 侧；server 只保持稳定 REST/SSE 契约。
 
 ## Public API
@@ -36,6 +37,8 @@
 - `POST /api/v1/providers/test`
 - `POST /api/v1/providers/{provider_id}/test`
 - `GET|POST /api/v1/agents/templates`
+- `POST /api/v1/agents/runs`
+- `GET /api/v1/agents/runs/{run_id}`
 - `PATCH|DELETE /api/v1/agents/templates/{template_id}`
 - `GET|POST /api/v1/mcp/servers`
 - `PATCH|DELETE /api/v1/mcp/servers/{server_id}`
@@ -57,6 +60,7 @@
 
 - `argus-server` 不依赖 `argus-wing`；两者是平等的应用入口
 - 下层 manager / repository 的直接装配只允许集中在 `ServerCore`，route handler 只调用 `ServerCore` 暴露的窄方法
+- agent run API 的 `run_id` 是独立资源 ID，不允许把普通 chat `thread_id` 当作 run 查询成功
 - chat / thread / message API 仅按 server-only 边界扩展；不改 desktop 主流程；thread event SSE 只允许镜像现有 `ThreadEvent`，不新增 desktop rewiring
 - 不新增 settings/admin_settings 持久化、repository、migration 或 HTTP route；实例名作为产品展示文案由 bootstrap 返回
 - `bootstrap.rs` 只返回 web shell 需要的最小实例初始化摘要，不承担 settings/profile 语义

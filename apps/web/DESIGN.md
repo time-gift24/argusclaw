@@ -258,6 +258,12 @@ Inter Variable, "Noto Sans SC", "PingFang SC", system-ui, sans-serif
 - 展开视图：参数 Schema 预览
 - 不提供执行按钮，管理台只做运维可见性，不扩大工具执行面
 
+### Agent Runs（/agent-runs）
+- 左右分栏：创建运行（左侧）+ 最近一次运行详情（右侧）
+- 创建运行：选择智能体模板、输入提示词、提交 `agent_id + prompt`
+- 详情：展示 `run_id`、agent、状态标签、更新时间、提示词、结果或错误
+- 不提供历史列表；server v1 只支持创建和按 `run_id` 查询单次运行
+
 ### 对话（/chat）
 - 独立 Web 对话页，不复用 desktop chat store，不引入 shared frontend core
 - 页面结构：参考 opencode desktop / Codex 对话风格，左侧为轻量上下文 rail，消息 timeline 是主舞台，底部固定 composer

@@ -49,6 +49,12 @@ export const adminNavItems: AdminNavItem[] = [
     to: "/tools",
   },
   {
+    key: "agent-runs",
+    label: "Agent Runs",
+    description: "按智能体和提示词触发外部运行并查询状态",
+    to: "/agent-runs",
+  },
+  {
     key: "chat",
     label: "对话",
     description: "基于 Web REST API 的独立对话工作台",

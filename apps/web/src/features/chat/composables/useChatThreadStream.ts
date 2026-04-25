@@ -24,6 +24,7 @@ export interface UseChatThreadStreamOptions {
 
 export function useChatThreadStream(options: UseChatThreadStreamOptions) {
   const { activeSessionId, activeThreadId } = options;
+  let refreshRequestId = 0;
 
   const messages: Ref<ChatMessageRecord[]> = ref<ChatMessageRecord[]>([]);
   const streaming = ref(false);
@@ -143,6 +144,14 @@ export function useChatThreadStream(options: UseChatThreadStreamOptions) {
     runtimeNotice.value = "";
   }
 
+  function resetTransientState() {
+    refreshRequestId += 1;
+    streaming.value = false;
+    threadLoading.value = false;
+    runtimeNotice.value = "";
+    clearPendingAssistant();
+  }
+
   function previewValue(value: unknown): string {
     if (value === null || value === undefined) return "";
     if (typeof value === "string") return value;
@@ -205,6 +214,7 @@ export function useChatThreadStream(options: UseChatThreadStreamOptions) {
     const api = getApiClient();
     const sessionId = activeSessionId.value;
     const threadId = activeThreadId.value;
+    const requestId = ++refreshRequestId;
     if (!sessionId || !threadId) {
       messages.value = [];
       return;
@@ -217,11 +227,25 @@ export function useChatThreadStream(options: UseChatThreadStreamOptions) {
         api.getChatThreadSnapshot!(sessionId, threadId),
         api.listChatMessages!(sessionId, threadId),
       ]);
+      if (
+        requestId !== refreshRequestId ||
+        sessionId !== activeSessionId.value ||
+        threadId !== activeThreadId.value
+      ) {
+        return;
+      }
       messages.value = nextMessages.length > 0 ? nextMessages : snapshot.messages;
     } catch (reason) {
+      if (
+        requestId !== refreshRequestId ||
+        sessionId !== activeSessionId.value ||
+        threadId !== activeThreadId.value
+      ) {
+        return;
+      }
       runtimeNotice.value = reason instanceof Error ? reason.message : String(reason);
     } finally {
-      if (!options.silent) {
+      if (!options.silent && requestId === refreshRequestId) {
         threadLoading.value = false;
       }
     }
@@ -241,6 +265,7 @@ export function useChatThreadStream(options: UseChatThreadStreamOptions) {
     handleThreadEvent,
     refreshActiveThread,
     resetRuntimeActivity,
+    resetTransientState,
     countAssistantMessages,
     clearPendingAssistant,
     refreshStreamUntilSettled,

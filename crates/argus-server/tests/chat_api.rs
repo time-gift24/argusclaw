@@ -44,6 +44,86 @@ async fn chat_session_routes_create_list_and_show_empty_threads() {
 }
 
 #[tokio::test]
+async fn agent_run_routes_create_and_query_run_status() {
+    let ctx = support::TestContext::new().await;
+    let _provider = create_test_provider(&ctx).await;
+    let template = first_template(&ctx).await;
+
+    let create_response = ctx
+        .post_json(
+            "/api/v1/agents/runs",
+            &json!({
+                "agent_id": template.id,
+                "prompt": "Summarize the repository boundary"
+            }),
+        )
+        .await;
+
+    assert_eq!(create_response.status(), StatusCode::CREATED);
+    let created: serde_json::Value = support::json_body(create_response).await;
+    assert_eq!(created["data"]["agent_id"], template.id.inner());
+    assert_eq!(created["data"]["status"], "queued");
+    assert!(created["data"]["created_at"].as_str().is_some());
+    assert!(created["data"]["updated_at"].as_str().is_some());
+
+    let run_id = created["data"]["run_id"]
+        .as_str()
+        .expect("run_id should be a string");
+    let get_response = ctx.get(&format!("/api/v1/agents/runs/{run_id}")).await;
+    assert_eq!(get_response.status(), StatusCode::OK);
+
+    let run: serde_json::Value = support::json_body(get_response).await;
+    assert_eq!(run["run_id"], run_id);
+    assert_eq!(run["agent_id"], template.id.inner());
+    assert_eq!(run["prompt"], "Summarize the repository boundary");
+    assert!(matches!(
+        run["status"].as_str(),
+        Some("queued" | "running" | "completed" | "failed")
+    ));
+}
+
+#[tokio::test]
+async fn agent_run_routes_reject_empty_prompt_and_unknown_run() {
+    let ctx = support::TestContext::new().await;
+    let template = first_template(&ctx).await;
+
+    let bad_request = ctx
+        .post_json(
+            "/api/v1/agents/runs",
+            &json!({
+                "agent_id": template.id,
+                "prompt": "   "
+            }),
+        )
+        .await;
+    assert_eq!(bad_request.status(), StatusCode::BAD_REQUEST);
+    let bad_body: serde_json::Value = support::json_body(bad_request).await;
+    assert_eq!(bad_body["error"]["code"], "bad_request");
+
+    let unknown_response = ctx
+        .get(&format!("/api/v1/agents/runs/{}", ThreadId::new()))
+        .await;
+    assert_eq!(unknown_response.status(), StatusCode::NOT_FOUND);
+    let unknown_body: serde_json::Value = support::json_body(unknown_response).await;
+    assert_eq!(unknown_body["error"]["code"], "not_found");
+}
+
+#[tokio::test]
+async fn agent_run_routes_do_not_treat_chat_thread_ids_as_run_ids() {
+    let ctx = support::TestContext::new().await;
+    let provider = create_test_provider(&ctx).await;
+    let template = first_template(&ctx).await;
+    let session = create_test_session(&ctx, "Plain Chat Session").await;
+    let thread = create_test_thread(&ctx, &session, &template, &provider).await;
+
+    let response = ctx.get(&format!("/api/v1/agents/runs/{}", thread.id)).await;
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body: serde_json::Value = support::json_body(response).await;
+    assert_eq!(body["error"]["code"], "not_found");
+}
+
+#[tokio::test]
 async fn chat_session_route_materializes_session_and_thread_like_desktop() {
     let ctx = support::TestContext::new().await;
     let provider = create_test_provider(&ctx).await;
@@ -144,6 +224,38 @@ async fn chat_thread_events_route_opens_stream_for_materialized_thread() {
         .and_then(|value| value.to_str().ok())
         .expect("event stream should set content-type");
     assert!(content_type.starts_with("text/event-stream"));
+}
+
+#[tokio::test]
+async fn chat_session_with_thread_rolls_back_session_when_thread_creation_fails() {
+    let ctx = support::TestContext::new().await;
+    let initial_sessions_response = ctx.get("/api/v1/chat/sessions").await;
+    assert_eq!(initial_sessions_response.status(), StatusCode::OK);
+    let initial_sessions: Vec<SessionSummary> = support::json_body(initial_sessions_response).await;
+
+    let response = ctx
+        .post_json(
+            "/api/v1/chat/sessions/with-thread",
+            &json!({
+                "name": "Should Roll Back",
+                "template_id": 999_999,
+                "provider_id": null,
+                "model": null
+            }),
+        )
+        .await;
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    let sessions_response = ctx.get("/api/v1/chat/sessions").await;
+    assert_eq!(sessions_response.status(), StatusCode::OK);
+    let sessions: Vec<SessionSummary> = support::json_body(sessions_response).await;
+    assert_eq!(sessions.len(), initial_sessions.len());
+    assert!(
+        !sessions
+            .iter()
+            .any(|session| session.name == "Should Roll Back")
+    );
 }
 
 #[tokio::test]

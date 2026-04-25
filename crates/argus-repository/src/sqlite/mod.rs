@@ -13,6 +13,7 @@ use argus_protocol::llm::SecretString;
 
 mod account;
 mod agent;
+mod agent_run;
 mod job;
 mod llm_provider;
 mod mcp;
@@ -61,7 +62,9 @@ pub async fn connect_path(path: &Path) -> DbResult<SqlitePool> {
 
 /// Run database migrations.
 pub async fn migrate(pool: &SqlitePool) -> DbResult<()> {
-    sqlx::migrate!()
+    let mut migrator = sqlx::migrate!();
+    migrator.set_ignore_missing(true);
+    migrator
         .run(pool)
         .await
         .map_err(|e| DbError::MigrationFailed {
@@ -776,5 +779,40 @@ mod tests {
             let _ = std::fs::remove_file(&db_path);
         }
         migrate_result.expect("sqlx migrator should apply flatten migration successfully");
+    }
+
+    #[tokio::test]
+    async fn migrate_ignores_removed_historical_migration_records() {
+        let pool = super::connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite should connect");
+
+        sqlx::query(
+            r#"
+            CREATE TABLE _sqlx_migrations (
+                version BIGINT PRIMARY KEY,
+                description TEXT NOT NULL,
+                installed_on TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                success BOOLEAN NOT NULL,
+                checksum BLOB NOT NULL,
+                execution_time BIGINT NOT NULL
+            );
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("migrations table should be created");
+        sqlx::query(
+            "INSERT INTO _sqlx_migrations (version, description, success, checksum, execution_time)
+             VALUES (20260423090000, 'add admin settings', 1, ?1, 0)",
+        )
+        .bind(Vec::<u8>::from([1, 2, 3, 4]))
+        .execute(&pool)
+        .await
+        .expect("removed historical migration record should insert");
+
+        super::migrate(&pool)
+            .await
+            .expect("migrator should ignore missing historical migration records");
     }
 }

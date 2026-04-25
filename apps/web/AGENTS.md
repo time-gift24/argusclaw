@@ -17,12 +17,13 @@
 - Phase 6：修正首发对话可用性，包括草稿会话名、空名称兜底、工具调用摘要和失败回滚。
 - Phase 7：在 Web 对话中展示当前 turn 的工具、重试、失败等运行活动。
 - Phase 8：将对话展示映射、运行活动、消息舞台、对话面板拆出组件/composable，避免 `ChatPage` 继续膨胀。
+- Phase 9：新增 `/agent-runs` 页面，调用 server-only agent run REST API 触发指定智能体运行并查询最近一次状态。
 
 ## 核心职责
 
 - 作为独立 Vite 应用运行，不由 `argus-server` 托管静态资源。
 - 使用 Vue 3、Vue Router、TypeScript、Vitest 和 OpenTiny Vue。
-- 管理台页面覆盖实例概览、健康检查、运行状态、模型提供方、智能体模板、MCP 服务、工具注册表和 Web 对话。
+- 管理台页面覆盖实例概览、健康检查、运行状态、模型提供方、智能体模板、MCP 服务、工具注册表、Agent Runs 和 Web 对话。
 - 所有业务数据通过 `src/lib/api.ts` 调用 `argus-server` REST/SSE API；server snapshot/messages 是事实来源。
 - `/chat` 使用 TinyRobot 作为消息与输入区基础，管理控件仍优先使用 OpenTiny Vue。
 
