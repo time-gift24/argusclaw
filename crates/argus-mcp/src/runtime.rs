@@ -224,7 +224,7 @@ impl McpToolResolver for McpRuntimeHandle {
         agent_id: AgentId,
         _context: &McpToolResolutionContext,
     ) -> argus_protocol::Result<ResolvedMcpTools> {
-        self.resolve_for_agent(agent_id)
+        McpRuntimeHandle::resolve_for_agent(self, agent_id)
             .await
             .map_err(ArgusError::from)
     }

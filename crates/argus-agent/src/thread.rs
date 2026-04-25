@@ -886,7 +886,7 @@ impl Thread {
             return Ok(Vec::new());
         };
 
-        let context = McpToolResolutionContext::for_thread(self.id.to_string());
+        let context = McpToolResolutionContext::for_thread(self.id);
         let resolved = resolver
             .resolve_for_agent(agent_record.id, &context)
             .await
@@ -1773,13 +1773,9 @@ mod tests {
 
         assert!(tools.is_empty());
         let contexts = contexts.lock().unwrap();
-        let expected_thread_id = thread_id.to_string();
         assert_eq!(contexts.len(), 1);
-        assert_eq!(
-            contexts[0].thread_id.as_deref(),
-            Some(expected_thread_id.as_str())
-        );
-        assert!(contexts[0].runtime_headers.is_none());
+        assert_eq!(contexts[0].thread_id, Some(thread_id));
+        assert!(contexts[0].runtime_headers.is_empty());
     }
 
     #[test]

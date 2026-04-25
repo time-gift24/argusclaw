@@ -4,7 +4,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::{AgentId, NamedTool, Result};
+use crate::{AgentId, NamedTool, Result, ThreadId};
 
 #[test]
 fn mcp_server_record_round_trips_through_json() {
@@ -95,17 +95,17 @@ fn mcp_discovered_tool_record_round_trips_through_json() {
 
 #[test]
 fn mcp_tool_resolution_context_round_trips_runtime_header_overrides() {
+    let thread_id = ThreadId::new();
     let mut headers = McpRuntimeHeaders::empty();
     headers.insert("Authorization", "Bearer runtime-token");
     let mut overrides = McpRuntimeHeaderOverrides::empty();
-    overrides.insert("slack", headers);
-    let context =
-        McpToolResolutionContext::for_thread("thread-123").with_runtime_headers(overrides);
+    overrides.insert(12, headers);
+    let context = McpToolResolutionContext::for_thread(thread_id).with_runtime_headers(overrides);
 
     let value = serde_json::to_value(&context).unwrap();
-    assert_eq!(value["thread_id"], "thread-123");
+    assert_eq!(value["thread_id"], thread_id.to_string());
     assert_eq!(
-        value["runtime_headers"]["slack"]["Authorization"],
+        value["runtime_headers"]["12"]["Authorization"],
         "Bearer runtime-token"
     );
 
@@ -298,11 +298,11 @@ impl From<BTreeMap<String, String>> for McpRuntimeHeaders {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct McpRuntimeHeaderOverrides(BTreeMap<String, McpRuntimeHeaders>);
+pub struct McpRuntimeHeaderOverrides(BTreeMap<i64, McpRuntimeHeaders>);
 
 impl McpRuntimeHeaderOverrides {
     #[must_use]
-    pub fn new(overrides: BTreeMap<String, McpRuntimeHeaders>) -> Self {
+    pub fn new(overrides: BTreeMap<i64, McpRuntimeHeaders>) -> Self {
         Self(overrides)
     }
 
@@ -317,39 +317,39 @@ impl McpRuntimeHeaderOverrides {
     }
 
     #[must_use]
-    pub fn get(&self, server_identifier: &str) -> Option<&McpRuntimeHeaders> {
-        self.0.get(server_identifier)
+    pub fn get(&self, server_id: i64) -> Option<&McpRuntimeHeaders> {
+        self.0.get(&server_id)
     }
 
     #[must_use]
-    pub fn as_map(&self) -> &BTreeMap<String, McpRuntimeHeaders> {
+    pub fn as_map(&self) -> &BTreeMap<i64, McpRuntimeHeaders> {
         &self.0
     }
 
     pub fn insert(
         &mut self,
-        server_identifier: impl Into<String>,
+        server_id: i64,
         headers: impl Into<McpRuntimeHeaders>,
     ) -> Option<McpRuntimeHeaders> {
-        self.0.insert(server_identifier.into(), headers.into())
+        self.0.insert(server_id, headers.into())
     }
 
     #[must_use]
-    pub fn into_inner(self) -> BTreeMap<String, McpRuntimeHeaders> {
+    pub fn into_inner(self) -> BTreeMap<i64, McpRuntimeHeaders> {
         self.0
     }
 }
 
-impl From<BTreeMap<String, McpRuntimeHeaders>> for McpRuntimeHeaderOverrides {
-    fn from(overrides: BTreeMap<String, McpRuntimeHeaders>) -> Self {
+impl From<BTreeMap<i64, McpRuntimeHeaders>> for McpRuntimeHeaderOverrides {
+    fn from(overrides: BTreeMap<i64, McpRuntimeHeaders>) -> Self {
         Self::new(overrides)
     }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct McpToolResolutionContext {
-    pub thread_id: Option<String>,
-    pub runtime_headers: Option<McpRuntimeHeaderOverrides>,
+    pub thread_id: Option<ThreadId>,
+    pub runtime_headers: McpRuntimeHeaderOverrides,
 }
 
 impl McpToolResolutionContext {
@@ -359,16 +359,16 @@ impl McpToolResolutionContext {
     }
 
     #[must_use]
-    pub fn for_thread(thread_id: impl Into<String>) -> Self {
+    pub fn for_thread(thread_id: ThreadId) -> Self {
         Self {
-            thread_id: Some(thread_id.into()),
-            runtime_headers: None,
+            thread_id: Some(thread_id),
+            runtime_headers: McpRuntimeHeaderOverrides::empty(),
         }
     }
 
     #[must_use]
     pub fn with_runtime_headers(mut self, runtime_headers: McpRuntimeHeaderOverrides) -> Self {
-        self.runtime_headers = Some(runtime_headers);
+        self.runtime_headers = runtime_headers;
         self
     }
 }
