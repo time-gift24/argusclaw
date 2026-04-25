@@ -1,3 +1,4 @@
+pub mod account;
 pub mod agent_runs;
 pub mod bootstrap;
 pub mod chat;
@@ -16,6 +17,10 @@ use crate::app_state::AppState;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/v1/health", get(health::get_health))
+        .route(
+            "/api/v1/account",
+            get(account::get_account).put(account::configure_account),
+        )
         .route("/api/v1/bootstrap", get(bootstrap::get_bootstrap))
         .route("/api/v1/runtime", get(runtime::get_runtime_state))
         .route("/api/v1/runtime/events", get(runtime::runtime_events))

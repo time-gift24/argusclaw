@@ -28,6 +28,7 @@
 ## Public API
 
 - `GET /api/v1/health`
+- `GET|PUT /api/v1/account`
 - `GET /api/v1/bootstrap`
 - `GET /api/v1/runtime`
 - `GET /api/v1/runtime/events`

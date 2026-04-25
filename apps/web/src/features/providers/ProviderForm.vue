@@ -36,6 +36,9 @@ function cloneProvider(value: LlmProviderRecord): LlmProviderRecord {
 const draft = ref<LlmProviderRecord>(cloneProvider(props.modelValue));
 const modelsText = ref(props.modelValue.models.join(", "));
 const isEditing = computed(() => draft.value.id > 0);
+const usesAccountTokenSource = computed(
+  () => draft.value.meta_data.account_token_source === "true",
+);
 
 function parseModels(input: string) {
   return input
@@ -64,6 +67,22 @@ function updateField<K extends keyof LlmProviderRecord>(key: K, value: LlmProvid
 function updateModels(value: string | number) {
   modelsText.value = String(value);
   emitDraft(draft.value);
+}
+
+function updateAccountTokenSource(value: boolean) {
+  const metaData = { ...draft.value.meta_data };
+  if (value) {
+    metaData.account_token_source = "true";
+  } else {
+    delete metaData.account_token_source;
+  }
+
+  const next = {
+    ...draft.value,
+    meta_data: metaData,
+  };
+  draft.value = next;
+  emitDraft(next);
 }
 
 watch(
@@ -124,6 +143,22 @@ watch(
           type="password"
           @update:model-value="updateField('api_key', $event)"
         />
+      </TinyFormItem>
+
+      <TinyFormItem
+        label="账号 Token 鉴权"
+        class="full-width"
+      >
+        <div class="provider-form__switch">
+          <TinySwitch
+            :model-value="usesAccountTokenSource"
+            name="account-token-source"
+            @update:model-value="updateAccountTokenSource"
+          />
+          <span class="switch-hint">
+            开启后该提供方会在服务端运行时使用已配置账号换取 token，API Key 可留空。
+          </span>
+        </div>
       </TinyFormItem>
 
       <TinyFormItem label="模型列表">

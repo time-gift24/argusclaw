@@ -2,6 +2,7 @@
 import { onMounted, ref } from "vue";
 import { useRouter } from "vue-router";
 
+import AccountCredentialsPanel from "./AccountCredentialsPanel.vue";
 import { getApiClient, type LlmProviderRecord } from "@/lib/api";
 import { TinyButton, TinyTag } from "@/lib/opentiny";
 
@@ -84,6 +85,8 @@ onMounted(() => {
 
 <template>
   <div class="page-container">
+    <AccountCredentialsPanel />
+
     <article class="list-panel">
       <div class="panel-header">
         <div class="panel-header-left">
@@ -186,6 +189,8 @@ onMounted(() => {
 <style scoped>
 .page-container {
   width: 100%;
+  display: grid;
+  gap: var(--space-4);
 }
 
 .list-panel {
