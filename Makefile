@@ -5,11 +5,12 @@ SERVICE_USER ?= arguswing
 SERVICE_GROUP ?= $(SERVICE_USER)
 SERVICE_NAME ?= arguswing
 DEPLOY_MODE ?= server
+ARGUS_SERVER_ADDR ?= 0.0.0.0:3010
 ETC_DIR ?= /etc/arguswing
 SYSTEMD_DIR ?= /etc/systemd/system
 NGINX_CONF_DIR ?= /etc/nginx/conf.d
 LINUX_STAGE_DIR ?= target/linux/arguswing
-SERVER_ADDR_SERVER ?= 0.0.0.0:3010
+SERVER_ADDR_SERVER ?= $(ARGUS_SERVER_ADDR)
 SERVER_ADDR_NGINX ?= 127.0.0.1:3010
 
 help:
