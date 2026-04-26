@@ -43,6 +43,34 @@ impl AccountRepository for ArgusSqlite {
         Ok(())
     }
 
+    async fn configure_account(
+        &self,
+        username: &str,
+        ciphertext: &[u8],
+        nonce: &[u8],
+    ) -> argus_protocol::Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO accounts (id, username, password, nonce, created_at, updated_at)
+            VALUES (1, ?1, ?2, ?3, datetime('now'), datetime('now'))
+            ON CONFLICT(id) DO UPDATE SET
+                username = excluded.username,
+                password = excluded.password,
+                nonce = excluded.nonce,
+                updated_at = datetime('now')
+            "#,
+        )
+        .bind(username)
+        .bind(ciphertext)
+        .bind(nonce)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| DbError::QueryFailed {
+            reason: e.to_string(),
+        })?;
+        Ok(())
+    }
+
     async fn get_credentials(&self) -> argus_protocol::Result<Option<AccountCredentials>> {
         let row = sqlx::query("SELECT username, password, nonce FROM accounts WHERE id = 1")
             .fetch_optional(&self.pool)

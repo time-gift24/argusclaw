@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use argus_auth::AccountManager;
+use argus_auth::{AccountManager, AuthError};
 use argus_crypto::{Cipher, FileKeySource};
 use argus_job::JobManager;
 use argus_llm::ProviderManager;
@@ -40,7 +40,7 @@ pub struct ServerCore {
     tool_manager: Arc<ToolManager>,
     job_manager: Arc<JobManager>,
     mcp_runtime: Arc<McpRuntime>,
-    _account_manager: Arc<AccountManager>,
+    account_manager: Arc<AccountManager>,
     mcp_repo: Arc<dyn McpRepository>,
     agent_run_repo: Arc<dyn AgentRunRepository>,
 }
@@ -220,7 +220,7 @@ impl ServerCore {
             tool_manager,
             job_manager,
             mcp_runtime,
-            _account_manager: account_manager,
+            account_manager,
             mcp_repo,
             agent_run_repo,
         }))
@@ -252,6 +252,21 @@ impl ServerCore {
 
     pub fn instance_name(&self) -> &'static str {
         DEFAULT_INSTANCE_NAME
+    }
+
+    pub async fn get_account_username(&self) -> Result<Option<String>> {
+        self.account_manager
+            .get_current_user()
+            .await
+            .map(|user| user.map(|user| user.username))
+            .map_err(auth_error_to_argus_error)
+    }
+
+    pub async fn configure_account(&self, username: &str, password: &str) -> Result<()> {
+        self.account_manager
+            .configure_account(username, password)
+            .await
+            .map_err(auth_error_to_argus_error)
     }
 
     pub async fn list_providers(&self) -> Result<Vec<LlmProviderRecord>> {
@@ -857,6 +872,15 @@ fn default_agent_run_session_name(agent_id: AgentId) -> String {
 
 fn timestamp_now() -> String {
     Utc::now().to_rfc3339()
+}
+
+fn auth_error_to_argus_error(error: AuthError) -> ArgusError {
+    match error {
+        AuthError::DatabaseError { reason } => ArgusError::DatabaseError { reason },
+        other => ArgusError::LlmError {
+            reason: format!("account auth error: {other}"),
+        },
+    }
 }
 
 fn latest_assistant_message(messages: &[ChatMessage]) -> Option<String> {

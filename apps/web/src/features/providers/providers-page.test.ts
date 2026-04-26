@@ -8,6 +8,7 @@ import ProvidersPage from "./ProvidersPage.vue";
 import {
   resetApiClient,
   setApiClient,
+  type AccountStatus,
   type LlmProviderRecord,
   type ApiClient,
 } from "@/lib/api";
@@ -47,6 +48,16 @@ function makeApiClient(overrides: Partial<ApiClient> = {}): ApiClient {
       default_template_id: null,
       mcp_ready_count: 0,
     }),
+    getAccountStatus: vi.fn<() => Promise<AccountStatus>>().mockResolvedValue({
+      configured: false,
+      username: null,
+    }),
+    configureAccount: vi
+      .fn<(input: { username: string; password: string }) => Promise<AccountStatus>>()
+      .mockImplementation(async (input) => ({
+        configured: true,
+        username: input.username,
+      })),
     listProviders: vi.fn().mockResolvedValue([]),
     testProvider: vi.fn().mockResolvedValue({
       status: "success",
@@ -120,5 +131,36 @@ describe("ProvidersPage", () => {
     await flushPromises();
 
     expect(wrapper.text()).toContain("server offline");
+  });
+
+  it("shows and saves server account credentials from the providers page", async () => {
+    const configureAccount = vi
+      .fn<(input: { username: string; password: string }) => Promise<AccountStatus>>()
+      .mockResolvedValue({
+        configured: true,
+        username: "alice",
+      });
+
+    setApiClient(makeApiClient({ configureAccount }));
+
+    const wrapper = mount(ProvidersPage, {
+      global: {
+        plugins: [router],
+      },
+    });
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("服务端账号凭据");
+
+    await wrapper.get('input[name="account-username"]').setValue("alice");
+    await wrapper.get('input[name="account-password"]').setValue("first-secret");
+    await wrapper.get('[data-testid="save-account"]').trigger("click");
+    await flushPromises();
+
+    expect(configureAccount).toHaveBeenCalledWith({
+      username: "alice",
+      password: "first-secret",
+    });
+    expect(wrapper.text()).toContain("账号凭据已保存：alice");
   });
 });

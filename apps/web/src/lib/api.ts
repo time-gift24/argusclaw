@@ -145,6 +145,16 @@ export interface DeleteResponse {
   deleted: boolean;
 }
 
+export interface AccountStatus {
+  configured: boolean;
+  username: string | null;
+}
+
+export interface ConfigureAccountRequest {
+  username: string;
+  password: string;
+}
+
 export type ThreadRuntimeStatus =
   | "inactive"
   | "loading"
@@ -425,6 +435,8 @@ export interface ApiClient {
   getBootstrap(): Promise<BootstrapResponse>;
   getRuntimeState(): Promise<RuntimeStateResponse>;
   subscribeRuntimeState?(handlers: RuntimeEventHandlers): RuntimeEventSubscription;
+  getAccountStatus?(): Promise<AccountStatus>;
+  configureAccount?(input: ConfigureAccountRequest): Promise<AccountStatus>;
   listProviders(): Promise<LlmProviderRecord[]>;
   saveProvider(input: SaveProviderRequest): Promise<LlmProviderRecord>;
   deleteProvider?(providerId: number): Promise<DeleteResponse>;
@@ -477,6 +489,20 @@ class HttpApiClient implements ApiClient {
 
   getRuntimeState(): Promise<RuntimeStateResponse> {
     return this.request("/runtime");
+  }
+
+  getAccountStatus(): Promise<AccountStatus> {
+    return this.request("/account");
+  }
+
+  configureAccount(input: ConfigureAccountRequest): Promise<AccountStatus> {
+    return this.request("/account", {
+      body: JSON.stringify(input),
+      headers: {
+        "Content-Type": "application/json",
+      },
+      method: "PUT",
+    });
   }
 
   subscribeRuntimeState(handlers: RuntimeEventHandlers): RuntimeEventSubscription {

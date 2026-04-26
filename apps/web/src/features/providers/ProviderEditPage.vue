@@ -2,8 +2,13 @@
 import { computed, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 
+import AccountCredentialsPanel from "./AccountCredentialsPanel.vue";
 import ProviderForm from "./ProviderForm.vue";
-import { getApiClient, type LlmProviderRecord, type SaveProviderRequest } from "@/lib/api";
+import {
+  getApiClient,
+  type LlmProviderRecord,
+  type SaveProviderRequest,
+} from "@/lib/api";
 import { TinyButton } from "@/lib/opentiny";
 
 const api = getApiClient();
@@ -43,6 +48,9 @@ const submitLabel = computed(() => {
   }
   return isEdit.value ? "更新提供方" : "创建提供方";
 });
+const usesAccountTokenSource = computed(
+  () => draft.value.meta_data.account_token_source === "true",
+);
 
 async function loadProvider() {
   isEdit.value = !!route.params.providerId;
@@ -143,6 +151,10 @@ watch(
           @submit="saveProvider"
         />
 
+        <AccountCredentialsPanel
+          v-if="usesAccountTokenSource"
+        />
+
         <div class="form-extra-actions">
           <TinyButton
             data-testid="test-provider-draft"
@@ -226,4 +238,5 @@ watch(
   color: var(--success);
   font-size: var(--text-sm);
 }
+
 </style>

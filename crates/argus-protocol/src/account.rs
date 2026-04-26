@@ -29,6 +29,14 @@ pub trait AccountRepository: Send + Sync {
         nonce: &[u8],
     ) -> crate::Result<()>;
 
+    /// Create or replace the single configured account.
+    async fn configure_account(
+        &self,
+        username: &str,
+        ciphertext: &[u8],
+        nonce: &[u8],
+    ) -> crate::Result<()>;
+
     /// Get stored credentials for login verification.
     async fn get_credentials(&self) -> crate::Result<Option<AccountCredentials>>;
 

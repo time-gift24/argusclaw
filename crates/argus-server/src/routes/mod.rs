@@ -1,3 +1,4 @@
+pub mod account;
 pub mod agent_runs;
 pub mod bootstrap;
 pub mod chat;
@@ -9,13 +10,17 @@ pub mod templates;
 pub mod tools;
 
 use axum::routing::{get, post};
-use axum::{Router, routing::patch};
+use axum::{Router, http::StatusCode, routing::any, routing::patch};
 
 use crate::app_state::AppState;
 
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/v1/health", get(health::get_health))
+        .route(
+            "/api/v1/account",
+            get(account::get_account).put(account::configure_account),
+        )
         .route("/api/v1/bootstrap", get(bootstrap::get_bootstrap))
         .route("/api/v1/runtime", get(runtime::get_runtime_state))
         .route("/api/v1/runtime/events", get(runtime::runtime_events))
@@ -108,4 +113,10 @@ pub fn router() -> Router<AppState> {
             "/api/v1/mcp/servers/{server_id}",
             patch(mcp::update_mcp_server).delete(mcp::delete_mcp_server),
         )
+        .route("/api/v1", any(api_not_found))
+        .route("/api/v1/{*path}", any(api_not_found))
+}
+
+async fn api_not_found() -> StatusCode {
+    StatusCode::NOT_FOUND
 }

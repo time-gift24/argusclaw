@@ -89,4 +89,58 @@ describe("HttpApiClient", () => {
     expect(detail.status).toBe("completed");
     expect(detail.result).toBe("Done");
   });
+
+  it("gets and configures the server account without returning credentials", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        headers: {
+          get: () => "application/json",
+        },
+        json: async () => ({
+          configured: false,
+          username: null,
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        headers: {
+          get: () => "application/json",
+        },
+        json: async () => ({
+          configured: true,
+          username: "alice",
+        }),
+      });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = getApiClient();
+    expect(client.getAccountStatus).toBeDefined();
+    expect(client.configureAccount).toBeDefined();
+
+    const initial = await client.getAccountStatus!();
+    const configured = await client.configureAccount!({
+      username: "alice",
+      password: "first-secret",
+    });
+
+    expect(fetchMock).toHaveBeenNthCalledWith(1, "/api/v1/account", undefined);
+    expect(fetchMock).toHaveBeenNthCalledWith(2, "/api/v1/account", {
+      body: JSON.stringify({
+        username: "alice",
+        password: "first-secret",
+      }),
+      headers: {
+        "Content-Type": "application/json",
+      },
+      method: "PUT",
+    });
+    expect(initial.configured).toBe(false);
+    expect(configured).toEqual({
+      configured: true,
+      username: "alice",
+    });
+    expect("password" in configured).toBe(false);
+  });
 });

@@ -21,7 +21,7 @@
 
 ## 核心职责
 
-- 作为独立 Vite 应用运行，不由 `argus-server` 托管静态资源。
+- 作为独立 Vite 应用开发与构建；部署时既支持独立运行，也支持由 `argus-server` 在 server-hosted 模式下托管构建后的静态资源。
 - 使用 Vue 3、Vue Router、TypeScript、Vitest 和 OpenTiny Vue。
 - 管理台页面覆盖实例概览、健康检查、运行状态、模型提供方、智能体模板、MCP 服务、工具注册表、Agent Runs 和 Web 对话。
 - 所有业务数据通过 `src/lib/api.ts` 调用 `argus-server` REST/SSE API；server snapshot/messages 是事实来源。
