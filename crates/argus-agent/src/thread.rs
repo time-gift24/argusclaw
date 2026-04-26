@@ -12,9 +12,9 @@ use crate::turn::{self, TurnCancellation};
 use argus_protocol::llm::{ChatMessage, LlmProvider};
 use argus_protocol::tool::NamedTool;
 use argus_protocol::{
-    AgentRecord, HookHandler, HookRegistry, McpToolResolver, MessageOverride, QueuedUserMessage,
-    SessionId, ThreadControlMessage, ThreadEvent, ThreadId, ThreadMessage, ThreadNoticeLevel,
-    TokenUsage,
+    AgentRecord, HookHandler, HookRegistry, McpToolResolutionContext, McpToolResolver,
+    MessageOverride, QueuedUserMessage, SessionId, ThreadControlMessage, ThreadEvent, ThreadId,
+    ThreadMessage, ThreadNoticeLevel, TokenUsage,
 };
 use argus_tool::ToolManager;
 
@@ -886,8 +886,9 @@ impl Thread {
             return Ok(Vec::new());
         };
 
+        let context = McpToolResolutionContext::for_thread(self.id);
         let resolved = resolver
-            .resolve_for_agent(agent_record.id)
+            .resolve_for_agent(agent_record.id, &context)
             .await
             .map_err(|error| ThreadError::McpToolResolutionFailed {
                 reason: error.to_string(),
@@ -1465,8 +1466,8 @@ mod tests {
     use argus_protocol::llm::{CompletionRequest, CompletionResponse, LlmError, ToolDefinition};
     use argus_protocol::tool::{NamedTool, ToolError, ToolExecutionContext};
     use argus_protocol::{
-        AgentId, MailboxMessage, MailboxMessageType, ProviderId, ThreadControlMessage,
-        ThreadMessage,
+        AgentId, MailboxMessage, MailboxMessageType, McpToolResolutionContext, McpToolResolver,
+        ProviderId, ResolvedMcpTools, ThreadControlMessage, ThreadMessage,
     };
     use async_trait::async_trait;
     use futures_util::stream;
@@ -1545,6 +1546,23 @@ mod tests {
 
         fn name(&self) -> &'static str {
             "noop"
+        }
+    }
+
+    #[derive(Debug)]
+    struct RecordingMcpResolver {
+        contexts: Arc<Mutex<Vec<McpToolResolutionContext>>>,
+    }
+
+    #[async_trait]
+    impl McpToolResolver for RecordingMcpResolver {
+        async fn resolve_for_agent(
+            &self,
+            _agent_id: AgentId,
+            context: &McpToolResolutionContext,
+        ) -> argus_protocol::Result<ResolvedMcpTools> {
+            self.contexts.lock().unwrap().push(context.clone());
+            Ok(ResolvedMcpTools::default())
         }
     }
 
@@ -1730,6 +1748,34 @@ mod tests {
             tool_names.iter().any(|name| name == "scheduler"),
             "dispatch-capable agents should automatically receive scheduler"
         );
+    }
+
+    #[tokio::test]
+    async fn resolve_mcp_tools_passes_current_thread_id_to_resolver() {
+        let thread_id = ThreadId::new();
+        let contexts = Arc::new(Mutex::new(Vec::new()));
+        let thread = ThreadBuilder::new()
+            .id(thread_id)
+            .provider(Arc::new(DummyProvider))
+            .compactor(Arc::new(NoopCompactor))
+            .agent_record(test_agent_record())
+            .session_id(SessionId::new())
+            .mcp_tool_resolver(Arc::new(RecordingMcpResolver {
+                contexts: Arc::clone(&contexts),
+            }))
+            .build()
+            .expect("thread should build");
+
+        let tools = thread
+            .resolve_mcp_tools(&thread.agent_record)
+            .await
+            .expect("MCP resolution should succeed");
+
+        assert!(tools.is_empty());
+        let contexts = contexts.lock().unwrap();
+        assert_eq!(contexts.len(), 1);
+        assert_eq!(contexts[0].thread_id, Some(thread_id));
+        assert!(contexts[0].runtime_headers.is_empty());
     }
 
     #[test]

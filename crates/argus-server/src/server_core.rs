@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use argus_auth::AccountManager;
@@ -8,9 +9,10 @@ use argus_mcp::{McpRuntime, McpRuntimeConfig, RmcpConnector};
 use argus_protocol::llm::ChatMessage;
 use argus_protocol::{
     AgentId, AgentRecord, ArgusError, JobRuntimeState, LlmProviderId, LlmProviderRecord,
-    McpDiscoveredToolRecord, McpServerRecord, McpServerStatus, McpToolResolver, ProviderId,
-    ProviderResolver, ProviderTestResult, Result, RiskLevel, SessionId, ThreadEvent, ThreadId,
-    ThreadPoolState, ThreadRuntimeStatus,
+    McpDiscoveredToolRecord, McpRuntimeHeaderOverrides, McpRuntimeHeaders, McpServerRecord,
+    McpServerStatus, McpToolResolutionContext, McpToolResolver, McpTransportConfig, ProviderId,
+    ProviderResolver, ProviderTestResult, ResolvedMcpTools, Result, RiskLevel, SessionId,
+    ThreadEvent, ThreadId, ThreadPoolState, ThreadRuntimeStatus,
 };
 use argus_repository::traits::{
     AccountRepository, AgentRepository, AgentRunRepository, JobRepository, LlmProviderRepository,
@@ -22,11 +24,15 @@ use argus_session::{SessionManager, SessionSummary, ThreadSummary};
 use argus_template::TemplateManager;
 use argus_thread_pool::ThreadPool;
 use argus_tool::ToolManager;
+use async_trait::async_trait;
+use axum::http::{HeaderName, HeaderValue};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
+use thiserror::Error;
 use tokio::sync::broadcast;
 
+use crate::agent_run_context::AgentRunContextRegistry;
 use crate::db::{DatabaseTarget, default_trace_dir, ensure_parent_dir, resolve_database_target};
 use crate::resolver::ProviderManagerResolver;
 
@@ -43,6 +49,38 @@ pub struct ServerCore {
     _account_manager: Arc<AccountManager>,
     mcp_repo: Arc<dyn McpRepository>,
     agent_run_repo: Arc<dyn AgentRunRepository>,
+    agent_run_contexts: AgentRunContextRegistry,
+}
+
+struct RunScopedMcpToolResolver {
+    inner: Arc<dyn McpToolResolver>,
+    registry: AgentRunContextRegistry,
+}
+
+impl RunScopedMcpToolResolver {
+    fn new(inner: Arc<dyn McpToolResolver>, registry: AgentRunContextRegistry) -> Self {
+        Self { inner, registry }
+    }
+}
+
+#[async_trait]
+impl McpToolResolver for RunScopedMcpToolResolver {
+    async fn resolve_for_agent(
+        &self,
+        agent_id: AgentId,
+        context: &McpToolResolutionContext,
+    ) -> Result<ResolvedMcpTools> {
+        let mut scoped_context = context.clone();
+        if let Some(thread_id) = context.thread_id {
+            let headers = self.registry.headers_for_thread(thread_id);
+            if !headers.is_empty() {
+                scoped_context.runtime_headers = headers;
+            }
+        }
+        self.inner
+            .resolve_for_agent(agent_id, &scoped_context)
+            .await
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -102,6 +140,14 @@ pub struct AgentRunDetail {
     pub created_at: String,
     pub updated_at: String,
     pub completed_at: Option<String>,
+}
+
+#[derive(Debug, Error)]
+pub enum McpHeaderOverrideError {
+    #[error("{0}")]
+    BadRequest(String),
+    #[error(transparent)]
+    Internal(ArgusError),
 }
 
 impl From<&AgentRunRecord> for AgentRunSummary {
@@ -196,9 +242,24 @@ impl ServerCore {
             McpRuntimeConfig::default(),
         ));
         McpRuntime::start(&mcp_runtime);
-        let mcp_tool_resolver: Arc<dyn McpToolResolver> =
+        let agent_run_contexts = AgentRunContextRegistry::default();
+        let base_mcp_tool_resolver: Arc<dyn McpToolResolver> =
             Arc::new(McpRuntime::handle(&mcp_runtime));
+        let mcp_tool_resolver: Arc<dyn McpToolResolver> = Arc::new(RunScopedMcpToolResolver::new(
+            base_mcp_tool_resolver,
+            agent_run_contexts.clone(),
+        ));
         job_manager.set_mcp_tool_resolver(Some(Arc::clone(&mcp_tool_resolver)));
+        let child_contexts = agent_run_contexts.clone();
+        job_manager.set_job_thread_created_hook(Some(Arc::new(move |parent, child| {
+            if let Err(error) = child_contexts.inherit_thread(parent, child) {
+                tracing::debug!(%parent, %child, %error, "job thread has no agent run context to inherit");
+            }
+        })));
+        let finished_contexts = agent_run_contexts.clone();
+        job_manager.set_job_thread_finished_hook(Some(Arc::new(move |thread_id| {
+            finished_contexts.release_thread(thread_id);
+        })));
 
         let session_manager = Arc::new(SessionManager::new(
             sqlite.clone() as Arc<dyn SessionRepository>,
@@ -223,6 +284,7 @@ impl ServerCore {
             _account_manager: account_manager,
             mcp_repo,
             agent_run_repo,
+            agent_run_contexts,
         }))
     }
 
@@ -561,6 +623,22 @@ impl ServerCore {
         }
     }
 
+    async fn cleanup_failed_agent_run_session(&self, session_id: SessionId, thread_id: ThreadId) {
+        if let Err(error) = self
+            .session_manager
+            .delete_thread(session_id, &thread_id)
+            .await
+        {
+            tracing::warn!(
+                session_id = %session_id,
+                thread_id = %thread_id,
+                error = %error,
+                "failed to delete agent run thread after materialization error"
+            );
+        }
+        self.cleanup_failed_chat_session(session_id).await;
+    }
+
     pub async fn delete_chat_thread(
         &self,
         session_id: SessionId,
@@ -695,7 +773,9 @@ impl ServerCore {
         &self,
         agent_id: AgentId,
         prompt: String,
+        mcp_headers: McpRuntimeHeaderOverrides,
     ) -> Result<AgentRunSummary> {
+        let has_run_context = !mcp_headers.is_empty();
         let session_id = self
             .session_manager
             .create(default_agent_run_session_name(agent_id))
@@ -715,14 +795,23 @@ impl ServerCore {
         let mut events = match self.session_manager.subscribe(session_id, &thread_id).await {
             Some(events) => events,
             None => {
-                self.cleanup_failed_chat_session(session_id).await;
+                self.cleanup_failed_agent_run_session(session_id, thread_id)
+                    .await;
                 return Err(ArgusError::ThreadNotFound(thread_id.to_string()));
             }
         };
+        if has_run_context {
+            self.agent_run_contexts
+                .register_run_thread(run_id, thread_id, mcp_headers);
+        }
         let thread_record = match self.session_manager.get_thread_record(&thread_id).await {
             Ok(thread_record) => thread_record,
             Err(error) => {
-                self.cleanup_failed_chat_session(session_id).await;
+                if has_run_context {
+                    self.agent_run_contexts.remove_run(run_id);
+                }
+                self.cleanup_failed_agent_run_session(session_id, thread_id)
+                    .await;
                 return Err(error);
             }
         };
@@ -740,23 +829,37 @@ impl ServerCore {
             updated_at: thread_record.updated_at.clone(),
             completed_at: None,
         };
-        self.agent_run_repo
+        if let Err(error) = self
+            .agent_run_repo
             .insert_agent_run(&record)
             .await
-            .map_err(database_error)?;
+            .map_err(database_error)
+        {
+            if has_run_context {
+                self.agent_run_contexts.remove_run(run_id);
+            }
+            self.cleanup_failed_agent_run_session(session_id, thread_id)
+                .await;
+            return Err(error);
+        }
 
         if let Err(error) = self
             .session_manager
             .send_message(session_id, &thread_id, prompt)
             .await
         {
+            if has_run_context {
+                self.agent_run_contexts.remove_run(run_id);
+            }
             let _ = self.agent_run_repo.delete_agent_run(&run_id).await;
-            self.cleanup_failed_chat_session(session_id).await;
+            self.cleanup_failed_agent_run_session(session_id, thread_id)
+                .await;
             return Err(error);
         }
 
         let agent_run_repo = Arc::clone(&self.agent_run_repo);
         let session_manager = Arc::clone(&self.session_manager);
+        let agent_run_contexts = self.agent_run_contexts.clone();
         tokio::spawn(async move {
             track_agent_run(
                 &mut events,
@@ -765,11 +868,54 @@ impl ServerCore {
                 session_id,
                 thread_id,
                 run_id,
+                agent_run_contexts,
             )
             .await;
         });
 
         Ok(AgentRunSummary::from(&record))
+    }
+
+    pub async fn resolve_mcp_header_overrides(
+        &self,
+        raw_headers: BTreeMap<String, BTreeMap<String, String>>,
+    ) -> std::result::Result<McpRuntimeHeaderOverrides, McpHeaderOverrideError> {
+        if raw_headers.is_empty() {
+            return Ok(McpRuntimeHeaderOverrides::empty());
+        }
+
+        let servers = self
+            .mcp_repo
+            .list_mcp_servers()
+            .await
+            .map_err(|error| McpHeaderOverrideError::Internal(database_error(error)))?;
+        let mut overrides = McpRuntimeHeaderOverrides::empty();
+        for (server_key, headers) in raw_headers {
+            let server = resolve_mcp_server_for_runtime_headers(&servers, &server_key)
+                .map_err(McpHeaderOverrideError::BadRequest)?;
+            ensure_runtime_headers_supported(server).map_err(McpHeaderOverrideError::BadRequest)?;
+            let mut runtime_headers = McpRuntimeHeaders::empty();
+            for (name, value) in headers {
+                validate_runtime_header(&name, &value)
+                    .map_err(McpHeaderOverrideError::BadRequest)?;
+                runtime_headers.insert(name, value);
+            }
+            if !runtime_headers.is_empty() {
+                let server_id = server.id.ok_or_else(|| {
+                    McpHeaderOverrideError::Internal(database_error(format!(
+                        "MCP server '{}' is missing a persisted id",
+                        server.display_name
+                    )))
+                })?;
+                if overrides.get(server_id).is_some() {
+                    return Err(McpHeaderOverrideError::BadRequest(format!(
+                        "runtime headers for MCP server '{server_id}' were provided more than once"
+                    )));
+                }
+                overrides.insert(server_id, runtime_headers);
+            }
+        }
+        Ok(overrides)
     }
 
     pub async fn get_agent_run(&self, run_id: AgentRunId) -> Result<AgentRunDetail> {
@@ -853,6 +999,46 @@ fn missing_after_mutation(kind: &str, id: impl std::fmt::Display) -> ArgusError 
 
 fn default_agent_run_session_name(agent_id: AgentId) -> String {
     format!("Agent Run {}", agent_id.inner())
+}
+
+fn resolve_mcp_server_for_runtime_headers<'a>(
+    servers: &'a [McpServerRecord],
+    key: &str,
+) -> std::result::Result<&'a McpServerRecord, String> {
+    if let Ok(server_id) = key.parse::<i64>() {
+        return servers
+            .iter()
+            .find(|server| server.id == Some(server_id))
+            .ok_or_else(|| format!("MCP server '{key}' was not found"));
+    }
+
+    let matches = servers
+        .iter()
+        .filter(|server| server.display_name == key)
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [server] => Ok(server),
+        [] => Err(format!("MCP server '{key}' was not found")),
+        _ => Err(format!("MCP server display name '{key}' is ambiguous")),
+    }
+}
+
+fn ensure_runtime_headers_supported(server: &McpServerRecord) -> std::result::Result<(), String> {
+    match server.transport {
+        McpTransportConfig::Http { .. } | McpTransportConfig::Sse { .. } => Ok(()),
+        McpTransportConfig::Stdio { .. } => Err(format!(
+            "runtime headers only support HTTP/SSE MCP servers; '{}' uses stdio",
+            server.display_name
+        )),
+    }
+}
+
+fn validate_runtime_header(name: &str, value: &str) -> std::result::Result<(), String> {
+    HeaderName::from_bytes(name.as_bytes())
+        .map_err(|error| format!("invalid MCP runtime header name '{name}': {error}"))?;
+    HeaderValue::from_str(value)
+        .map_err(|error| format!("invalid MCP runtime header value for '{name}': {error}"))?;
+    Ok(())
 }
 
 fn timestamp_now() -> String {
@@ -977,6 +1163,7 @@ async fn track_agent_run(
     session_id: SessionId,
     tracked_thread_id: ThreadId,
     run_id: AgentRunId,
+    agent_run_contexts: AgentRunContextRegistry,
 ) {
     let thread_id_text = tracked_thread_id.to_string();
     loop {
@@ -1016,5 +1203,158 @@ async fn track_agent_run(
             Err(broadcast::error::RecvError::Lagged(_)) => continue,
             Err(broadcast::error::RecvError::Closed) => break,
         }
+    }
+    agent_run_contexts.release_thread(tracked_thread_id);
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use super::*;
+
+    #[derive(Default)]
+    struct RecordingMcpResolver {
+        contexts: Mutex<Vec<McpToolResolutionContext>>,
+    }
+
+    #[async_trait]
+    impl McpToolResolver for RecordingMcpResolver {
+        async fn resolve_for_agent(
+            &self,
+            _agent_id: AgentId,
+            context: &McpToolResolutionContext,
+        ) -> Result<ResolvedMcpTools> {
+            self.contexts.lock().unwrap().push(context.clone());
+            Ok(ResolvedMcpTools::default())
+        }
+    }
+
+    #[tokio::test]
+    async fn run_scoped_resolver_uses_thread_headers() {
+        let inner = Arc::new(RecordingMcpResolver::default());
+        let registry = AgentRunContextRegistry::default();
+        let run_id = AgentRunId::new();
+        let thread_id = ThreadId::new();
+        let mut headers = McpRuntimeHeaders::empty();
+        headers.insert("Authorization", "Bearer runtime");
+        let mut overrides = McpRuntimeHeaderOverrides::empty();
+        overrides.insert(12, headers);
+        registry.register_run_thread(run_id, thread_id, overrides.clone());
+
+        let resolver = RunScopedMcpToolResolver::new(inner.clone(), registry);
+        resolver
+            .resolve_for_agent(
+                AgentId::new(7),
+                &McpToolResolutionContext::for_thread(thread_id),
+            )
+            .await
+            .expect("resolver should delegate with run headers");
+
+        let contexts = inner.contexts.lock().unwrap();
+        assert_eq!(contexts.len(), 1);
+        assert_eq!(contexts[0].thread_id, Some(thread_id));
+        assert_eq!(contexts[0].runtime_headers, overrides);
+    }
+
+    #[tokio::test]
+    async fn run_scoped_resolver_isolates_headers_between_concurrent_runs() {
+        let inner = Arc::new(RecordingMcpResolver::default());
+        let registry = AgentRunContextRegistry::default();
+        let first_run = AgentRunId::new();
+        let first_thread = ThreadId::new();
+        let second_run = AgentRunId::new();
+        let second_thread = ThreadId::new();
+
+        let mut first_headers = McpRuntimeHeaders::empty();
+        first_headers.insert("Authorization", "Bearer first");
+        let mut first_overrides = McpRuntimeHeaderOverrides::empty();
+        first_overrides.insert(12, first_headers);
+
+        let mut second_headers = McpRuntimeHeaders::empty();
+        second_headers.insert("Authorization", "Bearer second");
+        let mut second_overrides = McpRuntimeHeaderOverrides::empty();
+        second_overrides.insert(12, second_headers);
+
+        registry.register_run_thread(first_run, first_thread, first_overrides.clone());
+        registry.register_run_thread(second_run, second_thread, second_overrides.clone());
+
+        let resolver = RunScopedMcpToolResolver::new(inner.clone(), registry);
+        resolver
+            .resolve_for_agent(
+                AgentId::new(7),
+                &McpToolResolutionContext::for_thread(first_thread),
+            )
+            .await
+            .expect("first run should resolve with its own runtime headers");
+        resolver
+            .resolve_for_agent(
+                AgentId::new(7),
+                &McpToolResolutionContext::for_thread(second_thread),
+            )
+            .await
+            .expect("second run should resolve with its own runtime headers");
+
+        let contexts = inner.contexts.lock().unwrap();
+        assert_eq!(contexts.len(), 2);
+        assert_eq!(contexts[0].thread_id, Some(first_thread));
+        assert_eq!(contexts[0].runtime_headers, first_overrides);
+        assert_eq!(contexts[1].thread_id, Some(second_thread));
+        assert_eq!(contexts[1].runtime_headers, second_overrides);
+    }
+
+    #[tokio::test]
+    async fn track_agent_run_idle_keeps_child_thread_headers_alive() {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("sqlite pool should connect for tests");
+        migrate(&pool)
+            .await
+            .expect("test migrations should succeed");
+        let core = ServerCore::with_pool(pool)
+            .await
+            .expect("server core should initialize for tests");
+        let run_id = AgentRunId::new();
+        let parent_thread_id = ThreadId::new();
+        let child_thread_id = ThreadId::new();
+        let mut headers = McpRuntimeHeaders::empty();
+        headers.insert("Authorization", "Bearer runtime");
+        let mut overrides = McpRuntimeHeaderOverrides::empty();
+        overrides.insert(12, headers);
+        core.agent_run_contexts
+            .register_run_thread(run_id, parent_thread_id, overrides.clone());
+        core.agent_run_contexts
+            .inherit_thread(parent_thread_id, child_thread_id)
+            .expect("child thread should inherit run context");
+
+        let (events_tx, mut events_rx) = broadcast::channel(8);
+        let agent_run_repo = Arc::clone(&core.agent_run_repo);
+        let session_manager = Arc::clone(&core.session_manager);
+        let agent_run_contexts = core.agent_run_contexts.clone();
+        let task = tokio::spawn(async move {
+            track_agent_run(
+                &mut events_rx,
+                agent_run_repo,
+                session_manager,
+                SessionId::new(),
+                parent_thread_id,
+                run_id,
+                agent_run_contexts,
+            )
+            .await;
+        });
+
+        events_tx
+            .send(ThreadEvent::Idle {
+                thread_id: parent_thread_id.to_string(),
+            })
+            .expect("idle event should send");
+        task.await.expect("tracking task should complete");
+
+        assert_eq!(
+            core.agent_run_contexts.headers_for_thread(child_thread_id),
+            overrides,
+            "parent idle should not drop inherited child-thread headers"
+        );
     }
 }

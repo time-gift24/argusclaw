@@ -261,6 +261,7 @@ Inter Variable, "Noto Sans SC", "PingFang SC", system-ui, sans-serif
 ### Agent Runs（/agent-runs）
 - 左右分栏：创建运行（左侧）+ 最近一次运行详情（右侧）
 - 创建运行：选择智能体模板、输入提示词、提交 `agent_id + prompt`
+- API 契约：`POST /api/v1/agents/runs` 可选传入 `mcp_headers`，用于外部调用方按单次 run 覆盖 HTTP/SSE MCP header；当前 Web 页面不展示该高级入口
 - 详情：展示 `run_id`、agent、状态标签、更新时间、提示词、结果或错误
 - 不提供历史列表；server v1 只支持创建和按 `run_id` 查询单次运行
 

@@ -9,7 +9,7 @@ pub mod templates;
 pub mod tools;
 
 use axum::routing::{get, post};
-use axum::{Router, routing::patch};
+use axum::{Router, http::StatusCode, routing::any, routing::patch};
 
 use crate::app_state::AppState;
 
@@ -108,4 +108,10 @@ pub fn router() -> Router<AppState> {
             "/api/v1/mcp/servers/{server_id}",
             patch(mcp::update_mcp_server).delete(mcp::delete_mcp_server),
         )
+        .route("/api/v1", any(api_not_found))
+        .route("/api/v1/{*path}", any(api_not_found))
+}
+
+async fn api_not_found() -> StatusCode {
+    StatusCode::NOT_FOUND
 }

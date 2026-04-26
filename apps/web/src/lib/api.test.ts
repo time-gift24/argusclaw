@@ -73,11 +73,24 @@ describe("HttpApiClient", () => {
     const created = await client.createAgentRun!({
       agent_id: 7,
       prompt: "Inspect the plan",
+      mcp_headers: {
+        tenant: {
+          Authorization: "Bearer runtime",
+        },
+      },
     });
     const detail = await client.getAgentRun!("run-1");
 
     expect(fetchMock).toHaveBeenNthCalledWith(1, "/api/v1/agents/runs", {
-      body: JSON.stringify({ agent_id: 7, prompt: "Inspect the plan" }),
+      body: JSON.stringify({
+        agent_id: 7,
+        prompt: "Inspect the plan",
+        mcp_headers: {
+          tenant: {
+            Authorization: "Bearer runtime",
+          },
+        },
+      }),
       headers: {
         "Content-Type": "application/json",
       },

@@ -1,9 +1,10 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::{AgentId, NamedTool, Result};
+use crate::{AgentId, NamedTool, Result, ThreadId};
 
 #[test]
 fn mcp_server_record_round_trips_through_json() {
@@ -90,6 +91,26 @@ fn mcp_discovered_tool_record_round_trips_through_json() {
     let value = serde_json::to_value(&record).unwrap();
     let decoded: McpDiscoveredToolRecord = serde_json::from_value(value).unwrap();
     assert_eq!(decoded, record);
+}
+
+#[test]
+fn mcp_tool_resolution_context_round_trips_runtime_header_overrides() {
+    let thread_id = ThreadId::new();
+    let mut headers = McpRuntimeHeaders::empty();
+    headers.insert("Authorization", "Bearer runtime-token");
+    let mut overrides = McpRuntimeHeaderOverrides::empty();
+    overrides.insert(12, headers);
+    let context = McpToolResolutionContext::for_thread(thread_id).with_runtime_headers(overrides);
+
+    let value = serde_json::to_value(&context).unwrap();
+    assert_eq!(value["thread_id"], thread_id.to_string());
+    assert_eq!(
+        value["runtime_headers"]["12"]["Authorization"],
+        "Bearer runtime-token"
+    );
+
+    let decoded: McpToolResolutionContext = serde_json::from_value(value).unwrap();
+    assert_eq!(decoded, context);
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -229,6 +250,129 @@ pub struct McpUnavailableServerSummary {
     pub reason: String,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct McpRuntimeHeaders(BTreeMap<String, String>);
+
+impl McpRuntimeHeaders {
+    #[must_use]
+    pub fn new(headers: BTreeMap<String, String>) -> Self {
+        Self(headers)
+    }
+
+    #[must_use]
+    pub fn empty() -> Self {
+        Self::default()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    #[must_use]
+    pub fn get(&self, name: &str) -> Option<&str> {
+        self.0.get(name).map(String::as_str)
+    }
+
+    #[must_use]
+    pub fn as_map(&self) -> &BTreeMap<String, String> {
+        &self.0
+    }
+
+    pub fn insert(&mut self, name: impl Into<String>, value: impl Into<String>) -> Option<String> {
+        self.0.insert(name.into(), value.into())
+    }
+
+    #[must_use]
+    pub fn into_inner(self) -> BTreeMap<String, String> {
+        self.0
+    }
+}
+
+impl From<BTreeMap<String, String>> for McpRuntimeHeaders {
+    fn from(headers: BTreeMap<String, String>) -> Self {
+        Self::new(headers)
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct McpRuntimeHeaderOverrides(BTreeMap<i64, McpRuntimeHeaders>);
+
+impl McpRuntimeHeaderOverrides {
+    #[must_use]
+    pub fn new(overrides: BTreeMap<i64, McpRuntimeHeaders>) -> Self {
+        Self(overrides)
+    }
+
+    #[must_use]
+    pub fn empty() -> Self {
+        Self::default()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    #[must_use]
+    pub fn get(&self, server_id: i64) -> Option<&McpRuntimeHeaders> {
+        self.0.get(&server_id)
+    }
+
+    #[must_use]
+    pub fn as_map(&self) -> &BTreeMap<i64, McpRuntimeHeaders> {
+        &self.0
+    }
+
+    pub fn insert(
+        &mut self,
+        server_id: i64,
+        headers: impl Into<McpRuntimeHeaders>,
+    ) -> Option<McpRuntimeHeaders> {
+        self.0.insert(server_id, headers.into())
+    }
+
+    #[must_use]
+    pub fn into_inner(self) -> BTreeMap<i64, McpRuntimeHeaders> {
+        self.0
+    }
+}
+
+impl From<BTreeMap<i64, McpRuntimeHeaders>> for McpRuntimeHeaderOverrides {
+    fn from(overrides: BTreeMap<i64, McpRuntimeHeaders>) -> Self {
+        Self::new(overrides)
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpToolResolutionContext {
+    pub thread_id: Option<ThreadId>,
+    pub runtime_headers: McpRuntimeHeaderOverrides,
+}
+
+impl McpToolResolutionContext {
+    #[must_use]
+    pub fn empty() -> Self {
+        Self::default()
+    }
+
+    #[must_use]
+    pub fn for_thread(thread_id: ThreadId) -> Self {
+        Self {
+            thread_id: Some(thread_id),
+            runtime_headers: McpRuntimeHeaderOverrides::empty(),
+        }
+    }
+
+    #[must_use]
+    pub fn with_runtime_headers(mut self, runtime_headers: McpRuntimeHeaderOverrides) -> Self {
+        self.runtime_headers = runtime_headers;
+        self
+    }
+}
+
 #[derive(Default)]
 pub struct ResolvedMcpTools {
     pub tools: Vec<Arc<dyn NamedTool>>,
@@ -250,5 +394,9 @@ impl ResolvedMcpTools {
 
 #[async_trait]
 pub trait McpToolResolver: Send + Sync {
-    async fn resolve_for_agent(&self, agent_id: AgentId) -> Result<ResolvedMcpTools>;
+    async fn resolve_for_agent(
+        &self,
+        agent_id: AgentId,
+        context: &McpToolResolutionContext,
+    ) -> Result<ResolvedMcpTools>;
 }

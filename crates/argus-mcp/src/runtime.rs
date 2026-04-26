@@ -21,8 +21,9 @@ use std::os::windows::process::CommandExt;
 
 use argus_protocol::tool::NamedTool;
 use argus_protocol::{
-    AgentId, ArgusError, McpDiscoveredToolRecord, McpServerRecord, McpServerStatus,
-    McpToolResolver, McpTransportConfig, ResolvedMcpTools,
+    AgentId, ArgusError, McpDiscoveredToolRecord, McpRuntimeHeaderOverrides, McpRuntimeHeaders,
+    McpServerRecord, McpServerStatus, McpToolResolutionContext, McpToolResolver,
+    McpTransportConfig, ResolvedMcpTools,
 };
 pub use argus_repository::traits::McpRepository;
 
@@ -171,6 +172,64 @@ type PendingLegacySseResponse = Result<serde_json::Value, McpRuntimeError>;
 type PendingLegacySseSender = tokio::sync::oneshot::Sender<PendingLegacySseResponse>;
 type PendingLegacySseMap = HashMap<u64, PendingLegacySseSender>;
 
+#[derive(Clone)]
+struct RuntimeHeaderSession {
+    session: Arc<dyn McpSession>,
+    timeout_ms: u64,
+}
+
+struct RuntimeHeaderMcpToolExecutor {
+    fallback: Arc<dyn McpToolExecutor>,
+    sessions: HashMap<i64, RuntimeHeaderSession>,
+}
+
+impl RuntimeHeaderMcpToolExecutor {
+    fn new(
+        fallback: Arc<dyn McpToolExecutor>,
+        sessions: HashMap<i64, RuntimeHeaderSession>,
+    ) -> Self {
+        Self { fallback, sessions }
+    }
+}
+
+#[async_trait]
+impl McpToolExecutor for RuntimeHeaderMcpToolExecutor {
+    async fn execute_mcp_tool(
+        &self,
+        server_id: i64,
+        tool_name_original: &str,
+        input: serde_json::Value,
+    ) -> Result<serde_json::Value, McpRuntimeError> {
+        let Some(entry) = self.sessions.get(&server_id) else {
+            return self
+                .fallback
+                .execute_mcp_tool(server_id, tool_name_original, input)
+                .await;
+        };
+        let tool_name = tool_name_original.to_string();
+        timeout_operation(
+            entry.timeout_ms,
+            entry.session.call_tool(tool_name_original, input),
+            || McpRuntimeError::ConnectFailed {
+                server_id,
+                reason: format!("tool call timed out after {}ms", entry.timeout_ms),
+            },
+            |error| match error {
+                McpRuntimeError::ConnectFailed { reason, .. } => {
+                    McpRuntimeError::ConnectFailed { server_id, reason }
+                }
+                McpRuntimeError::ToolCallFailed { reason, .. } => McpRuntimeError::ToolCallFailed {
+                    server_id,
+                    tool_name,
+                    reason,
+                },
+                other => other,
+            },
+        )
+        .await
+    }
+}
+
 fn streamable_http_protocol_versions() -> [ProtocolVersion; 3] {
     [
         ProtocolVersion::V_2025_06_18,
@@ -207,6 +266,17 @@ impl McpRuntimeHandle {
             .resolve_for_agent_with_executor(agent_id, executor)
             .await
     }
+
+    pub async fn resolve_for_agent_with_runtime_headers(
+        &self,
+        agent_id: AgentId,
+        runtime_headers: McpRuntimeHeaderOverrides,
+    ) -> Result<ResolvedMcpTools, McpRuntimeError> {
+        let executor: Arc<dyn McpToolExecutor> = Arc::new(self.clone());
+        self.inner
+            .resolve_for_agent_with_executor_and_headers(agent_id, executor, &runtime_headers)
+            .await
+    }
 }
 
 impl Deref for McpRuntimeHandle {
@@ -222,8 +292,9 @@ impl McpToolResolver for McpRuntimeHandle {
     async fn resolve_for_agent(
         &self,
         agent_id: AgentId,
+        context: &McpToolResolutionContext,
     ) -> argus_protocol::Result<ResolvedMcpTools> {
-        self.resolve_for_agent(agent_id)
+        self.resolve_for_agent_with_runtime_headers(agent_id, context.runtime_headers.clone())
             .await
             .map_err(ArgusError::from)
     }
@@ -443,16 +514,83 @@ impl McpRuntime {
         agent_id: AgentId,
         executor: Arc<dyn McpToolExecutor>,
     ) -> Result<ResolvedMcpTools, McpRuntimeError> {
+        self.resolve_for_agent_with_executor_and_headers(
+            agent_id,
+            executor,
+            &McpRuntimeHeaderOverrides::empty(),
+        )
+        .await
+    }
+
+    async fn resolve_for_agent_with_executor_and_headers(
+        &self,
+        agent_id: AgentId,
+        executor: Arc<dyn McpToolExecutor>,
+        runtime_headers: &McpRuntimeHeaderOverrides,
+    ) -> Result<ResolvedMcpTools, McpRuntimeError> {
         self.load_servers_from_repo().await?;
         let bindings = self.repo.list_agent_mcp_bindings(agent_id).await?;
 
-        let mut resolved_tools: Vec<Arc<dyn NamedTool>> = Vec::new();
+        let mut tool_specs: Vec<(String, McpDiscoveredToolRecord)> = Vec::new();
+        let mut runtime_sessions = HashMap::new();
         let mut unavailable_servers = Vec::new();
         let mut retry_server_ids = Vec::new();
 
-        {
-            let mut state = self.state_guard();
-            for binding in bindings {
+        for binding in bindings {
+            let server_id = binding.server.server_id;
+            if let Some(headers) = runtime_headers
+                .get(server_id)
+                .filter(|headers| !headers.is_empty())
+            {
+                let Some(record) = ({
+                    let state = self.state_guard();
+                    state
+                        .servers
+                        .get(&server_id)
+                        .map(|entry| entry.record.clone())
+                }) else {
+                    unavailable_servers.push(argus_protocol::McpUnavailableServerSummary {
+                        server_id,
+                        display_name: format!("MCP server {server_id}"),
+                        reason: "server not loaded".to_string(),
+                    });
+                    continue;
+                };
+
+                if !record.enabled || record.status == McpServerStatus::Disabled {
+                    unavailable_servers.push(argus_protocol::McpUnavailableServerSummary {
+                        server_id,
+                        display_name: record.display_name,
+                        reason: "server disabled".to_string(),
+                    });
+                    continue;
+                }
+
+                let display_name = record.display_name.clone();
+                let effective_record = apply_runtime_headers(&record, Some(headers))?;
+                match self.connect_runtime_header_session(effective_record).await {
+                    Ok((session, tools)) => {
+                        runtime_sessions.insert(server_id, session);
+                        tool_specs.extend(
+                            tools
+                                .into_iter()
+                                .filter(|tool| binding.allows_tool(&tool.tool_name_original))
+                                .map(|tool| (display_name.clone(), tool)),
+                        );
+                    }
+                    Err(error) => {
+                        unavailable_servers.push(argus_protocol::McpUnavailableServerSummary {
+                            server_id,
+                            display_name,
+                            reason: error.to_string(),
+                        })
+                    }
+                }
+                continue;
+            }
+
+            {
+                let mut state = self.state_guard();
                 let Some(entry) = state.servers.get_mut(&binding.server.server_id) else {
                     unavailable_servers.push(argus_protocol::McpUnavailableServerSummary {
                         server_id: binding.server.server_id,
@@ -490,11 +628,7 @@ impl McpRuntime {
                     .iter()
                     .filter(|tool| binding.allows_tool(&tool.tool_name_original))
                 {
-                    resolved_tools.push(Arc::new(McpToolAdapter::new(
-                        Arc::clone(&executor),
-                        &entry.record.display_name,
-                        tool,
-                    )));
+                    tool_specs.push((entry.record.display_name.clone(), tool.clone()));
                 }
             }
         }
@@ -503,7 +637,61 @@ impl McpRuntime {
             self.ensure_retry_scheduled(server_id).await?;
         }
 
+        let executor: Arc<dyn McpToolExecutor> = if runtime_sessions.is_empty() {
+            executor
+        } else {
+            Arc::new(RuntimeHeaderMcpToolExecutor::new(
+                executor,
+                runtime_sessions,
+            ))
+        };
+        let resolved_tools = tool_specs
+            .into_iter()
+            .map(|(display_name, tool)| {
+                Arc::new(McpToolAdapter::new(
+                    Arc::clone(&executor),
+                    &display_name,
+                    &tool,
+                )) as Arc<dyn NamedTool>
+            })
+            .collect();
+
         Ok(ResolvedMcpTools::new(resolved_tools, unavailable_servers))
+    }
+
+    async fn connect_runtime_header_session(
+        &self,
+        record: McpServerRecord,
+    ) -> Result<(RuntimeHeaderSession, Vec<McpDiscoveredToolRecord>), McpRuntimeError> {
+        let server_id = record.id.unwrap_or_default();
+        let session = timeout_operation(
+            record.timeout_ms,
+            self.connector.connect(&record),
+            || McpRuntimeError::ConnectFailed {
+                server_id,
+                reason: format!("connection timed out after {}ms", record.timeout_ms),
+            },
+            |error| error,
+        )
+        .await?;
+        let tools = timeout_operation(
+            record.timeout_ms,
+            session.list_tools(),
+            || McpRuntimeError::ConnectFailed {
+                server_id,
+                reason: format!("tool discovery timed out after {}ms", record.timeout_ms),
+            },
+            |error| error,
+        )
+        .await?;
+        let timeout_ms = record.timeout_ms;
+        Ok((
+            RuntimeHeaderSession {
+                session,
+                timeout_ms,
+            },
+            normalize_tools(server_id, tools),
+        ))
     }
 
     async fn load_servers_from_repo(&self) -> Result<(), McpRuntimeError> {
@@ -1599,6 +1787,36 @@ fn build_reqwest_client(
         })
 }
 
+fn apply_runtime_headers(
+    record: &McpServerRecord,
+    runtime_headers: Option<&McpRuntimeHeaders>,
+) -> Result<McpServerRecord, McpRuntimeError> {
+    let Some(runtime_headers) = runtime_headers else {
+        return Ok(record.clone());
+    };
+
+    let mut record = record.clone();
+    match &mut record.transport {
+        McpTransportConfig::Http { headers, .. } | McpTransportConfig::Sse { headers, .. } => {
+            for (name, value) in runtime_headers.as_map() {
+                if let Some(existing_name) = headers
+                    .keys()
+                    .find(|existing_name| existing_name.eq_ignore_ascii_case(name))
+                    .cloned()
+                {
+                    headers.remove(&existing_name);
+                }
+                headers.insert(name.clone(), value.clone());
+            }
+            Ok(record)
+        }
+        McpTransportConfig::Stdio { .. } => Err(McpRuntimeError::InvalidConfiguration {
+            display_name: record.display_name,
+            reason: "runtime headers only support HTTP/SSE MCP servers".to_string(),
+        }),
+    }
+}
+
 fn ensure_legacy_sse_response(response: &Response, server_id: i64) -> Result<(), McpRuntimeError> {
     if !response.status().is_success() {
         return Err(McpRuntimeError::ConnectFailed {
@@ -2011,14 +2229,16 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::collections::VecDeque;
+    use std::collections::{BTreeMap, VecDeque};
 
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
     use tokio::net::{TcpListener, TcpStream};
     use tokio::sync::Mutex;
     use tokio::sync::mpsc;
 
-    use argus_protocol::{AgentMcpServerBinding, McpTransportConfig};
+    use argus_protocol::{
+        AgentMcpServerBinding, McpRuntimeHeaderOverrides, McpRuntimeHeaders, McpTransportConfig,
+    };
 
     use super::*;
 
@@ -2042,6 +2262,20 @@ mod tests {
             last_success_at: None,
             last_error: None,
             discovered_tool_count: 0,
+        }
+    }
+
+    fn http_server_with_headers(
+        id: i64,
+        display_name: &str,
+        headers: BTreeMap<String, String>,
+    ) -> McpServerRecord {
+        McpServerRecord {
+            transport: McpTransportConfig::Http {
+                url: "https://example.invalid/mcp".to_string(),
+                headers,
+            },
+            ..server(id, display_name, true)
         }
     }
 
@@ -2303,6 +2537,7 @@ mod tests {
     struct FakeConnector {
         plans: Mutex<HashMap<i64, VecDeque<ConnectOutcome>>>,
         attempts: Mutex<HashMap<i64, usize>>,
+        connect_headers: Mutex<HashMap<i64, BTreeMap<String, String>>>,
     }
 
     impl FakeConnector {
@@ -2310,6 +2545,7 @@ mod tests {
             Self {
                 plans: Mutex::new(HashMap::new()),
                 attempts: Mutex::new(HashMap::new()),
+                connect_headers: Mutex::new(HashMap::new()),
             }
         }
 
@@ -2352,6 +2588,15 @@ mod tests {
         async fn attempts(&self, server_id: i64) -> usize {
             *self.attempts.lock().await.get(&server_id).unwrap_or(&0)
         }
+
+        async fn observed_connect_headers(&self, server_id: i64) -> BTreeMap<String, String> {
+            self.connect_headers
+                .lock()
+                .await
+                .get(&server_id)
+                .cloned()
+                .unwrap_or_default()
+        }
     }
 
     #[async_trait]
@@ -2362,6 +2607,12 @@ mod tests {
         ) -> Result<Arc<dyn McpSession>, McpRuntimeError> {
             let server_id = server.id.unwrap_or_default();
             *self.attempts.lock().await.entry(server_id).or_insert(0) += 1;
+            let headers = match &server.transport {
+                McpTransportConfig::Http { headers, .. }
+                | McpTransportConfig::Sse { headers, .. } => headers.clone(),
+                McpTransportConfig::Stdio { .. } => BTreeMap::new(),
+            };
+            self.connect_headers.lock().await.insert(server_id, headers);
 
             match self
                 .plans
@@ -3149,6 +3400,169 @@ mod tests {
             .expect("resolve should succeed");
         assert_eq!(resolved.tools.len(), 1);
         assert_eq!(resolved.unavailable_servers.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn resolve_for_agent_runtime_headers_override_persisted_http_headers() {
+        let mut persisted_headers = BTreeMap::new();
+        persisted_headers.insert("Authorization".to_string(), "Bearer persisted".to_string());
+        persisted_headers.insert("X-Stable".to_string(), "keep".to_string());
+        let repo = Arc::new(FakeRepo::new(vec![http_server_with_headers(
+            12,
+            "Tenant MCP",
+            persisted_headers,
+        )]));
+        repo.set_agent_bindings(
+            AgentId::new(7),
+            vec![argus_protocol::AgentMcpBinding {
+                server: AgentMcpServerBinding {
+                    agent_id: AgentId::new(7),
+                    server_id: 12,
+                },
+                allowed_tools: None,
+            }],
+        )
+        .await;
+
+        let connector = Arc::new(FakeConnector::new());
+        connector
+            .push_success(12, vec![tool(12, "tenant_tool", "Tenant scoped tool")])
+            .await;
+        let runtime = Arc::new(McpRuntime::new(
+            repo.clone(),
+            connector.clone(),
+            McpRuntimeConfig::default(),
+        ));
+        let handle = McpRuntime::handle(&runtime);
+
+        let mut headers = McpRuntimeHeaders::empty();
+        headers.insert("Authorization", "Bearer runtime");
+        headers.insert("X-Run", "run-1");
+        let mut overrides = McpRuntimeHeaderOverrides::empty();
+        overrides.insert(12, headers);
+
+        let resolved = handle
+            .resolve_for_agent_with_runtime_headers(AgentId::new(7), overrides)
+            .await
+            .expect("runtime headers should resolve");
+
+        assert_eq!(resolved.tools.len(), 1);
+        let observed_headers = connector.observed_connect_headers(12).await;
+        assert_eq!(
+            observed_headers.get("Authorization"),
+            Some(&"Bearer runtime".to_string())
+        );
+        assert_eq!(observed_headers.get("X-Stable"), Some(&"keep".to_string()));
+        assert_eq!(observed_headers.get("X-Run"), Some(&"run-1".to_string()));
+
+        let persisted_record = repo
+            .get_mcp_server(12)
+            .await
+            .expect("repo lookup should succeed")
+            .expect("server should exist");
+        let McpTransportConfig::Http { headers, .. } = persisted_record.transport else {
+            panic!("test server should remain http");
+        };
+        assert_eq!(
+            headers.get("Authorization"),
+            Some(&"Bearer persisted".to_string())
+        );
+        assert!(!headers.contains_key("X-Run"));
+    }
+
+    #[tokio::test]
+    async fn resolver_trait_uses_runtime_headers_from_context() {
+        let mut persisted_headers = BTreeMap::new();
+        persisted_headers.insert("Authorization".to_string(), "Bearer persisted".to_string());
+        let repo = Arc::new(FakeRepo::new(vec![http_server_with_headers(
+            14,
+            "Trait MCP",
+            persisted_headers,
+        )]));
+        repo.set_agent_bindings(
+            AgentId::new(7),
+            vec![argus_protocol::AgentMcpBinding {
+                server: AgentMcpServerBinding {
+                    agent_id: AgentId::new(7),
+                    server_id: 14,
+                },
+                allowed_tools: None,
+            }],
+        )
+        .await;
+
+        let connector = Arc::new(FakeConnector::new());
+        connector
+            .push_success(14, vec![tool(14, "trait_tool", "Trait scoped tool")])
+            .await;
+        let runtime = Arc::new(McpRuntime::new(
+            repo,
+            connector.clone(),
+            McpRuntimeConfig::default(),
+        ));
+        let resolver: Arc<dyn McpToolResolver> = Arc::new(McpRuntime::handle(&runtime));
+
+        let mut headers = McpRuntimeHeaders::empty();
+        headers.insert("Authorization", "Bearer trait-runtime");
+        let mut overrides = McpRuntimeHeaderOverrides::empty();
+        overrides.insert(14, headers);
+        let context = McpToolResolutionContext::empty().with_runtime_headers(overrides);
+
+        let resolved = resolver
+            .resolve_for_agent(AgentId::new(7), &context)
+            .await
+            .expect("trait resolver should resolve with runtime headers");
+
+        assert_eq!(resolved.tools.len(), 1);
+        assert_eq!(
+            connector
+                .observed_connect_headers(14)
+                .await
+                .get("Authorization"),
+            Some(&"Bearer trait-runtime".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_for_agent_rejects_runtime_headers_for_stdio_server() {
+        let repo = Arc::new(FakeRepo::new(vec![server(13, "Local MCP", true)]));
+        repo.set_agent_bindings(
+            AgentId::new(7),
+            vec![argus_protocol::AgentMcpBinding {
+                server: AgentMcpServerBinding {
+                    agent_id: AgentId::new(7),
+                    server_id: 13,
+                },
+                allowed_tools: None,
+            }],
+        )
+        .await;
+        let connector = Arc::new(FakeConnector::new());
+        let runtime = Arc::new(McpRuntime::new(
+            repo,
+            connector.clone(),
+            McpRuntimeConfig::default(),
+        ));
+        let handle = McpRuntime::handle(&runtime);
+        let mut headers = McpRuntimeHeaders::empty();
+        headers.insert("Authorization", "Bearer runtime");
+        let mut overrides = McpRuntimeHeaderOverrides::empty();
+        overrides.insert(13, headers);
+
+        let error = match handle
+            .resolve_for_agent_with_runtime_headers(AgentId::new(7), overrides)
+            .await
+        {
+            Ok(_) => panic!("stdio runtime headers should be rejected"),
+            Err(error) => error,
+        };
+
+        assert!(
+            error
+                .to_string()
+                .contains("runtime headers only support HTTP/SSE MCP servers")
+        );
+        assert_eq!(connector.attempts(13).await, 0);
     }
 
     #[tokio::test]

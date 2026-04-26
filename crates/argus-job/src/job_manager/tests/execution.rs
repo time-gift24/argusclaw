@@ -38,6 +38,92 @@ async fn dispatch_job_creates_thread_pool_binding() {
 }
 
 #[tokio::test]
+async fn dispatch_job_notifies_child_thread_created_hook() {
+    let manager = test_job_manager();
+    let originating_thread_id = ThreadId::new();
+    let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let observed_hook = Arc::clone(&observed);
+    manager.set_job_thread_created_hook(Some(Arc::new(move |parent, child| {
+        observed_hook
+            .lock()
+            .expect("observed hook mutex should not be poisoned")
+            .push((parent, child));
+    })));
+    let (pipe_tx, _pipe_rx) = broadcast::channel(16);
+    let job_id = "job-hook".to_string();
+
+    manager
+        .dispatch_job(
+            originating_thread_id,
+            job_id.clone(),
+            AgentId::new(99),
+            "run hook".to_string(),
+            None,
+            pipe_tx,
+        )
+        .await
+        .expect("job should enqueue even if execution later fails");
+
+    let bound_thread_id = manager
+        .thread_binding(&job_id)
+        .expect("job should be bound to a thread");
+    assert_eq!(
+        observed
+            .lock()
+            .expect("observed hook mutex should not be poisoned")
+            .as_slice(),
+        &[(originating_thread_id, bound_thread_id)]
+    );
+}
+
+#[tokio::test]
+async fn dispatch_job_notifies_child_thread_finished_hook() {
+    let manager = test_job_manager();
+    let originating_thread_id = ThreadId::new();
+    let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let observed_hook = Arc::clone(&observed);
+    manager.set_job_thread_finished_hook(Some(Arc::new(move |thread_id| {
+        observed_hook
+            .lock()
+            .expect("observed hook mutex should not be poisoned")
+            .push(thread_id);
+    })));
+    let (pipe_tx, _pipe_rx) = broadcast::channel(16);
+    let job_id = "job-finished-hook".to_string();
+
+    manager
+        .dispatch_job(
+            originating_thread_id,
+            job_id.clone(),
+            AgentId::new(99),
+            "run hook".to_string(),
+            None,
+            pipe_tx,
+        )
+        .await
+        .expect("job should enqueue even if execution later fails");
+
+    let bound_thread_id = manager
+        .thread_binding(&job_id)
+        .expect("job should be bound to a thread");
+
+    timeout(Duration::from_secs(5), async {
+        loop {
+            if observed
+                .lock()
+                .expect("observed hook mutex should not be poisoned")
+                .contains(&bound_thread_id)
+            {
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("finished hook should be observed");
+}
+
+#[tokio::test]
 async fn alpha_dispatch_job_emits_binding_queue_metrics_and_result_events() {
     let manager = test_job_manager();
     let originating_thread_id = ThreadId::new();
