@@ -154,4 +154,14 @@ describe("useChatComposer", () => {
     expect(refreshStreamUntilSettled).not.toHaveBeenCalled();
     expect(composer.error.value).toBe("send failed");
   });
+
+  it("does not show a success banner after a message is submitted", async () => {
+    const { composer } = createComposer({
+      subscribeChatThread: vi.fn().mockReturnValue({ close: vi.fn() }),
+    });
+
+    await composer.sendMessage("继续");
+
+    expect(composer.actionMessage.value).toBe("");
+  });
 });

@@ -2,9 +2,13 @@ import path from "node:path";
 import { defineConfig } from "vite";
 import vue from "@vitejs/plugin-vue";
 
+export function resolveApiProxyTarget(env: NodeJS.ProcessEnv = process.env): string {
+  return env.ARGUS_SERVER_URL ?? "http://127.0.0.1:3000";
+}
+
 export default defineConfig(({ mode }) => {
   const isTest = mode === "test" || process.env.VITEST === "true";
-  const apiProxyTarget = process.env.ARGUS_SERVER_URL ?? "http://127.0.0.1:3010";
+  const apiProxyTarget = resolveApiProxyTarget();
 
   return {
     define: {

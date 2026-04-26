@@ -51,9 +51,12 @@ function runtimeActivityStatusLabel(status: ToolActivityStatus) {
   display: grid;
   gap: var(--space-3);
   padding: var(--space-4);
-  background: var(--surface-base);
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-lg);
+  background: rgba(255, 255, 255, 0.76);
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: 24px;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.6),
+    0 16px 32px rgba(15, 23, 42, 0.04);
 }
 
 .runtime-activity-header,
@@ -75,6 +78,9 @@ function runtimeActivityStatusLabel(status: ToolActivityStatus) {
   color: var(--warning);
   font-size: var(--text-sm);
   line-height: 1.5;
+  padding: var(--space-2) var(--space-3);
+  border-radius: 16px;
+  background: rgba(245, 158, 11, 0.08);
 }
 
 .tool-activity-list {
@@ -86,9 +92,10 @@ function runtimeActivityStatusLabel(status: ToolActivityStatus) {
   display: grid;
   gap: var(--space-2);
   padding: var(--space-3);
-  background: var(--surface-overlay);
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-md);
+  background: rgba(255, 255, 255, 0.72);
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  border-radius: 18px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.6);
 }
 
 .tool-activity-card--running {

@@ -1,21 +1,11 @@
 <script setup lang="ts">
 import type { BubbleRoleConfig, PromptProps } from "@opentiny/tiny-robot";
 
-import { TinyButton } from "@/lib/opentiny";
-import type { ToolActivity } from "../composables/useChatThreadStream";
 import type { ChatRobotMessage } from "../composables/useChatPresentation";
 import ChatMessageStage from "./ChatMessageStage.vue";
-import ChatRuntimeActivityPanel from "./ChatRuntimeActivityPanel.vue";
 
 interface Props {
-  title: string;
-  modelLabel: string;
-  providerName: string | null;
-  hasActiveThread: boolean;
   error: string;
-  actionMessage: string;
-  runtimeNotice: string;
-  runtimeActivities: ToolActivity[];
   threadLoading: boolean;
   robotMessages: ChatRobotMessage[];
   bubbleRoles: Record<string, BubbleRoleConfig>;
@@ -23,9 +13,6 @@ interface Props {
 }
 
 interface Emits {
-  (e: "refresh"): void;
-  (e: "activate"): void;
-  (e: "cancel"): void;
   (e: "prompt", event: MouseEvent, item: PromptProps): void;
 }
 
@@ -38,30 +25,8 @@ function handlePrompt(event: MouseEvent, item: PromptProps) {
 </script>
 
 <template>
-  <article class="chat-panel shell-card">
-    <header class="chat-panel__header">
-      <div>
-        <p class="eyebrow">Conversation</p>
-        <h3 class="section-heading">{{ title }}</h3>
-        <p class="section-copy">
-          {{ modelLabel }}
-          <span v-if="providerName"> · {{ providerName }}</span>
-        </p>
-      </div>
-      <div class="chat-actions">
-        <TinyButton :disabled="!hasActiveThread" @click="emit('refresh')">刷新</TinyButton>
-        <TinyButton :disabled="!hasActiveThread" @click="emit('activate')">激活</TinyButton>
-        <TinyButton data-testid="cancel-thread" :disabled="!hasActiveThread" @click="emit('cancel')">取消运行</TinyButton>
-      </div>
-    </header>
-
+  <article class="chat-panel chat-panel--immersive">
     <div v-if="error" class="notice notice--danger">{{ error }}</div>
-    <div v-if="actionMessage" class="notice notice--success">{{ actionMessage }}</div>
-
-    <ChatRuntimeActivityPanel
-      :notice="runtimeNotice"
-      :activities="runtimeActivities"
-    />
 
     <ChatMessageStage
       :loading="threadLoading"
@@ -77,9 +42,9 @@ function handlePrompt(event: MouseEvent, item: PromptProps) {
 .chat-panel {
   display: flex;
   flex-direction: column;
-  gap: var(--space-4);
+  gap: var(--space-3);
+  height: 100%;
   min-height: 0;
-  padding: var(--space-5);
   --tr-bubble-list-padding: 0;
   --tr-bubble-list-gap: var(--space-4);
   --tr-bubble-box-bg: var(--surface-overlay);
@@ -98,29 +63,17 @@ function handlePrompt(event: MouseEvent, item: PromptProps) {
   --tr-prompt-description-color: var(--text-muted);
 }
 
-.chat-panel__header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: var(--space-4);
-}
-
 .notice {
   padding: var(--space-3);
-  border-radius: var(--radius-md);
+  border-radius: 18px;
   font-size: var(--text-sm);
   line-height: 1.5;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.35);
 }
 
 .notice--danger {
-  background: var(--status-danger-bg);
-  border: 1px solid var(--status-danger);
+  background: color-mix(in srgb, var(--status-danger-bg) 80%, white);
+  border: 1px solid color-mix(in srgb, var(--status-danger) 58%, white);
   color: var(--status-danger);
-}
-
-.notice--success {
-  background: var(--status-success-bg);
-  border: 1px solid var(--status-success);
-  color: var(--status-success);
 }
 </style>

@@ -9,6 +9,7 @@ interface PromptItem {
 interface BubbleMessage {
   role?: string;
   content?: string;
+  reasoning_content?: string;
 }
 
 export const TrBubbleList = defineComponent({
@@ -30,6 +31,7 @@ export const TrBubbleList = defineComponent({
             {
               class: "tr-bubble-stub",
               "data-role": message.role,
+              "data-reasoning": message.reasoning_content ?? "",
               key: `${message.role ?? "message"}-${index}`,
             },
             message.content,
@@ -38,6 +40,32 @@ export const TrBubbleList = defineComponent({
       );
   },
 });
+
+export const TrBubbleProvider = defineComponent({
+  name: "TrBubbleProvider",
+  props: {
+    fallbackContentRenderer: {
+      type: [Object, Function, String] as PropType<unknown>,
+      default: null,
+    },
+  },
+  setup(props, { slots }) {
+    return () =>
+      h(
+        "div",
+        {
+          class: "tr-bubble-provider-stub",
+          "data-fallback-content-renderer":
+            props.fallbackContentRenderer == null ? "unset" : "set",
+        },
+        slots.default?.(),
+      );
+  },
+});
+
+export const BubbleRenderers = {
+  Markdown: "markdown-renderer-stub",
+};
 
 export const TrSender = defineComponent({
   name: "TrSender",
@@ -58,11 +86,19 @@ export const TrSender = defineComponent({
       type: Boolean,
       default: false,
     },
+    mode: {
+      type: String,
+      default: "multiple",
+    },
+    size: {
+      type: String,
+      default: "normal",
+    },
   },
   emits: ["update:modelValue", "submit", "cancel"],
   setup(props, { emit }) {
     return () =>
-      h("div", { class: "tr-sender-stub" }, [
+      h("div", { class: "tr-sender-stub", "data-mode": props.mode, "data-size": props.size }, [
         h("input", {
           "data-testid": "chat-input",
           disabled: props.disabled,

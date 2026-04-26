@@ -60,14 +60,6 @@ const hasActiveThread = computed(() => Boolean(chatSessions.activeSessionId.valu
 const activeProvider = computed(() => providers.value.find((p) => p.id === Number(selectedProviderId.value)) ?? null);
 const selectedTemplate = computed(() => templates.value.find((t) => t.id === Number(selectedTemplateId.value)) ?? null);
 
-const currentConversationTitle = computed(() => {
-  if (chatSessions.activeThread.value) {
-    return chatSessions.activeThread.value.title || `线程 ${chatSessions.activeThread.value.id.slice(0, 8)}`;
-  }
-  return hasActiveThread.value ? "新的对话线程" : "新对话草稿";
-});
-const currentModelLabel = computed(() => chatSessions.activeBinding.value?.effective_model || selectedModel.value || "未绑定模型");
-
 const robotMessages = computed(() => toRobotMessages({
   messages: chatThreadStream.messages.value,
   streaming: chatThreadStream.streaming.value,
@@ -206,47 +198,39 @@ function applyPrompt(_event: MouseEvent, item: PromptProps) {
 </script>
 
 <template>
-  <section class="chat-page">
+  <section class="chat-page chat-page--immersive chat-page--single-scroll">
     <div class="chat-workspace">
       <div class="chat-main-column">
         <ChatConversationPanel
-          :title="currentConversationTitle"
-          :model-label="currentModelLabel"
-          :provider-name="activeProvider?.display_name ?? null"
-          :has-active-thread="hasActiveThread"
           :error="chatComposer.error.value"
-          :action-message="chatComposer.actionMessage.value"
-          :runtime-notice="chatThreadStream.runtimeNotice.value"
-          :runtime-activities="chatThreadStream.runtimeActivities.value"
           :thread-loading="chatThreadStream.threadLoading.value"
           :robot-messages="robotMessages"
           :bubble-roles="bubbleRoles"
           :starter-prompts="starterPrompts"
-          @refresh="chatThreadStream.refreshActiveThread()"
-          @activate="chatSessions.activateThread()"
-          @cancel="chatComposer.cancelThread()"
           @prompt="applyPrompt"
         />
-
-        <ChatComposerBar
-          v-model="chatComposer.draftMessage.value"
-          :templates="templates"
-          :providers="providers"
-          v-model:selected-template-id="selectedTemplateId"
-          v-model:selected-provider-id="selectedProviderId"
-          v-model:selected-model="selectedModel"
-          :disabled="!chatComposer.canSendMessage.value"
-          :loading="chatComposer.sending.value"
-          :placeholder="chatComposer.senderPlaceholder.value"
-          :has-active-thread="hasActiveThread"
-          :active-provider="activeProvider"
-          :selected-template="selectedTemplate"
-          @submit="chatComposer.sendMessage"
-          @cancel="chatComposer.cancelThread"
-          @new-chat="handleNewChat"
-          @open-history="historyDialogOpen = true"
-        />
       </div>
+    </div>
+
+    <div class="chat-page__composer-dock">
+      <ChatComposerBar
+        v-model="chatComposer.draftMessage.value"
+        :templates="templates"
+        :providers="providers"
+        v-model:selected-template-id="selectedTemplateId"
+        v-model:selected-provider-id="selectedProviderId"
+        v-model:selected-model="selectedModel"
+        :disabled="!chatComposer.canSendMessage.value"
+        :loading="chatComposer.sending.value"
+        :placeholder="chatComposer.senderPlaceholder.value"
+        :has-active-thread="hasActiveThread"
+        :active-provider="activeProvider"
+        :selected-template="selectedTemplate"
+        @submit="chatComposer.sendMessage"
+        @cancel="chatComposer.cancelThread"
+        @new-chat="handleNewChat"
+        @open-history="historyDialogOpen = true"
+      />
     </div>
 
     <ChatHistoryDialog
@@ -265,30 +249,51 @@ function applyPrompt(_event: MouseEvent, item: PromptProps) {
 <style scoped>
 .chat-page {
   width: 100%;
-  min-height: 760px;
+  --chat-dock-clearance: 212px;
+  height: calc(100vh - (var(--space-6) * 2));
+  min-height: calc(100vh - (var(--space-6) * 2));
+  max-height: calc(100vh - (var(--space-6) * 2));
 }
 
-.chat-workspace {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: var(--space-5);
-  min-height: 760px;
+.chat-page--immersive {
+  position: relative;
 }
 
+.chat-page--single-scroll {
+  overflow: hidden;
+}
+
+.chat-workspace,
 .chat-main-column {
-  display: grid;
-  grid-template-rows: minmax(0, 1fr) auto;
-  gap: var(--space-5);
+  height: 100%;
   min-height: 0;
 }
 
-.composer-bar {
-  padding: var(--space-5);
+.chat-main-column {
+  display: flex;
+  flex-direction: column;
+}
+
+.chat-page__composer-dock {
+  position: fixed;
+  left: calc(260px + var(--space-6));
+  right: var(--space-6);
+  bottom: var(--space-6);
+  z-index: 30;
 }
 
 @media (max-width: 1180px) {
-  .chat-main-column {
-    min-height: 0;
+  .chat-page {
+    --chat-dock-clearance: 228px;
+    height: calc(100vh - (var(--space-4) * 2));
+    min-height: calc(100vh - (var(--space-4) * 2));
+    max-height: calc(100vh - (var(--space-4) * 2));
+  }
+
+  .chat-page__composer-dock {
+    left: var(--space-4);
+    right: var(--space-4);
+    bottom: var(--space-4);
   }
 }
 </style>
