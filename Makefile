@@ -1,4 +1,4 @@
-.PHONY: help build install clean clippy fmt tauri-dev tauri-build desktop-dev desktop-build linux-build linux-package linux-deploy
+.PHONY: help build install clean clippy fmt tauri-dev tauri-build desktop-dev desktop-build linux-build linux-package linux-deploy server-dev
 
 INSTALL_DIR ?= /opt/arguswing
 SERVICE_USER ?= arguswing
@@ -22,6 +22,7 @@ help:
 		'  clippy           Run clippy linter' \
 		'  fmt              Format code' \
 		'  linux-build      Build argus-server and apps/web for Linux deployment' \
+		'  server-dev       Run argus-server locally with server-hosted web assets' \
 		'  linux-package    Stage Linux deployment files under target/linux/arguswing' \
 		'  linux-deploy     Install staged Linux service and restart systemd service' \
 		'  tauri-dev        Run Tauri desktop app in dev mode' \
@@ -64,6 +65,15 @@ tauri-build:
 linux-build:
 	cargo build --release -p argus-server
 	cd apps/web && pnpm install --frozen-lockfile && pnpm build
+
+# Run the server-hosted release build locally for manual testing.
+server-dev:
+	install -d "$(CURDIR)/.tmp/arguswing-dev/data" "$(CURDIR)/.tmp/arguswing-dev/traces"
+	ARGUS_SERVER_ADDR="$(ARGUS_SERVER_ADDR)" \
+	ARGUS_WEB_DIST_DIR="$(CURDIR)/apps/web/dist" \
+	DATABASE_URL="$(CURDIR)/.tmp/arguswing-dev/data/sqlite.db" \
+	TRACE_DIR="$(CURDIR)/.tmp/arguswing-dev/traces" \
+	./target/release/argus-server
 
 # Stage Linux deployment files without touching system directories.
 linux-package: linux-build
