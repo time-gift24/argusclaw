@@ -132,7 +132,7 @@ export const router = createRouter({
           path: "chat",
           name: "chat",
           component: ChatPage,
-          meta: { breadcrumb: "对话" },
+          meta: { breadcrumb: "对话", immersive: true, hideRouteHeader: true },
         },
       ],
     },

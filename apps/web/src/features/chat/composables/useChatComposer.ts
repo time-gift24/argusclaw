@@ -145,7 +145,6 @@ export function useChatComposer(options: UseChatComposerOptions) {
       if (!api.subscribeChatThread) {
         void refreshStreamUntilSettled(assistantCountBeforeSend);
       }
-      actionMessage.value = "消息已提交，正在等待流式结果。";
     } catch (reason) {
       messages.value = previousMessages;
       if (openedThreadEvents) {

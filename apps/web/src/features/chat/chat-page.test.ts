@@ -317,7 +317,6 @@ describe("ChatPage", () => {
     secondThread!.click();
     await flushPromises();
 
-    expect(wrapper.text()).toContain("二号线程");
     expect(wrapper.text()).toContain("二号回复");
     expect(listChatMessages).toHaveBeenLastCalledWith("session-2", "thread-2");
   });
@@ -376,7 +375,6 @@ describe("ChatPage", () => {
     confirmDelete!.click();
     await flushPromises();
 
-    expect(wrapper.text()).toContain("二号线程");
     expect(wrapper.text()).toContain("二号回复");
     expect(listChatMessages).toHaveBeenLastCalledWith("session-2", "thread-2");
   });
@@ -452,18 +450,81 @@ describe("ChatPage", () => {
     expect((senderWithThread.vm.$props as Record<string, unknown>).placeholder).toBe("输入消息，Enter 发送");
   });
 
-  it("shows conversation title in header when thread is active", async () => {
+  it("does not render the old conversation header even when a thread is active", async () => {
     setApiClient(
       makeApiClient({
         listChatSessions: vi.fn().mockResolvedValue([session()]),
         listChatThreads: vi.fn().mockResolvedValue([thread({ title: "产品讨论" })]),
-        listChatMessages: vi.fn().mockResolvedValue([]),
+        listChatMessages: vi.fn().mockResolvedValue([message("assistant", "欢迎继续")]),
       }),
     );
     const wrapper = mount(ChatPage);
     await flushPromises();
 
-    expect(wrapper.text()).toContain("产品讨论");
+    expect(wrapper.text()).toContain("欢迎继续");
+    expect(wrapper.text()).not.toContain("Conversation");
+    expect(wrapper.find(".chat-panel__header").exists()).toBe(false);
+  });
+
+  it("wraps the chat stage in a TinyRobot bubble provider for markdown rendering", async () => {
+    setApiClient(
+      makeApiClient({
+        listChatSessions: vi.fn().mockResolvedValue([session()]),
+        listChatThreads: vi.fn().mockResolvedValue([thread()]),
+        listChatMessages: vi.fn().mockResolvedValue([
+          message("assistant", "# 标题", {
+            reasoning_content: "先整理问题，再输出 markdown 答案。",
+          }),
+        ]),
+      }),
+    );
+    const wrapper = mount(ChatPage);
+    await flushPromises();
+
+    const provider = wrapper.find(".tr-bubble-provider-stub");
+    expect(provider.exists()).toBe(true);
+    expect(provider.attributes("data-fallback-content-renderer")).toBe("set");
+
+    const assistantBubble = wrapper.find(".tr-bubble-stub[data-role='assistant']");
+    expect(assistantBubble.attributes("data-reasoning")).toContain("先整理问题");
+  });
+
+  it("uses the immersive chat layout without the conversation header chrome", async () => {
+    setApiClient(
+      makeApiClient({
+        listChatSessions: vi.fn().mockResolvedValue([]),
+      }),
+    );
+    const wrapper = mount(ChatPage);
+    await flushPromises();
+
+    expect(wrapper.find(".chat-page--immersive").exists()).toBe(true);
+    expect(wrapper.find(".chat-page--single-scroll").exists()).toBe(true);
+    expect(wrapper.find(".composer-bar--dock").exists()).toBe(true);
+    expect(wrapper.find(".chat-panel__header").exists()).toBe(false);
+    expect(wrapper.text()).not.toContain("Conversation");
+    expect(wrapper.text()).not.toContain("刷新");
+    expect(wrapper.text()).not.toContain("激活");
+    expect(wrapper.text()).not.toContain("取消运行");
+  });
+
+  it("does not render the streaming submission banner after sending a message", async () => {
+    setApiClient(
+      makeApiClient({
+        listChatSessions: vi.fn().mockResolvedValue([session()]),
+        listChatThreads: vi.fn().mockResolvedValue([thread()]),
+        listChatMessages: vi.fn().mockResolvedValue([]),
+        subscribeChatThread: vi.fn().mockReturnValue({ close: vi.fn() }),
+      }),
+    );
+    const wrapper = mount(ChatPage);
+    await flushPromises();
+
+    await wrapper.get("[data-testid='chat-input']").setValue("继续");
+    await wrapper.get("[data-testid='chat-input']").trigger("keydown", { key: "Enter" });
+    await flushPromises();
+
+    expect(wrapper.text()).not.toContain("消息已提交，正在等待流式结果。");
   });
 
   it("starts a new chat draft when clicking the new chat button", async () => {
@@ -477,8 +538,9 @@ describe("ChatPage", () => {
     const wrapper = mount(ChatPage);
     await flushPromises();
 
-    // Should show the thread title
-    expect(wrapper.text()).toContain("产品讨论");
+    // Should show the existing conversation content before resetting
+    expect(wrapper.text()).toContain("旧消息");
+    expect(wrapper.text()).toContain("旧回复");
 
     // Click new chat button
     const newChatBtn = wrapper.findAll("button").find((b) => b.text().includes("新对话"));

@@ -6,6 +6,9 @@ import type { ChatMessageRecord } from "@/lib/api";
 export interface ChatRobotMessage {
   role: string;
   content: string;
+  reasoning_content?: string;
+  loading?: boolean;
+  state?: Record<string, unknown>;
 }
 
 export interface RobotMessageOptions {
@@ -17,18 +20,22 @@ export interface RobotMessageOptions {
 }
 
 export function toRobotMessages(options: RobotMessageOptions): ChatRobotMessage[] {
-  const msgs = options.messages
+  const msgs: ChatRobotMessage[] = options.messages
     .filter((message) => message.role !== "system")
-    .map((message) => ({
+    .map((message): ChatRobotMessage => ({
       role: message.role,
       content: displayMessageContent(message),
+      reasoning_content: message.reasoning_content?.trim() ? message.reasoning_content : undefined,
+      state: buildReasoningState(message.reasoning_content, false),
     }));
 
   if (options.streaming && (options.hasActiveThread || msgs.length > 0)) {
     msgs.push({
       role: "assistant",
-      content: options.pendingAssistantContent ||
-        (options.pendingAssistantReasoning ? "正在思考…" : "正在生成回复…"),
+      content: options.pendingAssistantContent || "",
+      reasoning_content: options.pendingAssistantReasoning || undefined,
+      loading: true,
+      state: buildReasoningState(options.pendingAssistantReasoning, true),
     });
   }
 
@@ -101,6 +108,18 @@ function displayMessageContent(message: ChatMessageRecord) {
 
   if (message.role === "tool") return "工具调用结果为空。";
   return "消息内容为空。";
+}
+
+function buildReasoningState(
+  reasoningContent: string | null | undefined,
+  thinking: boolean,
+) {
+  if (!reasoningContent?.trim()) return undefined;
+
+  return {
+    thinking,
+    open: true,
+  };
 }
 
 function toolCallNames(toolCalls: unknown[] | null | undefined): string[] {

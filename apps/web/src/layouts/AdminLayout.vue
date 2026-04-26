@@ -6,6 +6,8 @@ import AppBreadcrumb from "@/components/AppBreadcrumb.vue";
 import { adminNavItems } from "@/app/nav";
 
 const route = useRoute();
+const isImmersiveRoute = computed(() => route.meta?.immersive === true);
+const shouldShowRouteHeader = computed(() => route.meta?.hideRouteHeader !== true);
 const currentItem = computed(() => {
   return adminNavItems.find((item) => item.to === route.path) ?? adminNavItems[0];
 });
@@ -102,8 +104,8 @@ function toggleTheme() {
       </div>
     </aside>
 
-    <main class="route-shell">
-      <section class="route-header">
+    <main class="route-shell" :class="{ 'route-shell--immersive': isImmersiveRoute }">
+      <section v-if="shouldShowRouteHeader" class="route-header">
         <div class="header-content">
           <AppBreadcrumb />
           <h2 class="header-title">{{ currentItem.label }}</h2>
@@ -299,6 +301,14 @@ function toggleTheme() {
 
 .route-shell > :not(.route-header) {
   max-width: 1200px;
+}
+
+.route-shell--immersive {
+  gap: 0;
+}
+
+.route-shell--immersive > * {
+  max-width: none;
 }
 
 .route-header {
