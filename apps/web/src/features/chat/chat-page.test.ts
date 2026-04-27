@@ -201,9 +201,10 @@ describe("ChatPage", () => {
     await flushPromises();
 
     const selects = wrapper.findAllComponents({ name: "OpenTinySelectStub" });
-    expect(selects).toHaveLength(2);
+    expect(selects).toHaveLength(3);
     expect(selects[0].props("modelValue")).toBe("3");
     expect(selects[1].props("modelValue")).toBe("7");
+    expect(selects[2].props("modelValue")).toBe("glm-4.7");
   });
 
   it("opens history dialog when clicking the history button", async () => {
