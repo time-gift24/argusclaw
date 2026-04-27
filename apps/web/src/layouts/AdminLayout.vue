@@ -300,7 +300,9 @@ function toggleTheme() {
 }
 
 .route-shell > :not(.route-header) {
-  max-width: 1200px;
+  width: 100%;
+  max-width: 1600px;
+  margin-inline: auto;
 }
 
 .route-shell--immersive {
@@ -312,6 +314,9 @@ function toggleTheme() {
 }
 
 .route-header {
+  width: 100%;
+  max-width: 1600px;
+  margin-inline: auto;
   padding: var(--space-5) var(--space-6);
   background: var(--surface-base);
   border: 1px solid var(--border-default);
