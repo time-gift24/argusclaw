@@ -7,6 +7,7 @@ interface PromptItem {
 }
 
 interface BubbleMessage {
+  id?: string;
   role?: string;
   content?: string;
   reasoning_content?: string;

@@ -37,8 +37,26 @@ describe("useChatPresentation", () => {
     expect(messages).toHaveLength(2);
     expect(messages[0]).toMatchObject({ role: "user", content: "你好" });
     expect(messages[1]).toMatchObject({
+      id: "pending-assistant",
       role: "assistant",
       content: "正在回答",
+      loading: false,
+    });
+  });
+
+  it("uses loading chrome only before streamed content becomes visible", () => {
+    const messages = toRobotMessages({
+      messages: [message("user", "先别急")],
+      streaming: true,
+      hasActiveThread: true,
+      pendingAssistantContent: "",
+      pendingAssistantReasoning: "",
+    });
+
+    expect(messages[1]).toMatchObject({
+      id: "pending-assistant",
+      role: "assistant",
+      content: "",
       loading: true,
     });
   });
@@ -58,6 +76,7 @@ describe("useChatPresentation", () => {
 
     expect(messages).toHaveLength(2);
     expect(messages[0]).toMatchObject({
+      id: "message-assistant-0",
       role: "assistant",
       content: "最终答案",
       reasoning_content: "先分析上下文，再组织回答。",

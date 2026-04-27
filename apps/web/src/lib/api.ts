@@ -63,6 +63,12 @@ export interface AgentRecord {
     type: "enabled" | "disabled";
     clear_thinking: boolean;
   } | null;
+  mcp_bindings?: AgentMcpBinding[];
+}
+
+export interface AgentMcpBinding {
+  server_id: number;
+  allowed_tools?: string[] | null;
 }
 
 export type McpTransportConfig =
@@ -402,6 +408,7 @@ export interface ChatThreadEventEnvelope {
 }
 
 export interface ChatThreadEventHandlers {
+  onOpen?(): void;
   onEvent(event: ChatThreadEventEnvelope): void;
   onError(error: Error): void;
 }
@@ -825,6 +832,9 @@ class HttpApiClient implements ApiClient {
   ): RuntimeEventSubscription {
     const events = new EventSource(`${this.baseUrl}/chat/sessions/${sessionId}/threads/${threadId}/events`);
 
+    events.onopen = () => {
+      handlers.onOpen?.();
+    };
     events.addEventListener("chat.thread_event", (event) => {
       try {
         handlers.onEvent(JSON.parse((event as MessageEvent<string>).data) as ChatThreadEventEnvelope);

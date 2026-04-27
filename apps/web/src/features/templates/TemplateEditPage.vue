@@ -2,7 +2,13 @@
 import { computed, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 
-import { getApiClient, type AgentRecord, type LlmProviderRecord, type ToolRegistryItem } from "@/lib/api";
+import {
+  getApiClient,
+  type AgentRecord,
+  type LlmProviderRecord,
+  type McpServerRecord,
+  type ToolRegistryItem,
+} from "@/lib/api";
 import { TinyButton, TinyInput, TinyNumeric, TinyOption, TinySelect, TinySwitch, TinyTooltip } from "@/lib/opentiny";
 
 const api = getApiClient();
@@ -13,6 +19,7 @@ const isEdit = ref(false);
 
 const allTemplates = ref<AgentRecord[]>([]);
 const providers = ref<LlmProviderRecord[]>([]);
+const mcpServers = ref<McpServerRecord[]>([]);
 const availableTools = ref<ToolRegistryItem[]>([]);
 const loading = ref(true);
 const error = ref("");
@@ -26,6 +33,7 @@ interface TemplateFormState {
   model_id: string;
   system_prompt: string;
   tool_names: string[];
+  mcp_server_ids: string[];
   subagent_names: string[];
   max_tokens: number | null;
   temperature: number | null;
@@ -60,6 +68,14 @@ const toolOptions = computed(() => {
   }));
 });
 
+const mcpServerOptions = computed(() => {
+  return mcpServers.value.map((server) => ({
+    label: server.display_name,
+    value: String(server.id ?? ""),
+    description: buildMcpServerDescription(server),
+  }));
+});
+
 function createDefaultTemplateForm(): TemplateFormState {
   return {
     display_name: "",
@@ -69,6 +85,7 @@ function createDefaultTemplateForm(): TemplateFormState {
     model_id: "",
     system_prompt: "",
     tool_names: [],
+    mcp_server_ids: [],
     subagent_names: [],
     max_tokens: null,
     temperature: null,
@@ -83,15 +100,17 @@ async function loadData() {
   error.value = "";
 
   try {
-    const [providersResult, templatesResult, toolsResult] = await Promise.all([
+    const [providersResult, templatesResult, toolsResult, mcpServersResult] = await Promise.all([
       api.listProviders(),
       api.listTemplates(),
       api.listTools ? api.listTools() : Promise.resolve([]),
+      api.listMcpServers ? api.listMcpServers() : Promise.resolve([]),
     ]);
 
     providers.value = providersResult;
     allTemplates.value = templatesResult;
     availableTools.value = toolsResult;
+    mcpServers.value = mcpServersResult;
 
     if (isEdit.value) {
       const templateId = parseInt(route.params.templateId as string, 10);
@@ -105,6 +124,7 @@ async function loadData() {
           model_id: found.model_id ?? "",
           system_prompt: found.system_prompt,
           tool_names: found.tool_names,
+          mcp_server_ids: (found.mcp_bindings ?? []).map((binding) => String(binding.server_id)),
           subagent_names: found.subagent_names,
           max_tokens: found.max_tokens ?? null,
           temperature: found.temperature ?? null,
@@ -161,6 +181,10 @@ function buildTemplatePayload(): AgentRecord | null {
     model_id: templateForm.value.model_id.trim() || null,
     system_prompt: systemPrompt,
     tool_names: normalizeStringSelection(templateForm.value.tool_names),
+    mcp_bindings: normalizeStringSelection(templateForm.value.mcp_server_ids).map((serverId) => ({
+      server_id: Number(serverId),
+      allowed_tools: null,
+    })),
     subagent_names: normalizeStringSelection(templateForm.value.subagent_names),
     max_tokens: templateForm.value.max_tokens,
     temperature: templateForm.value.temperature,
@@ -197,6 +221,19 @@ function normalizeStringSelection(value: string[] | string) {
   }
 
   return value ? [value] : [];
+}
+
+function buildMcpServerDescription(server: McpServerRecord) {
+  const status = server.enabled ? server.status : "disabled";
+  return `状态：${formatMcpServerStatus(status)}；已发现工具 ${server.discovered_tool_count} 个`;
+}
+
+function formatMcpServerStatus(status: McpServerRecord["status"] | "disabled") {
+  if (status === "ready") return "就绪";
+  if (status === "connecting") return "连接中";
+  if (status === "retrying") return "重试中";
+  if (status === "failed") return "失败";
+  return "已禁用";
 }
 
 function goBack() {
@@ -344,6 +381,27 @@ watch(
             >
               <TinyOption
                 v-for="item in toolOptions"
+                :key="item.value"
+                :label="item.label"
+                :value="item.value"
+              >
+                <TinyTooltip effect="light" placement="right" :content="item.description || '暂无描述'">
+                  <span>{{ item.label }}</span>
+                </TinyTooltip>
+              </TinyOption>
+            </TinySelect>
+          </label>
+          <label>
+            <span>MCP 服务</span>
+            <TinySelect
+              v-model="templateForm.mcp_server_ids"
+              multiple
+              filterable
+              data-testid="template-mcp-servers"
+              placeholder="搜索并选择要挂载给模板的 MCP 服务"
+            >
+              <TinyOption
+                v-for="item in mcpServerOptions"
                 :key="item.value"
                 :label="item.label"
                 :value="item.value"

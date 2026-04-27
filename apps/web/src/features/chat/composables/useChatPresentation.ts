@@ -4,6 +4,7 @@ import type { BubbleRoleConfig, PromptProps } from "@opentiny/tiny-robot";
 import type { ChatMessageRecord } from "@/lib/api";
 
 export interface ChatRobotMessage {
+  id?: string;
   role: string;
   content: string;
   reasoning_content?: string;
@@ -22,7 +23,8 @@ export interface RobotMessageOptions {
 export function toRobotMessages(options: RobotMessageOptions): ChatRobotMessage[] {
   const msgs: ChatRobotMessage[] = options.messages
     .filter((message) => message.role !== "system")
-    .map((message): ChatRobotMessage => ({
+    .map((message, index): ChatRobotMessage => ({
+      id: settledMessageId(message, index),
       role: message.role,
       content: displayMessageContent(message),
       reasoning_content: message.reasoning_content?.trim() ? message.reasoning_content : undefined,
@@ -30,11 +32,16 @@ export function toRobotMessages(options: RobotMessageOptions): ChatRobotMessage[
     }));
 
   if (options.streaming && (options.hasActiveThread || msgs.length > 0)) {
+    const hasVisiblePendingContent = Boolean(
+      options.pendingAssistantContent.trim() || options.pendingAssistantReasoning.trim(),
+    );
+
     msgs.push({
+      id: "pending-assistant",
       role: "assistant",
       content: options.pendingAssistantContent || "",
       reasoning_content: options.pendingAssistantReasoning || undefined,
-      loading: true,
+      loading: !hasVisiblePendingContent,
       state: buildReasoningState(options.pendingAssistantReasoning, true),
     });
   }
@@ -131,4 +138,10 @@ function toolCallNames(toolCalls: unknown[] | null | undefined): string[] {
       return typeof name === "string" ? name.trim() : "";
     })
     .filter((name) => name.length > 0);
+}
+
+function settledMessageId(message: ChatMessageRecord, index: number) {
+  if (message.tool_call_id?.trim()) return `tool-call-${message.tool_call_id}`;
+  if (message.role === "tool" && message.name?.trim()) return `tool-${message.name}-${index}`;
+  return `message-${message.role}-${index}`;
 }

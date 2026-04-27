@@ -21,7 +21,7 @@ export interface UseChatComposerOptions {
   refreshSessions: () => Promise<void>;
   refreshThreads: (sessionId?: string) => Promise<import("@/lib/api").ChatThreadSummary[]>;
   applyChatSessionPayload: (payload: ChatSessionPayload) => void;
-  openThreadEvents: (sessionId: string, threadId: string) => void;
+  openThreadEvents: (sessionId: string, threadId: string) => Promise<void>;
   closeThreadEvents: () => void;
   resetRuntimeActivity: () => void;
   refreshStreamUntilSettled: (assistantCountBeforeSend: number) => Promise<void>;
@@ -138,7 +138,7 @@ export function useChatComposer(options: UseChatComposerOptions) {
     messages.value = [...previousMessages, createLocalMessage("user", content)];
     try {
       const target = await ensureActiveChatThread();
-      openThreadEvents(target.sessionId, target.threadId);
+      await openThreadEvents(target.sessionId, target.threadId);
       openedThreadEvents = true;
       await api.sendChatMessage!(target.sessionId, target.threadId, content);
       draftMessage.value = "";

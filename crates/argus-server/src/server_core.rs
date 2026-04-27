@@ -448,6 +448,27 @@ impl ServerCore {
             .map_err(database_error)
     }
 
+    pub async fn list_agent_mcp_bindings(
+        &self,
+        agent_id: AgentId,
+    ) -> Result<Vec<argus_protocol::AgentMcpBinding>> {
+        self.mcp_repo
+            .list_agent_mcp_bindings(agent_id)
+            .await
+            .map_err(database_error)
+    }
+
+    pub async fn set_agent_mcp_bindings(
+        &self,
+        agent_id: AgentId,
+        bindings: Vec<argus_protocol::AgentMcpBinding>,
+    ) -> Result<()> {
+        self.mcp_repo
+            .set_agent_mcp_bindings(agent_id, &bindings)
+            .await
+            .map_err(database_error)
+    }
+
     pub fn list_tools(&self) -> Vec<ToolRegistryItem> {
         let mut tools = self
             .tool_manager

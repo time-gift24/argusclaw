@@ -10,6 +10,7 @@ use argus_protocol::{
     McpServerRecord, McpServerStatus, McpTransportConfig, ProviderSecretStatus, ThinkingConfig,
 };
 use argus_server::response::MutationResponse;
+use argus_server::routes::templates::{AgentMcpBindingPayload, TemplateRecordPayload};
 
 fn provider_record(display_name: &str) -> LlmProviderRecordJson {
     LlmProviderRecordJson {
@@ -47,6 +48,16 @@ fn template_record(display_name: &str) -> AgentRecord {
         max_tokens: Some(2048),
         temperature: Some(0.2),
         thinking_config: Some(ThinkingConfig::enabled()),
+    }
+}
+
+fn template_payload(
+    display_name: &str,
+    mcp_bindings: Vec<AgentMcpBindingPayload>,
+) -> TemplateRecordPayload {
+    TemplateRecordPayload {
+        record: template_record(display_name),
+        mcp_bindings,
     }
 }
 
@@ -144,6 +155,51 @@ async fn template_delete_route_removes_template() {
             .iter()
             .all(|template| template.display_name != "Disposable Agent")
     );
+}
+
+#[tokio::test]
+async fn template_routes_round_trip_mcp_bindings() {
+    let ctx = support::TestContext::new().await;
+    let server_response = ctx
+        .post_json("/api/v1/mcp/servers", &mcp_server("Template Slack"))
+        .await;
+    assert_eq!(server_response.status(), StatusCode::CREATED);
+    let created_server: MutationResponse<McpServerRecord> =
+        support::json_body(server_response).await;
+    let server_id = created_server
+        .item
+        .id
+        .expect("created server should have id");
+
+    let create_response = ctx
+        .post_json(
+            "/api/v1/agents/templates",
+            &template_payload(
+                "MCP Enabled Agent",
+                vec![AgentMcpBindingPayload {
+                    server_id,
+                    allowed_tools: None,
+                }],
+            ),
+        )
+        .await;
+    assert_eq!(create_response.status(), StatusCode::CREATED);
+    let created: MutationResponse<TemplateRecordPayload> =
+        support::json_body(create_response).await;
+
+    assert_eq!(created.item.record.display_name, "MCP Enabled Agent");
+    assert_eq!(created.item.mcp_bindings.len(), 1);
+    assert_eq!(created.item.mcp_bindings[0].server_id, server_id);
+    assert_eq!(created.item.mcp_bindings[0].allowed_tools, None);
+
+    let list_response = ctx.get("/api/v1/agents/templates").await;
+    let templates: Vec<TemplateRecordPayload> = support::json_body(list_response).await;
+    let found = templates
+        .into_iter()
+        .find(|template| template.record.display_name == "MCP Enabled Agent")
+        .expect("template should be listed");
+    assert_eq!(found.mcp_bindings.len(), 1);
+    assert_eq!(found.mcp_bindings[0].server_id, server_id);
 }
 
 #[tokio::test]

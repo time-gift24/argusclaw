@@ -11,6 +11,7 @@ import {
   type AgentRecord,
   type ApiClient,
   type LlmProviderRecord,
+  type McpServerRecord,
   type ToolRegistryItem,
 } from "@/lib/api";
 
@@ -33,6 +34,7 @@ function templateRecord(overrides: Partial<AgentRecord> = {}): AgentRecord {
     model_id: null,
     system_prompt: "",
     tool_names: [],
+    mcp_bindings: [],
     subagent_names: [],
     max_tokens: null,
     temperature: null,
@@ -69,6 +71,27 @@ function toolRecord(overrides: Partial<ToolRegistryItem> = {}): ToolRegistryItem
   };
 }
 
+function mcpServerRecord(overrides: Partial<McpServerRecord> = {}): McpServerRecord {
+  return {
+    id: 4,
+    display_name: "Slack MCP",
+    enabled: true,
+    transport: {
+      kind: "stdio",
+      command: "slack-mcp",
+      args: [],
+      env: {},
+    },
+    timeout_ms: 5000,
+    status: "ready",
+    last_checked_at: null,
+    last_success_at: null,
+    last_error: null,
+    discovered_tool_count: 2,
+    ...overrides,
+  };
+}
+
 function makeApiClient(overrides: Partial<ApiClient> = {}): ApiClient {
   return {
     getHealth: async () => ({ status: "ok" }),
@@ -85,6 +108,7 @@ function makeApiClient(overrides: Partial<ApiClient> = {}): ApiClient {
     listTemplates: async () => [templateRecord()],
     saveTemplate: async (input) => input,
     listTools: async () => [],
+    listMcpServers: async () => [],
     ...overrides,
   } as ApiClient;
 }
@@ -156,7 +180,7 @@ describe("TemplateEditPage", () => {
     }));
   });
 
-  it("shows tool and subagent descriptions while preserving selected values", async () => {
+  it("shows tool, mcp, and subagent descriptions while preserving selected values", async () => {
     const saveTemplate = vi.fn(async (input: AgentRecord) => templateRecord({ ...input, id: 12 }));
 
     setApiClient(makeApiClient({
@@ -165,6 +189,7 @@ describe("TemplateEditPage", () => {
         templateRecord({ id: 8, display_name: "Reviewer", description: "Reviews implementation risk" }),
       ],
       listTools: async () => [toolRecord()],
+      listMcpServers: async () => [mcpServerRecord()],
       saveTemplate,
     }));
 
@@ -179,17 +204,20 @@ describe("TemplateEditPage", () => {
     await flushPromises();
 
     expect(wrapper.find('[content="Execute shell commands"]').exists()).toBe(true);
+    expect(wrapper.find('[content="状态：就绪；已发现工具 2 个"]').exists()).toBe(true);
     expect(wrapper.find('[content="Reviews implementation risk"]').exists()).toBe(true);
 
     await wrapper.get('[data-testid="template-display-name"]').setValue("带工具模板");
     await wrapper.get('[data-testid="template-system-prompt"]').setValue("Use tools carefully.");
     await wrapper.get('[data-testid="template-tools"]').setValue(["shell"]);
+    await wrapper.get('[data-testid="template-mcp-servers"]').setValue(["4"]);
     await wrapper.get('[data-testid="template-subagents"]').setValue(["Reviewer"]);
     await wrapper.get('[data-testid="save-template"]').trigger("click");
     await flushPromises();
 
     expect(saveTemplate).toHaveBeenCalledWith(expect.objectContaining({
       tool_names: ["shell"],
+      mcp_bindings: [{ server_id: 4, allowed_tools: null }],
       subagent_names: ["Reviewer"],
     }));
   });
