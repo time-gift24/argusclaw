@@ -122,8 +122,13 @@ function formatErrorMessage(reason: unknown) {
 
 watch(
   () => chatSessions.activeThreadId.value,
-  (threadId) => {
-    chatThreadStream.resetTransientState();
+  (threadId, previousThreadId) => {
+    const preservingPendingFirstTurn =
+      !previousThreadId && Boolean(threadId) && chatComposer.sending.value;
+
+    if (!preservingPendingFirstTurn) {
+      chatThreadStream.resetTransientState();
+    }
     if (threadId && chatSessions.activeSessionId.value) {
       chatThreadStream.resetRuntimeActivity();
       chatThreadStream.openThreadEvents(chatSessions.activeSessionId.value, threadId);

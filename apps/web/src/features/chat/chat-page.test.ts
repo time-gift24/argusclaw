@@ -162,6 +162,38 @@ afterEach(() => {
 });
 
 describe("ChatPage", () => {
+  it("keeps a pending assistant bubble visible after sending the first message on a new chat", async () => {
+    let resolveSend!: (value: ChatActionResponse) => void;
+    const sendChatMessage = vi.fn().mockImplementation(
+      () =>
+        new Promise<ChatActionResponse>((resolve) => {
+          resolveSend = resolve;
+        }),
+    );
+
+    setApiClient(
+      makeApiClient({
+        listChatSessions: vi.fn().mockResolvedValue([]),
+        listChatThreads: vi.fn().mockResolvedValue([]),
+        listChatMessages: vi.fn().mockResolvedValue([]),
+        sendChatMessage,
+        subscribeChatThread: vi.fn().mockReturnValue({ close: vi.fn() }),
+      }),
+    );
+    const wrapper = mount(ChatPage);
+    await flushPromises();
+
+    await wrapper.get("[data-testid='chat-input']").setValue("首条消息");
+    await wrapper.get("[data-testid='chat-input']").trigger("keydown", { key: "Enter" });
+    await flushPromises();
+
+    expect(sendChatMessage).toHaveBeenCalledTimes(1);
+    expect(wrapper.findAll(".tr-bubble-stub[data-role='assistant']")).toHaveLength(1);
+
+    resolveSend({ accepted: true });
+    await flushPromises();
+  });
+
   it("does not render the legacy left sidebar", async () => {
     setApiClient(makeApiClient({ listChatSessions: vi.fn().mockResolvedValue([]) }));
     const wrapper = mount(ChatPage);
