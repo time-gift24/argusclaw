@@ -105,7 +105,29 @@ describe("useChatPresentation", () => {
       runtimeActivities: [],
     });
 
-    expect(messages[0].content).toBe("");
+    expect(messages[0].content).toEqual([
+      {
+        type: "argus-tool-summary",
+        toolDetails: [
+          {
+            id: "tool-call-shell-0",
+            kind: "shell",
+            name: "shell",
+            status: "running",
+            inputPreview: "",
+            outputPreview: "",
+          },
+          {
+            id: "tool-call-mcp.search-1",
+            kind: "mcp",
+            name: "mcp.search",
+            status: "running",
+            inputPreview: "",
+            outputPreview: "",
+          },
+        ],
+      },
+    ]);
     expect(messages).toHaveLength(1);
     expect((messages[0].state as { toolDetails?: unknown[] } | undefined)?.toolDetails).toEqual([
       {
@@ -154,6 +176,29 @@ describe("useChatPresentation", () => {
 
     expect(messages).toHaveLength(1);
     expect(messages[0].role).toBe("assistant");
+    expect(messages[0].content).toEqual([
+      {
+        type: "argus-tool-summary",
+        toolDetails: [
+          {
+            id: "call-shell",
+            kind: "shell",
+            name: "shell",
+            status: "success",
+            inputPreview: "{\n  \"cmd\": \"pwd\"\n}",
+            outputPreview: "/workspace/project",
+          },
+          {
+            id: "call-search",
+            kind: "mcp",
+            name: "mcp.search",
+            status: "success",
+            inputPreview: "{\n  \"q\": \"runtime\"\n}",
+            outputPreview: "{\"hits\":2}",
+          },
+        ],
+      },
+    ]);
     expect((messages[0].state as { toolDetails?: unknown[] } | undefined)?.toolDetails).toEqual([
       {
         id: "call-shell",
@@ -193,6 +238,21 @@ describe("useChatPresentation", () => {
     });
 
     expect(messages[1].loading).toBe(false);
+    expect(messages[1].content).toEqual([
+      {
+        type: "argus-tool-summary",
+        toolDetails: [
+          {
+            id: "call-shell",
+            kind: "shell",
+            name: "shell",
+            status: "running",
+            inputPreview: "{\n  \"cmd\": \"pwd\"\n}",
+            outputPreview: "",
+          },
+        ],
+      },
+    ]);
     expect((messages[1].state as { toolDetails?: unknown[] } | undefined)?.toolDetails).toEqual([
       {
         id: "call-shell",

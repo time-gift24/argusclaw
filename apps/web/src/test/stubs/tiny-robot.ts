@@ -1,4 +1,4 @@
-import { defineComponent, h, type PropType } from "vue";
+import { defineComponent, h, inject, provide, type PropType } from "vue";
 
 interface PromptItem {
   id?: string;
@@ -9,9 +9,17 @@ interface PromptItem {
 interface BubbleMessage {
   id?: string;
   role?: string;
-  content?: string;
+  content?: unknown;
   reasoning_content?: string;
 }
+
+interface BubbleContentRendererMatch {
+  find: (message: BubbleMessage, content: Record<string, unknown>, contentIndex: number) => boolean;
+  renderer: unknown;
+}
+
+const BUBBLE_MATCHES_KEY = Symbol("bubble-content-renderer-matches");
+const BUBBLE_FALLBACK_KEY = Symbol("bubble-fallback-content-renderer");
 
 export const TrBubbleList = defineComponent({
   name: "TrBubbleList",
@@ -20,8 +28,53 @@ export const TrBubbleList = defineComponent({
       type: Array as PropType<BubbleMessage[]>,
       default: () => [],
     },
+    contentResolver: {
+      type: Function as PropType<(message: BubbleMessage) => unknown>,
+      default: undefined,
+    },
   },
   setup(props) {
+    const contentRendererMatches = inject<BubbleContentRendererMatch[]>(BUBBLE_MATCHES_KEY, []);
+    inject<unknown>(BUBBLE_FALLBACK_KEY, null);
+
+    function renderContent(message: BubbleMessage) {
+      const resolved = props.contentResolver ? props.contentResolver(message) : message.content;
+
+      if (Array.isArray(resolved)) {
+        return resolved.map((content, contentIndex) => {
+          const normalized = typeof content === "string"
+            ? { type: "text", text: content }
+            : content;
+          const match = contentRendererMatches.find((entry) =>
+            entry.find(message, normalized as Record<string, unknown>, contentIndex));
+
+          if (match) {
+            return h(match.renderer as never, {
+              key: `content-${contentIndex}`,
+              message: {
+                ...message,
+                content: resolved,
+              },
+              contentIndex,
+            });
+          }
+
+          if (
+            normalized
+            && typeof normalized === "object"
+            && "type" in normalized
+            && (normalized as { type?: string }).type === "text"
+          ) {
+            return h("div", { key: `content-${contentIndex}` }, (normalized as { text?: string }).text ?? "");
+          }
+
+          return h("div", { key: `content-${contentIndex}` }, JSON.stringify(normalized));
+        });
+      }
+
+      return typeof resolved === "string" ? resolved : "";
+    }
+
     return () =>
       h(
         "div",
@@ -35,7 +88,7 @@ export const TrBubbleList = defineComponent({
               "data-reasoning": message.reasoning_content ?? "",
               key: `${message.role ?? "message"}-${index}`,
             },
-            message.content,
+            renderContent(message),
           ),
         ),
       );
@@ -45,12 +98,18 @@ export const TrBubbleList = defineComponent({
 export const TrBubbleProvider = defineComponent({
   name: "TrBubbleProvider",
   props: {
+    contentRendererMatches: {
+      type: Array as PropType<BubbleContentRendererMatch[]>,
+      default: () => [],
+    },
     fallbackContentRenderer: {
       type: [Object, Function, String] as PropType<unknown>,
       default: null,
     },
   },
   setup(props, { slots }) {
+    provide(BUBBLE_MATCHES_KEY, props.contentRendererMatches);
+    provide(BUBBLE_FALLBACK_KEY, props.fallbackContentRenderer);
     return () =>
       h(
         "div",

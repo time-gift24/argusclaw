@@ -15,9 +15,7 @@ import {
 import ToolCallSummaryContent from "./ToolCallSummaryContent.vue";
 import {
   TOOL_SUMMARY_CONTENT_TYPE,
-  type ChatRobotContentItem,
   type ChatRobotMessage,
-  type ToolCallDetail,
 } from "../composables/useChatPresentation";
 
 interface Props {
@@ -74,32 +72,6 @@ function handleStageScroll() {
   updateStickToBottom();
 }
 
-function resolveBubbleContent(message: BubbleMessage) {
-  const resolved: ChatRobotContentItem[] = [];
-  const toolDetails = Array.isArray(message.state?.toolDetails)
-    ? (message.state.toolDetails as ToolCallDetail[])
-    : [];
-  const text = typeof message.content === "string" ? message.content : "";
-
-  if (toolDetails.length > 0) {
-    resolved.push({
-      type: TOOL_SUMMARY_CONTENT_TYPE,
-      toolDetails,
-    });
-  }
-
-  if (text.trim()) {
-    resolved.push({
-      type: "text",
-      text,
-    });
-  }
-
-  if (resolved.length === 0) return text;
-  if (resolved.length === 1 && resolved[0]?.type === "text") return text;
-  return resolved;
-}
-
 watch(
   () => props.messages,
   async (messages) => {
@@ -139,7 +111,6 @@ onMounted(async () => {
         :messages="messages"
         :role-configs="bubbleRoles"
         content-render-mode="split"
-        :content-resolver="resolveBubbleContent"
         auto-scroll
         group-strategy="divider"
       />

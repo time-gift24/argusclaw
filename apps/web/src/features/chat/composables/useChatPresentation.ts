@@ -61,17 +61,22 @@ export function toRobotMessages(options: RobotMessageOptions): ChatRobotMessage[
   const toolResultsById = indexToolResults(options.messages);
   const msgs: ChatRobotMessage[] = options.messages
     .filter((message) => shouldRenderMessage(message, assistantToolCallIds))
-    .map((message, index): ChatRobotMessage => ({
-      id: settledMessageId(message, index),
-      role: message.role,
-      content: displayMessageContent(message, toolResultsById),
-      reasoning_content: message.reasoning_content?.trim() ? message.reasoning_content : undefined,
-      state: buildMessageState({
-        reasoningContent: message.reasoning_content,
-        thinking: false,
-        toolDetails: buildMessageToolDetails(message, toolResultsById),
-      }),
-    }));
+    .map((message, index): ChatRobotMessage => {
+      const toolDetails = buildMessageToolDetails(message, toolResultsById);
+      const content = buildRobotContent(displayMessageText(message, toolDetails), toolDetails);
+
+      return {
+        id: settledMessageId(message, index),
+        role: message.role,
+        content,
+        reasoning_content: message.reasoning_content?.trim() ? message.reasoning_content : undefined,
+        state: buildMessageState({
+          reasoningContent: message.reasoning_content,
+          thinking: false,
+          toolDetails,
+        }),
+      };
+    });
 
   if (options.streaming && (options.hasActiveThread || msgs.length > 0)) {
     const pendingToolDetails = buildPendingToolDetails(options.runtimeActivities);
@@ -84,7 +89,7 @@ export function toRobotMessages(options: RobotMessageOptions): ChatRobotMessage[
     msgs.push({
       id: "pending-assistant",
       role: "assistant",
-      content: options.pendingAssistantContent || "",
+      content: buildRobotContent(options.pendingAssistantContent || "", pendingToolDetails),
       reasoning_content: options.pendingAssistantReasoning || undefined,
       loading: !hasVisiblePendingContent,
       state: buildMessageState({
@@ -148,15 +153,14 @@ export function draftMessageForPrompt(promptId: string | number | undefined) {
   return "请基于当前智能体模板，给出系统提示词和工具配置的改进建议。";
 }
 
-function displayMessageContent(
+function displayMessageText(
   message: ChatMessageRecord,
-  toolResultsById: Map<string, ChatMessageRecord>,
+  toolDetails: ToolCallDetail[],
 ) {
   const content = message.content?.trim();
   if (content) return message.content;
 
   if (message.role === "assistant") {
-    const toolDetails = buildMessageToolDetails(message, toolResultsById);
     if (toolDetails.length > 0) return "";
     const names = toolCallNames(message.tool_calls);
     if (names.length > 0) return "";
@@ -169,6 +173,30 @@ function displayMessageContent(
 
   if (message.role === "tool") return "工具调用结果为空。";
   return "消息内容为空。";
+}
+
+function buildRobotContent(text: string, toolDetails: ToolCallDetail[]): ChatMessageContent {
+  const normalizedText = text.trim();
+
+  if (toolDetails.length === 0) {
+    return normalizedText ? text : "";
+  }
+
+  const content: ChatRobotContentItem[] = [
+    {
+      type: TOOL_SUMMARY_CONTENT_TYPE,
+      toolDetails,
+    },
+  ];
+
+  if (normalizedText) {
+    content.push({
+      type: "text",
+      text,
+    });
+  }
+
+  return content;
 }
 
 function buildMessageState(options: {
