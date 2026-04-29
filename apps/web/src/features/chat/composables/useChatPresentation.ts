@@ -1,15 +1,50 @@
 import { h } from "vue";
-import type { BubbleRoleConfig, PromptProps } from "@opentiny/tiny-robot";
+import type {
+  BubbleRoleConfig,
+  ChatMessageContent,
+  ChatMessageContentItem,
+  PromptProps,
+} from "@opentiny/tiny-robot";
 
 import type { ChatMessageRecord } from "@/lib/api";
+import type { ToolActivity, ToolActivityStatus } from "./useChatThreadStream";
+
+export const TOOL_SUMMARY_CONTENT_TYPE = "argus-tool-summary";
+
+export interface ToolCallDetail {
+  id: string;
+  kind: "shell" | "mcp" | "search" | "http" | "file" | "tool";
+  name: string;
+  status: ToolActivityStatus;
+  inputPreview: string;
+  outputPreview: string;
+}
+
+export interface ToolSummaryContentItem extends ChatMessageContentItem {
+  type: typeof TOOL_SUMMARY_CONTENT_TYPE;
+  toolDetails: ToolCallDetail[];
+}
+
+export interface TextContentItem extends ChatMessageContentItem {
+  type: "text";
+  text: string;
+}
+
+export type ChatRobotContentItem = ToolSummaryContentItem | TextContentItem;
+
+export interface ChatRobotMessageState extends Record<string, unknown> {
+  thinking?: boolean;
+  open?: boolean;
+  toolDetails?: ToolCallDetail[];
+}
 
 export interface ChatRobotMessage {
   id?: string;
   role: string;
-  content: string;
+  content: ChatMessageContent;
   reasoning_content?: string;
   loading?: boolean;
-  state?: Record<string, unknown>;
+  state?: ChatRobotMessageState;
 }
 
 export interface RobotMessageOptions {
@@ -18,22 +53,32 @@ export interface RobotMessageOptions {
   hasActiveThread: boolean;
   pendingAssistantContent: string;
   pendingAssistantReasoning: string;
+  runtimeActivities: ToolActivity[];
 }
 
 export function toRobotMessages(options: RobotMessageOptions): ChatRobotMessage[] {
+  const assistantToolCallIds = collectAssistantToolCallIds(options.messages);
+  const toolResultsById = indexToolResults(options.messages);
   const msgs: ChatRobotMessage[] = options.messages
-    .filter((message) => message.role !== "system")
+    .filter((message) => shouldRenderMessage(message, assistantToolCallIds))
     .map((message, index): ChatRobotMessage => ({
       id: settledMessageId(message, index),
       role: message.role,
-      content: displayMessageContent(message),
+      content: displayMessageContent(message, toolResultsById),
       reasoning_content: message.reasoning_content?.trim() ? message.reasoning_content : undefined,
-      state: buildReasoningState(message.reasoning_content, false),
+      state: buildMessageState({
+        reasoningContent: message.reasoning_content,
+        thinking: false,
+        toolDetails: buildMessageToolDetails(message, toolResultsById),
+      }),
     }));
 
   if (options.streaming && (options.hasActiveThread || msgs.length > 0)) {
+    const pendingToolDetails = buildPendingToolDetails(options.runtimeActivities);
     const hasVisiblePendingContent = Boolean(
-      options.pendingAssistantContent.trim() || options.pendingAssistantReasoning.trim(),
+      options.pendingAssistantContent.trim()
+        || options.pendingAssistantReasoning.trim()
+        || pendingToolDetails.length > 0,
     );
 
     msgs.push({
@@ -42,7 +87,11 @@ export function toRobotMessages(options: RobotMessageOptions): ChatRobotMessage[
       content: options.pendingAssistantContent || "",
       reasoning_content: options.pendingAssistantReasoning || undefined,
       loading: !hasVisiblePendingContent,
-      state: buildReasoningState(options.pendingAssistantReasoning, true),
+      state: buildMessageState({
+        reasoningContent: options.pendingAssistantReasoning,
+        thinking: true,
+        toolDetails: pendingToolDetails,
+      }),
     });
   }
 
@@ -99,13 +148,18 @@ export function draftMessageForPrompt(promptId: string | number | undefined) {
   return "请基于当前智能体模板，给出系统提示词和工具配置的改进建议。";
 }
 
-function displayMessageContent(message: ChatMessageRecord) {
+function displayMessageContent(
+  message: ChatMessageRecord,
+  toolResultsById: Map<string, ChatMessageRecord>,
+) {
   const content = message.content?.trim();
   if (content) return message.content;
 
   if (message.role === "assistant") {
+    const toolDetails = buildMessageToolDetails(message, toolResultsById);
+    if (toolDetails.length > 0) return "";
     const names = toolCallNames(message.tool_calls);
-    if (names.length > 0) return `正在调用工具：${names.join("、")}`;
+    if (names.length > 0) return "";
     if (message.reasoning_content?.trim()) return "助手正在思考，等待可见回复。";
   }
 
@@ -117,16 +171,23 @@ function displayMessageContent(message: ChatMessageRecord) {
   return "消息内容为空。";
 }
 
-function buildReasoningState(
-  reasoningContent: string | null | undefined,
-  thinking: boolean,
-) {
-  if (!reasoningContent?.trim()) return undefined;
+function buildMessageState(options: {
+  reasoningContent: string | null | undefined;
+  thinking: boolean;
+  toolDetails: ToolCallDetail[];
+}) {
+  const state: ChatRobotMessageState = {};
 
-  return {
-    thinking,
-    open: true,
-  };
+  if (options.reasoningContent?.trim()) {
+    state.thinking = options.thinking;
+    state.open = true;
+  }
+
+  if (options.toolDetails.length > 0) {
+    state.toolDetails = options.toolDetails;
+  }
+
+  return Object.keys(state).length > 0 ? state : undefined;
 }
 
 function toolCallNames(toolCalls: unknown[] | null | undefined): string[] {
@@ -144,4 +205,109 @@ function settledMessageId(message: ChatMessageRecord, index: number) {
   if (message.tool_call_id?.trim()) return `tool-call-${message.tool_call_id}`;
   if (message.role === "tool" && message.name?.trim()) return `tool-${message.name}-${index}`;
   return `message-${message.role}-${index}`;
+}
+
+function shouldRenderMessage(message: ChatMessageRecord, assistantToolCallIds: Set<string>) {
+  if (message.role === "system") return false;
+  if (message.role !== "tool") return true;
+  if (!message.tool_call_id?.trim()) return true;
+  return !assistantToolCallIds.has(message.tool_call_id);
+}
+
+function collectAssistantToolCallIds(messages: ChatMessageRecord[]) {
+  const ids = new Set<string>();
+  for (const message of messages) {
+    if (message.role !== "assistant") continue;
+    for (const toolCall of normalizeToolCalls(message.tool_calls)) {
+      if (toolCall.id) ids.add(toolCall.id);
+    }
+  }
+  return ids;
+}
+
+function indexToolResults(messages: ChatMessageRecord[]) {
+  const results = new Map<string, ChatMessageRecord>();
+  for (const message of messages) {
+    if (message.role !== "tool") continue;
+    if (!message.tool_call_id?.trim()) continue;
+    results.set(message.tool_call_id, message);
+  }
+  return results;
+}
+
+function buildMessageToolDetails(
+  message: ChatMessageRecord,
+  toolResultsById: Map<string, ChatMessageRecord>,
+): ToolCallDetail[] {
+  if (message.role !== "assistant") return [];
+
+  return normalizeToolCalls(message.tool_calls).map((toolCall, index) => {
+    const resultMessage = toolCall.id ? toolResultsById.get(toolCall.id) : undefined;
+    return {
+      id: toolCall.id || `tool-call-${toolCall.name}-${index}`,
+      kind: toolKind(toolCall.name),
+      name: toolCall.name,
+      status: resultMessage ? "success" : "running",
+      inputPreview: previewValue(toolCall.arguments),
+      outputPreview: resultMessage?.content ?? "",
+    };
+  });
+}
+
+function buildPendingToolDetails(runtimeActivities: ToolActivity[]): ToolCallDetail[] {
+  return runtimeActivities.map((activity) => ({
+    id: activity.id,
+    kind: toolKind(activity.name),
+    name: activity.name,
+    status: activity.status,
+    inputPreview: activity.argumentsPreview,
+    outputPreview: activity.resultPreview,
+  }));
+}
+
+function normalizeToolCalls(toolCalls: unknown[] | null | undefined): Array<{
+  id: string;
+  name: string;
+  arguments: unknown;
+}> {
+  if (!Array.isArray(toolCalls)) return [];
+
+  return toolCalls
+    .map((toolCall) => {
+      if (!toolCall || typeof toolCall !== "object") return null;
+      const idValue = "id" in toolCall ? (toolCall as { id?: unknown }).id : "";
+      const nameValue = "name" in toolCall ? (toolCall as { name?: unknown }).name : "";
+      const argumentsValue = "arguments" in toolCall
+        ? (toolCall as { arguments?: unknown }).arguments
+        : undefined;
+
+      const name = typeof nameValue === "string" ? nameValue.trim() : "";
+      if (!name) return null;
+
+      return {
+        id: typeof idValue === "string" ? idValue.trim() : "",
+        name,
+        arguments: argumentsValue,
+      };
+    })
+    .filter((toolCall): toolCall is { id: string; name: string; arguments: unknown } => Boolean(toolCall));
+}
+
+function previewValue(value: unknown): string {
+  if (value === null || value === undefined) return "";
+  if (typeof value === "string") return value;
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
+function toolKind(name: string): ToolCallDetail["kind"] {
+  if (name === "shell" || name.startsWith("shell.") || name === "exec") return "shell";
+  if (name.startsWith("mcp.")) return "mcp";
+  if (name.includes("search")) return "search";
+  if (name.includes("http") || name.includes("fetch")) return "http";
+  if (name.includes("file") || name.includes("fs")) return "file";
+  return "tool";
 }

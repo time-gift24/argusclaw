@@ -1,18 +1,33 @@
 <script setup lang="ts">
+import { computed, ref } from "vue";
+
 import { TinyTag } from "@/lib/opentiny";
-import type { ToolActivity, ToolActivityStatus } from "../composables/useChatThreadStream";
+import type { ToolActivity } from "../composables/useChatThreadStream";
+import ToolCallDetailDialog from "./ToolCallDetailDialog.vue";
+import {
+  statusLabel,
+  toolIcon,
+  toolKindFromName,
+  toolKindLabel,
+} from "./toolCallDisplay";
 
 interface Props {
   notice: string;
   activities: ToolActivity[];
 }
 
-defineProps<Props>();
+const props = defineProps<Props>();
+const activeActivityId = ref<string>("");
 
-function runtimeActivityStatusLabel(status: ToolActivityStatus) {
-  if (status === "success") return "完成";
-  if (status === "error") return "失败";
-  return "运行中";
+const activeActivity = computed(() =>
+  props.activities.find((activity) => activity.id === activeActivityId.value) ?? null);
+
+function openActivity(activity: ToolActivity) {
+  activeActivityId.value = activity.id;
+}
+
+function closeActivityDetail() {
+  activeActivityId.value = "";
 }
 </script>
 
@@ -29,20 +44,35 @@ function runtimeActivityStatusLabel(status: ToolActivityStatus) {
     </div>
     <p v-if="notice" class="runtime-notice">{{ notice }}</p>
     <div v-if="activities.length > 0" class="tool-activity-list">
-      <article
+      <button
         v-for="activity in activities"
         :key="activity.id"
         class="tool-activity-card"
         :class="`tool-activity-card--${activity.status}`"
+        type="button"
+        @click="openActivity(activity)"
       >
+        <span class="tool-activity-card__icon">{{ toolIcon(toolKindFromName(activity.name)) }}</span>
         <div class="tool-activity-card__header">
-          <strong>{{ activity.name }}</strong>
-          <span>{{ runtimeActivityStatusLabel(activity.status) }}</span>
+          <div class="tool-activity-card__meta">
+            <strong>{{ activity.name }}</strong>
+            <small>{{ toolKindLabel(toolKindFromName(activity.name)) }} · 点击查看输入/输出</small>
+          </div>
+          <span class="tool-activity-card__status" :class="`tool-activity-card__status--${activity.status}`">
+            {{ statusLabel(activity.status) }}
+          </span>
         </div>
-        <pre v-if="activity.argumentsPreview">{{ activity.argumentsPreview }}</pre>
-        <pre v-if="activity.resultPreview">{{ activity.resultPreview }}</pre>
-      </article>
+      </button>
     </div>
+    <ToolCallDetailDialog
+      :tool="activeActivity ? {
+        name: activeActivity.name,
+        status: activeActivity.status,
+        inputPreview: activeActivity.argumentsPreview,
+        outputPreview: activeActivity.resultPreview,
+      } : null"
+      @close="closeActivityDetail"
+    />
   </div>
 </template>
 
@@ -90,12 +120,16 @@ function runtimeActivityStatusLabel(status: ToolActivityStatus) {
 
 .tool-activity-card {
   display: grid;
-  gap: var(--space-2);
+  grid-template-columns: 28px minmax(0, 1fr);
+  align-items: center;
+  gap: var(--space-3);
   padding: var(--space-3);
   background: rgba(255, 255, 255, 0.72);
   border: 1px solid rgba(148, 163, 184, 0.16);
   border-radius: 18px;
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.6);
+  text-align: left;
+  cursor: pointer;
 }
 
 .tool-activity-card--running {
@@ -110,20 +144,57 @@ function runtimeActivityStatusLabel(status: ToolActivityStatus) {
   border-color: var(--status-danger);
 }
 
-.tool-activity-card__header span {
-  color: var(--text-muted);
-  font-size: var(--text-xs);
-  font-weight: 590;
+.tool-activity-card__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 700;
 }
 
-.tool-activity-card pre {
-  max-height: 160px;
-  margin: 0;
-  overflow: auto;
+.tool-activity-card__meta {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.tool-activity-card__meta small {
   color: var(--text-secondary);
-  font-family: var(--font-mono);
   font-size: var(--text-xs);
   line-height: 1.5;
-  white-space: pre-wrap;
+}
+
+.tool-activity-card__status {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--surface-muted) 92%, white);
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+
+.tool-activity-card__status--running {
+  background: color-mix(in srgb, var(--accent) 12%, white);
+  color: var(--accent);
+}
+
+.tool-activity-card__status--success {
+  background: color-mix(in srgb, var(--status-success) 12%, white);
+  color: var(--status-success);
+}
+
+.tool-activity-card__status--error {
+  background: color-mix(in srgb, var(--status-danger) 12%, white);
+  color: var(--status-danger);
 }
 </style>

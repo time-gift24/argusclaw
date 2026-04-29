@@ -32,6 +32,7 @@ describe("useChatPresentation", () => {
       hasActiveThread: true,
       pendingAssistantContent: "正在回答",
       pendingAssistantReasoning: "",
+      runtimeActivities: [],
     });
 
     expect(messages).toHaveLength(2);
@@ -51,6 +52,7 @@ describe("useChatPresentation", () => {
       hasActiveThread: true,
       pendingAssistantContent: "",
       pendingAssistantReasoning: "",
+      runtimeActivities: [],
     });
 
     expect(messages[1]).toMatchObject({
@@ -72,6 +74,7 @@ describe("useChatPresentation", () => {
       hasActiveThread: true,
       pendingAssistantContent: "流式回复",
       pendingAssistantReasoning: "正在推理当前问题。",
+      runtimeActivities: [],
     });
 
     expect(messages).toHaveLength(2);
@@ -99,9 +102,107 @@ describe("useChatPresentation", () => {
       hasActiveThread: true,
       pendingAssistantContent: "",
       pendingAssistantReasoning: "",
+      runtimeActivities: [],
     });
 
-    expect(messages[0].content).toBe("正在调用工具：shell、mcp.search");
+    expect(messages[0].content).toBe("");
+    expect(messages).toHaveLength(1);
+    expect((messages[0].state as { toolDetails?: unknown[] } | undefined)?.toolDetails).toEqual([
+      {
+        id: "tool-call-shell-0",
+        kind: "shell",
+        name: "shell",
+        status: "running",
+        inputPreview: "",
+        outputPreview: "",
+      },
+      {
+        id: "tool-call-mcp.search-1",
+        kind: "mcp",
+        name: "mcp.search",
+        status: "running",
+        inputPreview: "",
+        outputPreview: "",
+      },
+    ]);
+  });
+
+  it("merges assistant tool calls with matching tool results into a single dialog-ready summary", () => {
+    const messages = toRobotMessages({
+      messages: [
+        message("assistant", "", {
+          tool_calls: [
+            { id: "call-shell", name: "shell", arguments: { cmd: "pwd" } },
+            { id: "call-search", name: "mcp.search", arguments: { q: "runtime" } },
+          ],
+        }),
+        message("tool", "/workspace/project", {
+          tool_call_id: "call-shell",
+          name: "shell",
+        }),
+        message("tool", "{\"hits\":2}", {
+          tool_call_id: "call-search",
+          name: "mcp.search",
+        }),
+      ],
+      streaming: false,
+      hasActiveThread: true,
+      pendingAssistantContent: "",
+      pendingAssistantReasoning: "",
+      runtimeActivities: [],
+    });
+
+    expect(messages).toHaveLength(1);
+    expect(messages[0].role).toBe("assistant");
+    expect((messages[0].state as { toolDetails?: unknown[] } | undefined)?.toolDetails).toEqual([
+      {
+        id: "call-shell",
+        kind: "shell",
+        name: "shell",
+        status: "success",
+        inputPreview: "{\n  \"cmd\": \"pwd\"\n}",
+        outputPreview: "/workspace/project",
+      },
+      {
+        id: "call-search",
+        kind: "mcp",
+        name: "mcp.search",
+        status: "success",
+        inputPreview: "{\n  \"q\": \"runtime\"\n}",
+        outputPreview: "{\"hits\":2}",
+      },
+    ]);
+  });
+
+  it("exposes streaming runtime activities as clickable tool summaries before text arrives", () => {
+    const messages = toRobotMessages({
+      messages: [message("user", "继续")],
+      streaming: true,
+      hasActiveThread: true,
+      pendingAssistantContent: "",
+      pendingAssistantReasoning: "",
+      runtimeActivities: [
+        {
+          id: "call-shell",
+          name: "shell",
+          status: "running",
+          argumentsPreview: "{\n  \"cmd\": \"pwd\"\n}",
+          resultPreview: "",
+        },
+      ],
+    });
+
+    expect(messages[1].loading).toBe(false);
+    expect((messages[1].state as { toolDetails?: unknown[] } | undefined)?.toolDetails).toEqual([
+      {
+        id: "call-shell",
+        kind: "shell",
+        name: "shell",
+        status: "running",
+        inputPreview: "{\n  \"cmd\": \"pwd\"\n}",
+        outputPreview: "",
+      },
+    ]);
   });
 
   it("maps starter prompt ids to Chinese draft messages", () => {

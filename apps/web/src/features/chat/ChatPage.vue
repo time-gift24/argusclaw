@@ -66,6 +66,7 @@ const robotMessages = computed(() => toRobotMessages({
   hasActiveThread: hasActiveThread.value,
   pendingAssistantContent: chatThreadStream.pendingAssistantContent.value,
   pendingAssistantReasoning: chatThreadStream.pendingAssistantReasoning.value,
+  runtimeActivities: chatThreadStream.runtimeActivities.value,
 }));
 const bubbleRoles = createBubbleRoles();
 const starterPrompts = createStarterPrompts();
@@ -208,6 +209,8 @@ function applyPrompt(_event: MouseEvent, item: PromptProps) {
       <div class="chat-main-column">
         <ChatConversationPanel
           :error="chatComposer.error.value"
+          :runtime-notice="chatThreadStream.runtimeNotice.value"
+          :runtime-activities="chatThreadStream.runtimeActivities.value"
           :thread-loading="chatThreadStream.threadLoading.value"
           :robot-messages="robotMessages"
           :bubble-roles="bubbleRoles"
@@ -218,24 +221,26 @@ function applyPrompt(_event: MouseEvent, item: PromptProps) {
     </div>
 
     <div class="chat-page__composer-dock">
-      <ChatComposerBar
-        v-model="chatComposer.draftMessage.value"
-        :templates="templates"
-        :providers="providers"
-        v-model:selected-template-id="selectedTemplateId"
-        v-model:selected-provider-id="selectedProviderId"
-        v-model:selected-model="selectedModel"
-        :disabled="!chatComposer.canSendMessage.value"
-        :loading="chatComposer.sending.value"
-        :placeholder="chatComposer.senderPlaceholder.value"
-        :has-active-thread="hasActiveThread"
-        :active-provider="activeProvider"
-        :selected-template="selectedTemplate"
-        @submit="chatComposer.sendMessage"
-        @cancel="chatComposer.cancelThread"
-        @new-chat="handleNewChat"
-        @open-history="historyDialogOpen = true"
-      />
+      <div class="chat-page__composer-shell">
+        <ChatComposerBar
+          v-model="chatComposer.draftMessage.value"
+          :templates="templates"
+          :providers="providers"
+          v-model:selected-template-id="selectedTemplateId"
+          v-model:selected-provider-id="selectedProviderId"
+          v-model:selected-model="selectedModel"
+          :disabled="!chatComposer.canSendMessage.value"
+          :loading="chatComposer.sending.value"
+          :placeholder="chatComposer.senderPlaceholder.value"
+          :has-active-thread="hasActiveThread"
+          :active-provider="activeProvider"
+          :selected-template="selectedTemplate"
+          @submit="chatComposer.sendMessage"
+          @cancel="chatComposer.cancelThread"
+          @new-chat="handleNewChat"
+          @open-history="historyDialogOpen = true"
+        />
+      </div>
     </div>
 
     <ChatHistoryDialog
@@ -254,6 +259,7 @@ function applyPrompt(_event: MouseEvent, item: PromptProps) {
 <style scoped>
 .chat-page {
   width: 100%;
+  --chat-main-width: 980px;
   --chat-dock-clearance: 212px;
   height: calc(100vh - (var(--space-6) * 2));
   min-height: calc(100vh - (var(--space-6) * 2));
@@ -277,6 +283,8 @@ function applyPrompt(_event: MouseEvent, item: PromptProps) {
 .chat-main-column {
   display: flex;
   flex-direction: column;
+  width: min(100%, var(--chat-main-width));
+  margin-inline: auto;
 }
 
 .chat-page__composer-dock {
@@ -285,6 +293,12 @@ function applyPrompt(_event: MouseEvent, item: PromptProps) {
   right: var(--space-6);
   bottom: var(--space-6);
   z-index: 30;
+  display: flex;
+  justify-content: center;
+}
+
+.chat-page__composer-shell {
+  width: min(100%, var(--chat-main-width));
 }
 
 @media (max-width: 1180px) {

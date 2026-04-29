@@ -560,6 +560,82 @@ describe("ChatPage", () => {
     expect(wrapper.text()).not.toContain("消息已提交，正在等待流式结果。");
   });
 
+  it("shows runtime tool activity details when a tool starts and completes", async () => {
+    let handlers: ChatThreadEventHandlers | undefined;
+
+    setApiClient(
+      makeApiClient({
+        listChatSessions: vi.fn().mockResolvedValue([session()]),
+        listChatThreads: vi.fn().mockResolvedValue([thread()]),
+        listChatMessages: vi.fn().mockResolvedValue([]),
+        subscribeChatThread: vi.fn((_sessionId, _threadId, nextHandlers) => {
+          handlers = nextHandlers;
+          return { close: vi.fn() } as RuntimeEventSubscription;
+        }),
+      }),
+    );
+    const wrapper = mount(ChatPage);
+    await flushPromises();
+
+    await wrapper.get("[data-testid='chat-input']").setValue("继续");
+    await wrapper.get("[data-testid='chat-input']").trigger("keydown", { key: "Enter" });
+    await flushPromises();
+
+    handlers!.onEvent({
+      session_id: "session-1",
+      thread_id: "thread-1",
+      turn_number: null,
+      payload: {
+        type: "tool_started",
+        tool_call_id: "call-shell",
+        tool_name: "shell",
+        arguments: { cmd: "pwd" },
+      },
+    });
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("本轮运行活动");
+    expect(wrapper.text()).toContain("shell");
+    expect(wrapper.text()).toContain("运行中");
+
+    handlers!.onEvent({
+      session_id: "session-1",
+      thread_id: "thread-1",
+      turn_number: null,
+      payload: {
+        type: "tool_completed",
+        tool_call_id: "call-shell",
+        tool_name: "shell",
+        result: "/workspace/project",
+        is_error: false,
+      },
+    });
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("完成");
+    expect(wrapper.text()).not.toContain("/workspace/project");
+
+    const activityButtons = wrapper
+      .findAll("button")
+      .filter((button) => button.text().includes("点击查看输入/输出"));
+    expect(activityButtons).toHaveLength(1);
+    await activityButtons[0]!.trigger("click");
+    await flushPromises();
+
+    expect(document.body.textContent ?? "").toContain("工具详情");
+    expect(document.body.textContent ?? "").toContain("\"cmd\": \"pwd\"");
+    expect(document.body.textContent ?? "").toContain("/workspace/project");
+
+    const closeButton = Array.from(document.body.querySelectorAll("button")).find((button) =>
+      button.textContent?.includes("关闭"),
+    ) as HTMLButtonElement | undefined;
+    expect(closeButton).toBeDefined();
+    closeButton!.click();
+    await flushPromises();
+
+    expect(document.body.textContent ?? "").not.toContain("工具详情");
+  });
+
   it("starts a new chat draft when clicking the new chat button", async () => {
     setApiClient(
       makeApiClient({
