@@ -209,8 +209,6 @@ function applyPrompt(_event: MouseEvent, item: PromptProps) {
       <div class="chat-main-column">
         <ChatConversationPanel
           :error="chatComposer.error.value"
-          :runtime-notice="chatThreadStream.runtimeNotice.value"
-          :runtime-activities="chatThreadStream.runtimeActivities.value"
           :thread-loading="chatThreadStream.threadLoading.value"
           :robot-messages="robotMessages"
           :bubble-roles="bubbleRoles"

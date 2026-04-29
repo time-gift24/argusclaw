@@ -2,14 +2,10 @@
 import type { BubbleRoleConfig, PromptProps } from "@opentiny/tiny-robot";
 
 import type { ChatRobotMessage } from "../composables/useChatPresentation";
-import type { ToolActivity } from "../composables/useChatThreadStream";
 import ChatMessageStage from "./ChatMessageStage.vue";
-import ChatRuntimeActivityPanel from "./ChatRuntimeActivityPanel.vue";
 
 interface Props {
   error: string;
-  runtimeNotice: string;
-  runtimeActivities: ToolActivity[];
   threadLoading: boolean;
   robotMessages: ChatRobotMessage[];
   bubbleRoles: Record<string, BubbleRoleConfig>;
@@ -31,11 +27,6 @@ function handlePrompt(event: MouseEvent, item: PromptProps) {
 <template>
   <article class="chat-panel chat-panel--immersive">
     <div v-if="error" class="notice notice--danger">{{ error }}</div>
-    <ChatRuntimeActivityPanel
-      :notice="runtimeNotice"
-      :activities="runtimeActivities"
-    />
-
     <ChatMessageStage
       :loading="threadLoading"
       :messages="robotMessages"

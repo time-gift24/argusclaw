@@ -5,6 +5,7 @@ vi.mock("@/lib/opentiny", async () => import("@/test/stubs/opentiny"));
 vi.mock("@opentiny/tiny-robot", async () => import("@/test/stubs/tiny-robot"));
 
 import ChatPage from "./ChatPage.vue";
+import ChatConversationPanel from "./components/ChatConversationPanel.vue";
 import {
   resetApiClient,
   setApiClient,
@@ -560,7 +561,7 @@ describe("ChatPage", () => {
     expect(wrapper.text()).not.toContain("消息已提交，正在等待流式结果。");
   });
 
-  it("shows runtime tool activity details when a tool starts and completes", async () => {
+  it("routes runtime tool activity into the assistant message instead of a standalone panel", async () => {
     let handlers: ChatThreadEventHandlers | undefined;
 
     setApiClient(
@@ -594,9 +595,7 @@ describe("ChatPage", () => {
     });
     await flushPromises();
 
-    expect(wrapper.text()).toContain("本轮运行活动");
-    expect(wrapper.text()).toContain("shell");
-    expect(wrapper.text()).toContain("运行中");
+    expect(wrapper.text()).not.toContain("本轮运行活动");
 
     handlers!.onEvent({
       session_id: "session-1",
@@ -612,28 +611,24 @@ describe("ChatPage", () => {
     });
     await flushPromises();
 
-    expect(wrapper.text()).toContain("完成");
-    expect(wrapper.text()).not.toContain("/workspace/project");
-
-    const activityButtons = wrapper
-      .findAll("button")
-      .filter((button) => button.text().includes("点击查看输入/输出"));
-    expect(activityButtons).toHaveLength(1);
-    await activityButtons[0]!.trigger("click");
-    await flushPromises();
-
-    expect(document.body.textContent ?? "").toContain("工具详情");
-    expect(document.body.textContent ?? "").toContain("\"cmd\": \"pwd\"");
-    expect(document.body.textContent ?? "").toContain("/workspace/project");
-
-    const closeButton = Array.from(document.body.querySelectorAll("button")).find((button) =>
-      button.textContent?.includes("关闭"),
-    ) as HTMLButtonElement | undefined;
-    expect(closeButton).toBeDefined();
-    closeButton!.click();
-    await flushPromises();
-
-    expect(document.body.textContent ?? "").not.toContain("工具详情");
+    const panel = wrapper.getComponent(ChatConversationPanel);
+    const messages = panel.props("robotMessages") as Array<{
+      id?: string;
+      role: string;
+      state?: { toolDetails?: unknown[] };
+    }>;
+    const pendingAssistant = messages.find((item) => item.id === "pending-assistant");
+    expect(pendingAssistant?.role).toBe("assistant");
+    expect(pendingAssistant?.state?.toolDetails).toEqual([
+      {
+        id: "call-shell",
+        kind: "shell",
+        name: "shell",
+        status: "success",
+        inputPreview: "{\n  \"cmd\": \"pwd\"\n}",
+        outputPreview: "/workspace/project",
+      },
+    ]);
   });
 
   it("starts a new chat draft when clicking the new chat button", async () => {
