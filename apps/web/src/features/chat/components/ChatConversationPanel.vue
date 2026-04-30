@@ -27,7 +27,6 @@ function handlePrompt(event: MouseEvent, item: PromptProps) {
 <template>
   <article class="chat-panel chat-panel--immersive">
     <div v-if="error" class="notice notice--danger">{{ error }}</div>
-
     <ChatMessageStage
       :loading="threadLoading"
       :messages="robotMessages"

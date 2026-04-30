@@ -12,6 +12,7 @@ import {
   type ApiClient,
   type BootstrapResponse,
   type HealthResponse,
+  type AccountStatus,
   type LlmProviderRecord,
   type McpServerRecord,
   type ProviderTestResult,
@@ -57,6 +58,16 @@ function makeApiClient(overrides: Partial<ApiClient>): ApiClient {
       mcp_ready_count: 0,
     }),
     listProviders: vi.fn<() => Promise<LlmProviderRecord[]>>().mockResolvedValue([]),
+    getAccountStatus: vi.fn<() => Promise<AccountStatus>>().mockResolvedValue({
+      configured: false,
+      username: null,
+    }),
+    configureAccount: vi
+      .fn<(input: { username: string; password: string }) => Promise<AccountStatus>>()
+      .mockImplementation(async (input) => ({
+        configured: true,
+        username: input.username,
+      })),
     saveProvider: vi.fn<(input: LlmProviderRecord) => Promise<LlmProviderRecord>>().mockImplementation(
       async (input) => input,
     ),
@@ -156,6 +167,55 @@ describe("ProviderEditPage", () => {
       id: 1,
       display_name: "OpenAI Mirror",
       api_key: null,
+    });
+  });
+
+  it("configures account credentials and marks the provider for account token auth", async () => {
+    const configureAccount = vi
+      .fn<(input: { username: string; password: string }) => Promise<AccountStatus>>()
+      .mockResolvedValue({
+        configured: true,
+        username: "alice",
+      });
+    const saveProvider = vi
+      .fn<(input: LlmProviderRecord) => Promise<LlmProviderRecord>>()
+      .mockImplementation(async (input) => makeProvider({ ...input, id: 2 }));
+
+    setApiClient(
+      makeApiClient({
+        configureAccount,
+        saveProvider,
+      }),
+    );
+
+    router.push("/providers/new");
+    await router.isReady();
+
+    const wrapper = mount(ProviderEditPage, {
+      global: {
+        plugins: [router],
+      },
+    });
+    await flushPromises();
+
+    await wrapper.get('input[name="account-token-source"]').setValue(true);
+    await flushPromises();
+
+    await wrapper.get('input[name="account-username"]').setValue("alice");
+    await wrapper.get('input[name="account-password"]').setValue("first-secret");
+    await wrapper.get('[data-testid="save-account"]').trigger("click");
+    await flushPromises();
+
+    await wrapper.get("form").trigger("submit");
+    await flushPromises();
+
+    expect(configureAccount).toHaveBeenCalledWith({
+      username: "alice",
+      password: "first-secret",
+    });
+    expect(saveProvider).toHaveBeenCalledTimes(1);
+    expect(saveProvider.mock.calls[0]?.[0].meta_data).toMatchObject({
+      account_token_source: "true",
     });
   });
 });

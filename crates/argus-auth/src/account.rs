@@ -54,6 +54,22 @@ impl AccountManager {
             })
     }
 
+    pub async fn configure_account(&self, username: &str, password: &str) -> Result<(), AuthError> {
+        let encrypted = self
+            .cipher
+            .encrypt(password)
+            .map_err(|e| AuthError::EncryptionFailed {
+                reason: e.to_string(),
+            })?;
+
+        self.repo
+            .configure_account(username, &encrypted.ciphertext, &encrypted.nonce)
+            .await
+            .map_err(|e| AuthError::DatabaseError {
+                reason: e.to_string(),
+            })
+    }
+
     pub async fn login(&self, username: &str, password: &str) -> Result<bool, AuthError> {
         let creds = self
             .repo
@@ -100,5 +116,58 @@ impl AccountManager {
                 reason: e.to_string(),
             })?;
         Ok(username.map(|username| UserInfo { username }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use argus_crypto::StaticKeySource;
+    use argus_repository::{ArgusSqlite, migrate};
+
+    use super::*;
+
+    #[tokio::test]
+    async fn configure_account_creates_and_replaces_login_credentials() {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("sqlite should connect");
+        migrate(&pool).await.expect("migrations should run");
+        let manager = AccountManager::new(
+            Arc::new(ArgusSqlite::new(pool)),
+            Arc::new(Cipher::new(StaticKeySource::new(
+                b"fixed-test-key".to_vec(),
+            ))),
+        );
+
+        manager
+            .configure_account("alice", "first-secret")
+            .await
+            .expect("account should configure");
+        assert!(
+            manager
+                .login("alice", "first-secret")
+                .await
+                .expect("login should verify")
+        );
+
+        manager
+            .configure_account("bob", "second-secret")
+            .await
+            .expect("account should update");
+
+        assert!(
+            !manager
+                .login("alice", "first-secret")
+                .await
+                .expect("old credentials should verify as invalid")
+        );
+        assert!(
+            manager
+                .login("bob", "second-secret")
+                .await
+                .expect("new credentials should verify")
+        );
     }
 }

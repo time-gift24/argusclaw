@@ -63,6 +63,12 @@ export interface AgentRecord {
     type: "enabled" | "disabled";
     clear_thinking: boolean;
   } | null;
+  mcp_bindings?: AgentMcpBinding[];
+}
+
+export interface AgentMcpBinding {
+  server_id: number;
+  allowed_tools?: string[] | null;
 }
 
 export type McpTransportConfig =
@@ -143,6 +149,16 @@ export interface ToolRegistryItem {
 
 export interface DeleteResponse {
   deleted: boolean;
+}
+
+export interface AccountStatus {
+  configured: boolean;
+  username: string | null;
+}
+
+export interface ConfigureAccountRequest {
+  username: string;
+  password: string;
 }
 
 export type ThreadRuntimeStatus =
@@ -392,6 +408,7 @@ export interface ChatThreadEventEnvelope {
 }
 
 export interface ChatThreadEventHandlers {
+  onOpen?(): void;
   onEvent(event: ChatThreadEventEnvelope): void;
   onError(error: Error): void;
 }
@@ -425,6 +442,8 @@ export interface ApiClient {
   getBootstrap(): Promise<BootstrapResponse>;
   getRuntimeState(): Promise<RuntimeStateResponse>;
   subscribeRuntimeState?(handlers: RuntimeEventHandlers): RuntimeEventSubscription;
+  getAccountStatus?(): Promise<AccountStatus>;
+  configureAccount?(input: ConfigureAccountRequest): Promise<AccountStatus>;
   listProviders(): Promise<LlmProviderRecord[]>;
   saveProvider(input: SaveProviderRequest): Promise<LlmProviderRecord>;
   deleteProvider?(providerId: number): Promise<DeleteResponse>;
@@ -477,6 +496,20 @@ class HttpApiClient implements ApiClient {
 
   getRuntimeState(): Promise<RuntimeStateResponse> {
     return this.request("/runtime");
+  }
+
+  getAccountStatus(): Promise<AccountStatus> {
+    return this.request("/account");
+  }
+
+  configureAccount(input: ConfigureAccountRequest): Promise<AccountStatus> {
+    return this.request("/account", {
+      body: JSON.stringify(input),
+      headers: {
+        "Content-Type": "application/json",
+      },
+      method: "PUT",
+    });
   }
 
   subscribeRuntimeState(handlers: RuntimeEventHandlers): RuntimeEventSubscription {
@@ -799,6 +832,9 @@ class HttpApiClient implements ApiClient {
   ): RuntimeEventSubscription {
     const events = new EventSource(`${this.baseUrl}/chat/sessions/${sessionId}/threads/${threadId}/events`);
 
+    events.onopen = () => {
+      handlers.onOpen?.();
+    };
     events.addEventListener("chat.thread_event", (event) => {
       try {
         handlers.onEvent(JSON.parse((event as MessageEvent<string>).data) as ChatThreadEventEnvelope);

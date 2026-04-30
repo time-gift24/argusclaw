@@ -5,6 +5,7 @@ vi.mock("@/lib/opentiny", async () => import("@/test/stubs/opentiny"));
 vi.mock("@opentiny/tiny-robot", async () => import("@/test/stubs/tiny-robot"));
 
 import ChatPage from "./ChatPage.vue";
+import ChatConversationPanel from "./components/ChatConversationPanel.vue";
 import {
   resetApiClient,
   setApiClient,
@@ -162,6 +163,38 @@ afterEach(() => {
 });
 
 describe("ChatPage", () => {
+  it("keeps a pending assistant bubble visible after sending the first message on a new chat", async () => {
+    let resolveSend!: (value: ChatActionResponse) => void;
+    const sendChatMessage = vi.fn().mockImplementation(
+      () =>
+        new Promise<ChatActionResponse>((resolve) => {
+          resolveSend = resolve;
+        }),
+    );
+
+    setApiClient(
+      makeApiClient({
+        listChatSessions: vi.fn().mockResolvedValue([]),
+        listChatThreads: vi.fn().mockResolvedValue([]),
+        listChatMessages: vi.fn().mockResolvedValue([]),
+        sendChatMessage,
+        subscribeChatThread: vi.fn().mockReturnValue({ close: vi.fn() }),
+      }),
+    );
+    const wrapper = mount(ChatPage);
+    await flushPromises();
+
+    await wrapper.get("[data-testid='chat-input']").setValue("首条消息");
+    await wrapper.get("[data-testid='chat-input']").trigger("keydown", { key: "Enter" });
+    await flushPromises();
+
+    expect(sendChatMessage).toHaveBeenCalledTimes(1);
+    expect(wrapper.findAll(".tr-bubble-stub[data-role='assistant']")).toHaveLength(1);
+
+    resolveSend({ accepted: true });
+    await flushPromises();
+  });
+
   it("does not render the legacy left sidebar", async () => {
     setApiClient(makeApiClient({ listChatSessions: vi.fn().mockResolvedValue([]) }));
     const wrapper = mount(ChatPage);
@@ -201,9 +234,10 @@ describe("ChatPage", () => {
     await flushPromises();
 
     const selects = wrapper.findAllComponents({ name: "OpenTinySelectStub" });
-    expect(selects).toHaveLength(2);
+    expect(selects).toHaveLength(3);
     expect(selects[0].props("modelValue")).toBe("3");
     expect(selects[1].props("modelValue")).toBe("7");
+    expect(selects[2].props("modelValue")).toBe("glm-4.7");
   });
 
   it("opens history dialog when clicking the history button", async () => {
@@ -525,6 +559,76 @@ describe("ChatPage", () => {
     await flushPromises();
 
     expect(wrapper.text()).not.toContain("消息已提交，正在等待流式结果。");
+  });
+
+  it("routes runtime tool activity into the assistant message instead of a standalone panel", async () => {
+    let handlers: ChatThreadEventHandlers | undefined;
+
+    setApiClient(
+      makeApiClient({
+        listChatSessions: vi.fn().mockResolvedValue([session()]),
+        listChatThreads: vi.fn().mockResolvedValue([thread()]),
+        listChatMessages: vi.fn().mockResolvedValue([]),
+        subscribeChatThread: vi.fn((_sessionId, _threadId, nextHandlers) => {
+          handlers = nextHandlers;
+          return { close: vi.fn() } as RuntimeEventSubscription;
+        }),
+      }),
+    );
+    const wrapper = mount(ChatPage);
+    await flushPromises();
+
+    await wrapper.get("[data-testid='chat-input']").setValue("继续");
+    await wrapper.get("[data-testid='chat-input']").trigger("keydown", { key: "Enter" });
+    await flushPromises();
+
+    handlers!.onEvent({
+      session_id: "session-1",
+      thread_id: "thread-1",
+      turn_number: null,
+      payload: {
+        type: "tool_started",
+        tool_call_id: "call-shell",
+        tool_name: "shell",
+        arguments: { cmd: "pwd" },
+      },
+    });
+    await flushPromises();
+
+    expect(wrapper.text()).not.toContain("本轮运行活动");
+
+    handlers!.onEvent({
+      session_id: "session-1",
+      thread_id: "thread-1",
+      turn_number: null,
+      payload: {
+        type: "tool_completed",
+        tool_call_id: "call-shell",
+        tool_name: "shell",
+        result: "/workspace/project",
+        is_error: false,
+      },
+    });
+    await flushPromises();
+
+    const panel = wrapper.getComponent(ChatConversationPanel);
+    const messages = panel.props("robotMessages") as Array<{
+      id?: string;
+      role: string;
+      state?: { toolDetails?: unknown[] };
+    }>;
+    const pendingAssistant = messages.find((item) => item.id === "pending-assistant");
+    expect(pendingAssistant?.role).toBe("assistant");
+    expect(pendingAssistant?.state?.toolDetails).toEqual([
+      {
+        id: "call-shell",
+        kind: "shell",
+        name: "shell",
+        status: "success",
+        inputPreview: "{\n  \"cmd\": \"pwd\"\n}",
+        outputPreview: "/workspace/project",
+      },
+    ]);
   });
 
   it("starts a new chat draft when clicking the new chat button", async () => {

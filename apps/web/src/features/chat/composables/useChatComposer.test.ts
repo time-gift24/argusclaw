@@ -50,9 +50,17 @@ function template(overrides: Partial<AgentRecord> = {}): AgentRecord {
   };
 }
 
-function createComposer(apiOverrides: Partial<ApiClient> = {}) {
-  const activeSessionId = ref("session-1");
-  const activeThreadId = ref("thread-1");
+interface CreateComposerOptions {
+  activeSessionId?: string;
+  activeThreadId?: string;
+  apiOverrides?: Partial<ApiClient>;
+  openThreadEvents?: ReturnType<typeof vi.fn>;
+}
+
+function createComposer(options: CreateComposerOptions = {}) {
+  const { activeSessionId: initialSessionId = "session-1", activeThreadId: initialThreadId = "thread-1", apiOverrides = {}, openThreadEvents: openThreadEventsOverride } = options;
+  const activeSessionId = ref(initialSessionId);
+  const activeThreadId = ref(initialThreadId);
   const activeBinding = ref<ChatThreadBinding | null>(null);
   const selectedTemplateId = ref<number | null>(3);
   const selectedProviderId = ref<number | null>(7);
@@ -69,7 +77,7 @@ function createComposer(apiOverrides: Partial<ApiClient> = {}) {
   const refreshSessions = vi.fn().mockResolvedValue(undefined);
   const refreshThreads = vi.fn().mockResolvedValue(undefined);
   const applyChatSessionPayload = vi.fn<(payload: ChatSessionPayload) => void>();
-  const openThreadEvents = vi.fn();
+  const openThreadEvents = openThreadEventsOverride ?? vi.fn().mockResolvedValue(undefined);
   const closeThreadEvents = vi.fn();
   const resetRuntimeActivity = vi.fn();
   const refreshStreamUntilSettled = vi.fn().mockResolvedValue(undefined);
@@ -142,8 +150,10 @@ describe("useChatComposer", () => {
 
   it("removes the optimistic user message when send fails", async () => {
     const { composer, messages, streaming, closeThreadEvents, refreshStreamUntilSettled } = createComposer({
-      sendChatMessage: vi.fn().mockRejectedValue(new Error("send failed")),
-      subscribeChatThread: vi.fn().mockReturnValue({ close: vi.fn() }),
+      apiOverrides: {
+        sendChatMessage: vi.fn().mockRejectedValue(new Error("send failed")),
+        subscribeChatThread: vi.fn().mockReturnValue({ close: vi.fn() }),
+      },
     });
 
     await composer.sendMessage("继续");
@@ -157,11 +167,53 @@ describe("useChatComposer", () => {
 
   it("does not show a success banner after a message is submitted", async () => {
     const { composer } = createComposer({
-      subscribeChatThread: vi.fn().mockReturnValue({ close: vi.fn() }),
+      apiOverrides: {
+        subscribeChatThread: vi.fn().mockReturnValue({ close: vi.fn() }),
+      },
     });
 
     await composer.sendMessage("继续");
 
     expect(composer.actionMessage.value).toBe("");
+  });
+
+  it("waits for thread events to open before sending the first message on a new thread", async () => {
+    let resolveThreadEvents!: () => void;
+    const openThreadEvents = vi.fn().mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveThreadEvents = resolve;
+        }),
+    );
+    const sendChatMessage = vi.fn().mockResolvedValue({ accepted: true });
+    const createChatSessionWithThread = vi.fn().mockResolvedValue({
+      session_key: "session-9",
+      session_id: "session-9",
+      template_id: 3,
+      thread_id: "thread-9",
+      effective_provider_id: 7,
+      effective_model: "glm-4.7",
+    });
+    const { composer } = createComposer({
+      activeSessionId: "",
+      activeThreadId: "",
+      apiOverrides: {
+        createChatSessionWithThread,
+        sendChatMessage,
+      },
+      openThreadEvents,
+    });
+
+    const sendPromise = composer.sendMessage("先连上流，再发消息");
+    await vi.waitFor(() => {
+      expect(createChatSessionWithThread).toHaveBeenCalledTimes(1);
+      expect(openThreadEvents).toHaveBeenCalledTimes(1);
+    });
+
+    expect(sendChatMessage).not.toHaveBeenCalled();
+
+    resolveThreadEvents();
+    await sendPromise;
+    expect(sendChatMessage).toHaveBeenCalledWith("session-9", "thread-9", "先连上流，再发消息");
   });
 });

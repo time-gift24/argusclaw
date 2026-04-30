@@ -74,5 +74,6 @@ describe("ChatMessageStage", () => {
     });
 
     expect(wrapper.find(".message-stage--flat").exists()).toBe(true);
+    expect(wrapper.find(".message-stage--centered-assistant").exists()).toBe(true);
   });
 });

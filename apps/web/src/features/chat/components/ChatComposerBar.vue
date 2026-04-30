@@ -42,9 +42,13 @@ const templateOptions = computed(() =>
 const providerOptions = computed(() =>
   props.providers.map((p) => ({ label: p.display_name, value: String(p.id) })),
 );
+const modelOptions = computed(() =>
+  (props.activeProvider?.models ?? []).map((model) => ({ label: model, value: model })),
+);
 
 const selectedTemplateValue = computed(() => toSelectValue(props.selectedTemplateId));
 const selectedProviderValue = computed(() => toSelectValue(props.selectedProviderId));
+const selectedModelValue = computed(() => props.selectedModel);
 
 // TrSender theme vars — transparent, borderless, clean
 const senderThemeStyle = {
@@ -113,6 +117,7 @@ function handleModelChange(value: string) {
 // Dropdown open state for visual feedback
 const templateDropdownOpen = ref(false);
 const providerDropdownOpen = ref(false);
+const modelDropdownOpen = ref(false);
 </script>
 
 <template>
@@ -174,14 +179,24 @@ const providerDropdownOpen = ref(false);
         />
       </TinySelect>
 
-      <!-- 模型名 -->
-      <input
-        class="composer-bar__model-input"
-        type="text"
-        :value="selectedModel"
+      <!-- 模型 -->
+      <TinySelect
+        class="composer-bar__select composer-bar__model-select"
+        :disabled="modelOptions.length === 0"
+        :dropdown-class="modelDropdownOpen ? 'is-open' : ''"
+        :model-value="selectedModelValue"
         placeholder="模型"
-        @input="handleModelChange(($event.target as HTMLInputElement).value)"
-      />
+        size="small"
+        @update:model-value="handleModelChange(String($event))"
+        @dropdown-open-change="(v: boolean) => (modelDropdownOpen = v)"
+      >
+        <TinyOption
+          v-for="opt in modelOptions"
+          :key="opt.value"
+          :label="opt.label"
+          :value="opt.value"
+        />
+      </TinySelect>
 
       <div class="composer-bar__actions">
         <button class="composer-bar__icon-btn" title="新对话" @click="emit('newChat')">
@@ -376,36 +391,11 @@ const providerDropdownOpen = ref(false);
   font-weight: 500 !important;
 }
 
-/* ── 模型输入框 ── */
-.composer-bar__model-input {
+/* ── 模型选择器 ── */
+.composer-bar__model-select {
   flex: 1;
-  min-width: 64px;
+  min-width: 96px;
   max-width: 140px;
-  height: 30px;
-  padding: 0 8px;
-  background: transparent;
-  border: none !important;
-  border-radius: 6px !important;
-  box-shadow: none !important;
-  color: var(--text-secondary);
-  font-size: 12px;
-  line-height: 30px;
-  outline: none;
-  transition: color 0.12s ease, background 0.12s ease;
-}
-
-.composer-bar__model-input:hover {
-  color: var(--text-primary);
-  background: rgba(94, 106, 210, 0.05);
-}
-
-.composer-bar__model-input:focus {
-  color: var(--accent);
-  background: rgba(94, 106, 210, 0.07);
-}
-
-.composer-bar__model-input::placeholder {
-  color: var(--text-placeholder);
 }
 
 /* ── 动作按钮 ── */
@@ -462,7 +452,7 @@ const providerDropdownOpen = ref(false);
     gap: 4px;
   }
 
-  .composer-bar__model-input {
+  .composer-bar__model-select {
     max-width: none;
   }
 }

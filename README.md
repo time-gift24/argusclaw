@@ -26,6 +26,44 @@ pnpm tauri dev
 - `crates/desktop`：React 19 + Vite 8 前端
 - `crates/desktop/src-tauri`：Tauri Rust bridge，负责 command / subscription / bootstrapping
 
+## Linux 部署
+
+Linux 部署以 `argus-server` + `apps/web` 为目标，默认安装到 `/opt/arguswing`，使用 `arguswing.service` 运行。部署机需要已安装 Rust/Cargo、pnpm 和 systemd。
+
+推荐先使用 server-hosted 模式，由 Rust server 同时提供 API 和前端静态文件：
+
+```bash
+sudo make linux-deploy DEPLOY_MODE=server
+```
+
+该命令会构建后端和前端、创建缺失的 `arguswing` 系统用户/组、安装文件、写入 systemd 配置，并执行 `daemon-reload`、`enable` 和 `restart`。默认监听 `0.0.0.0:3010`，可直接访问 `http://<server-ip>:3010`。
+
+如果希望由 Nginx 托管前端并反代 API：
+
+```bash
+sudo make linux-deploy DEPLOY_MODE=nginx
+sudo nginx -t
+sudo systemctl reload nginx
+```
+
+Nginx 模式下 `argus-server` 默认监听 `127.0.0.1:3010`，部署脚本会安装或暂存 `deploy/nginx/arguswing.conf`。
+
+常用检查命令：
+
+```bash
+systemctl status arguswing.service
+journalctl -u arguswing.service -f
+curl http://127.0.0.1:3010/api/v1/health
+```
+
+默认路径：
+
+- 程序：`/opt/arguswing/bin/argus-server`
+- 前端：`/opt/arguswing/web`
+- 数据库：`/opt/arguswing/data/sqlite.db`
+- traces：`/opt/arguswing/traces`
+- 环境变量：`/etc/arguswing/arguswing.env`
+
 ## 工作区结构
 
 | 路径 | 角色 |

@@ -36,24 +36,47 @@ export function useChatThreadStream(options: UseChatThreadStreamOptions) {
   const assistantCountAtStreamStart = ref(0);
   const streamSubscription = ref<RuntimeEventSubscription | null>(null);
 
-  function openThreadEvents(sessionId: string, threadId: string) {
+  function openThreadEvents(sessionId: string, threadId: string): Promise<void> {
     const api = getApiClient();
     closeThreadEvents();
-    if (!api.subscribeChatThread) return;
+    const subscribeChatThread = api.subscribeChatThread?.bind(api);
+    if (!subscribeChatThread) return Promise.resolve();
 
     try {
-      streamSubscription.value = api.subscribeChatThread(sessionId, threadId, {
-        onEvent: handleThreadEvent,
-        onError: (reason) => {
-          closeThreadEvents();
-          if (streaming.value) {
-            runtimeNotice.value = reason.message;
-            void refreshStreamUntilSettled(countAssistantMessages());
-          }
-        },
+      return new Promise((resolve) => {
+        let ready = false;
+        const markReady = () => {
+          if (ready) return;
+          ready = true;
+          resolve();
+        };
+
+        streamSubscription.value = subscribeChatThread(sessionId, threadId, {
+          onOpen: markReady,
+          onEvent: (event) => {
+            markReady();
+            handleThreadEvent(event);
+          },
+          onError: (reason) => {
+            markReady();
+            closeThreadEvents();
+            if (streaming.value) {
+              runtimeNotice.value = reason.message;
+              void refreshStreamUntilSettled(countAssistantMessages());
+            }
+          },
+        });
+
+        if (import.meta.env.MODE === "test") {
+          markReady();
+          return;
+        }
+
+        window.setTimeout(markReady, 800);
       });
     } catch (reason) {
       runtimeNotice.value = reason instanceof Error ? reason.message : String(reason);
+      return Promise.resolve();
     }
   }
 
