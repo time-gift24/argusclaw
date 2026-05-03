@@ -60,9 +60,16 @@ curl http://127.0.0.1:3010/api/v1/health
 
 - 程序：`/opt/arguswing/bin/argus-server`
 - 前端：`/opt/arguswing/web`
-- 数据库：`/opt/arguswing/data/sqlite.db`
+- 数据库：通过 `DATABASE_URL` 指向 PostgreSQL
 - traces：`/opt/arguswing/traces`
 - 环境变量：`/etc/arguswing/arguswing.env`
+
+管理员白名单直接在 PostgreSQL `users` 表配置。用户第一次访问 `/api/v1/bootstrap`
+后会创建/更新 `users` 记录，响应里的 `current_user.id` 即内部 UUID；授权管理员：
+
+```sql
+UPDATE users SET is_admin = TRUE WHERE id = '<current_user.id>';
+```
 
 ## 工作区结构
 

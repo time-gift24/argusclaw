@@ -26,7 +26,7 @@ pub use events::{
     ThreadRuntimeStatus,
 };
 pub use hooks::{HookAction, HookEvent, HookHandler, HookRegistry, ToolHookContext};
-pub use ids::{AgentId, ProviderId, SessionId, ThreadId};
+pub use ids::{AgentId, ProviderId, SessionId, ThreadId, UserId};
 pub use mcp::{
     AgentMcpBinding, AgentMcpServerBinding, AgentMcpToolBinding, McpDiscoveredToolRecord,
     McpServerRecord, McpServerStatus, McpToolResolver, McpTransportConfig, McpTransportKind,

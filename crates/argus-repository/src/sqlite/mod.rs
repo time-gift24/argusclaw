@@ -19,6 +19,7 @@ mod llm_provider;
 mod mcp;
 mod session;
 mod thread;
+mod user;
 
 /// Local result type alias to avoid conflict with argus_protocol::Result.
 type DbResult<T> = std::result::Result<T, DbError>;
@@ -317,6 +318,13 @@ impl ArgusSqlite {
         .await
         .map_err(|e| DbError::QueryFailed { reason: e.to_string() })?;
         Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::traits::TemplateRepairRepository for ArgusSqlite {
+    async fn repair_placeholder_ids(&self) -> std::result::Result<(), crate::error::DbError> {
+        ArgusSqlite::repair_placeholder_ids(self).await
     }
 }
 

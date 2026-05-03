@@ -1,0 +1,39 @@
+# Context Snapshot: app-web multi-user PostgreSQL
+
+- Task statement: apps/web is currently single-user; implement a multi-user version and switch backend repository to PostgreSQL. Future OAuth2 integration is explicitly out of scope for now.
+- Desired outcome: an execution-ready plan/spec for multi-user app/web + PostgreSQL repository migration in ArgusClaw.
+- Stated solution: introduce multi-user capability and PostgreSQL repository backend; defer company OAuth2 authentication.
+- Probable intent hypothesis: make the web/server deployment usable by multiple users instead of a local/single-instance admin/chat console, with production-grade database backend.
+- Known facts/evidence:
+  - Brownfield repo; relevant scopes include `apps/web`, `crates/argus-server`, `crates/argus-repository`, `crates/argus-auth`, and likely session/thread/job/agent ownership boundaries.
+  - `apps/web/AGENTS.md` says all business data goes through `apps/web/src/lib/api.ts` to `argus-server` REST/SSE APIs; no desktop store reuse.
+  - `crates/argus-server/AGENTS.md` says `ServerCore::init(database_path)` connects DB, runs migrations, assembles managers; default database path is `DATABASE_URL` or `~/.arguswing/sqlite.db`.
+  - `crates/argus-server/src/db.rs` currently treats only `sqlite:` as URL; otherwise expands to a filesystem path.
+  - `crates/argus-server/src/server_core.rs` imports `ArgusSqlite`, `connect`, `connect_path`, `migrate`, and all managers are wired from one `SqlitePool` through `ArgusSqlite` trait objects.
+  - `crates/argus-repository/AGENTS.md` says this crate is the only allowed place to write SQL.
+  - `crates/argus-repository/src/sqlite/mod.rs` exposes SQLite-only `connect`, `connect_path`, `migrate`, and `ArgusSqlite` using `sqlx::SqlitePool`.
+  - Initial schema `crates/argus-repository/migrations/20260325120105_init.sql` comments `Accounts (single-user)` and enforces `accounts.id INTEGER PRIMARY KEY CHECK (id = 1)`.
+  - `crates/argus-auth/src/account.rs` is documented as `Account management for single-user local authentication`; `logout` is no-op.
+  - `apps/web/src/lib/api.ts` currently has account status/configuration APIs and chat/session/thread APIs but no user/account scoping in client-visible paths.
+- Constraints:
+  - Future OAuth2/company auth should not be implemented in this pass.
+  - Respect architecture: desktop must not be changed unnecessarily; server route handlers stay narrow; SQL only in `argus-repository`.
+  - Work must be done from `.worktrees/`, not the main worktree.
+- Unknowns/open questions:
+  - What is the intended user identity model before OAuth2?
+  - Which existing data must become per-user vs global/shared?
+  - Whether SQLite must remain supported alongside PostgreSQL or can be replaced for server/web.
+  - Migration expectations for existing single-user data.
+  - API contract/auth context shape before OAuth2.
+  - Deployment and test acceptance criteria.
+- Decision-boundary unknowns:
+  - May OMX introduce internal user IDs and request-scoped user context without OAuth2?
+  - May OMX alter DB schema IDs/types and API response shapes?
+  - May OMX create a PostgreSQL implementation parallel to SQLite, or should it refactor repository naming first?
+- Likely codebase touchpoints:
+  - `crates/argus-repository/src/traits/*`, `src/sqlite/*`, `migrations/*`, new PostgreSQL modules/migrations if approved.
+  - `crates/argus-server/src/db.rs`, `src/server_core.rs`, `src/routes/*`.
+  - `crates/argus-auth/src/account.rs` / token provider boundaries.
+  - `crates/argus-session`, `crates/argus-job`, `crates/argus-agent` if user scoping must propagate to sessions/threads/jobs.
+  - `apps/web/src/lib/api.ts` and related pages/composables/tests if API shape changes.
+- Prompt-safe initial-context summary status: not_needed.

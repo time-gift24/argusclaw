@@ -61,3 +61,8 @@ export const adminNavItems: AdminNavItem[] = [
     to: "/chat",
   },
 ];
+
+export function navItemsForRole(isAdmin: boolean): AdminNavItem[] {
+  if (isAdmin) return adminNavItems;
+  return adminNavItems.filter((item) => item.key === "chat");
+}

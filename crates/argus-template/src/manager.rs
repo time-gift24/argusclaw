@@ -1,14 +1,12 @@
 use std::sync::Arc;
 
 use argus_protocol::{AgentId, AgentRecord, ArgusError, Result};
-use argus_repository::traits::AgentRepository;
-use argus_repository::ArgusSqlite;
+use argus_repository::traits::{AgentRepository, TemplateRepairRepository};
 
 /// Manager for agent templates.
 pub struct TemplateManager {
     repository: Arc<dyn AgentRepository>,
-    /// Concrete instance for repair operations that need transactions.
-    sqlite: Arc<ArgusSqlite>,
+    repair_repository: Arc<dyn TemplateRepairRepository>,
 }
 
 fn format_delete_blocked_reason(
@@ -75,8 +73,14 @@ impl TemplateManager {
         Ok(())
     }
 
-    pub fn new(repository: Arc<dyn AgentRepository>, sqlite: Arc<ArgusSqlite>) -> Self {
-        Self { repository, sqlite }
+    pub fn new(
+        repository: Arc<dyn AgentRepository>,
+        repair_repository: Arc<dyn TemplateRepairRepository>,
+    ) -> Self {
+        Self {
+            repository,
+            repair_repository,
+        }
     }
 
     /// Upsert (create or update) an agent template.
@@ -105,7 +109,7 @@ impl TemplateManager {
 
     /// Repair legacy placeholder agent IDs that were incorrectly persisted as `0`.
     pub async fn repair_placeholder_ids(&self) -> Result<()> {
-        self.sqlite
+        self.repair_repository
             .repair_placeholder_ids()
             .await
             .map_err(|e| ArgusError::DatabaseError {
@@ -216,6 +220,7 @@ impl TemplateManager {
 mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     use argus_repository::{connect_path, migrate, AgentRepository, ArgusSqlite};
 
@@ -225,7 +230,14 @@ mod tests {
 
     async fn make_template_manager_for_test() -> TemplateManager {
         let unique = NEXT_TEST_DB_ID.fetch_add(1, Ordering::Relaxed);
-        let db_path = std::env::temp_dir().join(format!("argus-template-test-{unique}.sqlite"));
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos();
+        let db_path = std::env::temp_dir().join(format!(
+            "argus-template-test-{}-{nanos}-{unique}.sqlite",
+            std::process::id()
+        ));
         let pool = connect_path(&db_path)
             .await
             .expect("test sqlite database should open");
@@ -238,17 +250,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn seed_builtin_agents_includes_chrome_explore() {
+    async fn seed_builtin_agents_allows_empty_agent_definitions() {
         let manager = make_template_manager_for_test().await;
         manager.seed_builtin_agents().await.unwrap();
 
-        let record = manager
-            .find_by_display_name("Chrome Explore")
-            .await
-            .unwrap()
-            .unwrap();
-
-        assert_eq!(record.tool_names, vec!["chrome"]);
+        let records = manager.list().await.unwrap();
+        assert!(records.is_empty());
     }
 
     #[tokio::test]

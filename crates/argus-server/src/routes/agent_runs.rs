@@ -8,6 +8,9 @@ use serde::{Deserialize, Serialize};
 use crate::app_state::AppState;
 use crate::error::ApiError;
 use crate::server_core::{AgentRunDetail, AgentRunSummary};
+use crate::user_context::RequestUser;
+
+use super::require_admin;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateAgentRunRequest {
@@ -21,9 +24,11 @@ pub struct CreateAgentRunResponse {
 }
 
 pub async fn create_agent_run(
+    request_user: RequestUser,
     State(state): State<AppState>,
     Json(request): Json<CreateAgentRunRequest>,
 ) -> Result<(StatusCode, Json<CreateAgentRunResponse>), ApiError> {
+    require_admin(&state, &request_user).await?;
     let prompt = required_non_empty("prompt", request.prompt)?;
     let run = state
         .core()
@@ -36,9 +41,11 @@ pub async fn create_agent_run(
 }
 
 pub async fn get_agent_run(
+    request_user: RequestUser,
     State(state): State<AppState>,
     Path(run_id): Path<String>,
 ) -> Result<Json<AgentRunDetail>, ApiError> {
+    require_admin(&state, &request_user).await?;
     Ok(Json(
         state.core().get_agent_run(parse_run_id(&run_id)?).await?,
     ))

@@ -2,8 +2,9 @@ use std::convert::Infallible;
 
 use argus_protocol::llm::ChatMessage;
 use argus_protocol::{
-    AgentId, JobRuntimeSnapshot, JobRuntimeSummary, LlmStreamEvent, MailboxMessage, ProviderId,
-    SessionId, ThreadEvent, ThreadId, ThreadNoticeLevel, ThreadPoolEventReason, ThreadPoolSnapshot,
+    AgentId, AgentRecord, JobRuntimeSnapshot, JobRuntimeSummary, LlmProviderRecordJson,
+    LlmStreamEvent, MailboxMessage, ProviderId, SessionId, ThreadEvent, ThreadId,
+    ThreadNoticeLevel, ThreadPoolEventReason, ThreadPoolSnapshot,
 };
 use argus_session::{SessionSummary, ThreadSummary};
 use axum::Json;
@@ -19,6 +20,7 @@ use crate::app_state::AppState;
 use crate::error::ApiError;
 use crate::response::{DeleteResponse, MutationResponse};
 use crate::server_core::{ChatSessionPayload, ChatThreadBinding, ChatThreadSnapshot};
+use crate::user_context::RequestUser;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateSessionRequest {
@@ -67,11 +69,29 @@ pub struct CreateSessionWithThreadRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatOptionsResponse {
+    pub providers: Vec<LlmProviderRecordJson>,
+    pub templates: Vec<AgentRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatThreadEventEnvelope {
     pub session_id: String,
     pub thread_id: String,
     pub turn_number: Option<u32>,
     pub payload: ChatThreadEventPayload,
+}
+
+pub async fn get_chat_options(
+    _request_user: RequestUser,
+    State(state): State<AppState>,
+) -> Result<Json<ChatOptionsResponse>, ApiError> {
+    let providers = state.core().list_providers().await?;
+    let templates = state.core().list_templates().await?;
+    Ok(Json(ChatOptionsResponse {
+        providers: providers.into_iter().map(Into::into).collect(),
+        templates,
+    }))
 }
 
 impl ChatThreadEventEnvelope {
@@ -507,29 +527,33 @@ impl ChatThreadEventPayload {
 }
 
 pub async fn list_sessions(
+    request_user: RequestUser,
     State(state): State<AppState>,
 ) -> Result<Json<Vec<SessionSummary>>, ApiError> {
-    Ok(Json(state.core().list_chat_sessions().await?))
+    Ok(Json(state.core().list_chat_sessions(&request_user).await?))
 }
 
 pub async fn create_session(
+    request_user: RequestUser,
     State(state): State<AppState>,
     Json(request): Json<CreateSessionRequest>,
 ) -> Result<(StatusCode, Json<MutationResponse<SessionSummary>>), ApiError> {
     let session = state
         .core()
-        .create_chat_session(required_non_empty("name", request.name)?)
+        .create_chat_session(&request_user, required_non_empty("name", request.name)?)
         .await?;
     Ok((StatusCode::CREATED, Json(MutationResponse::new(session))))
 }
 
 pub async fn create_session_with_thread(
+    request_user: RequestUser,
     State(state): State<AppState>,
     Json(request): Json<CreateSessionWithThreadRequest>,
 ) -> Result<(StatusCode, Json<MutationResponse<ChatSessionPayload>>), ApiError> {
     let payload = state
         .core()
         .create_chat_session_with_thread(
+            &request_user,
             normalize_optional_string(request.name).unwrap_or_else(|| "Web Chat".to_string()),
             AgentId::new(request.template_id),
             request.provider_id.map(ProviderId::new),
@@ -540,6 +564,7 @@ pub async fn create_session_with_thread(
 }
 
 pub async fn rename_session(
+    request_user: RequestUser,
     State(state): State<AppState>,
     Path(session_id): Path<String>,
     Json(request): Json<RenameSessionRequest>,
@@ -547,6 +572,7 @@ pub async fn rename_session(
     let session = state
         .core()
         .rename_chat_session(
+            &request_user,
             parse_session_id(&session_id)?,
             required_non_empty("name", request.name)?,
         )
@@ -555,12 +581,13 @@ pub async fn rename_session(
 }
 
 pub async fn delete_session(
+    request_user: RequestUser,
     State(state): State<AppState>,
     Path(session_id): Path<String>,
 ) -> Result<Json<MutationResponse<DeleteResponse>>, ApiError> {
     state
         .core()
-        .delete_chat_session(parse_session_id(&session_id)?)
+        .delete_chat_session(&request_user, parse_session_id(&session_id)?)
         .await?;
     Ok(Json(MutationResponse::new(DeleteResponse {
         deleted: true,
@@ -568,18 +595,20 @@ pub async fn delete_session(
 }
 
 pub async fn list_threads(
+    request_user: RequestUser,
     State(state): State<AppState>,
     Path(session_id): Path<String>,
 ) -> Result<Json<Vec<ThreadSummary>>, ApiError> {
     Ok(Json(
         state
             .core()
-            .list_chat_threads(parse_session_id(&session_id)?)
+            .list_chat_threads(&request_user, parse_session_id(&session_id)?)
             .await?,
     ))
 }
 
 pub async fn create_thread(
+    request_user: RequestUser,
     State(state): State<AppState>,
     Path(session_id): Path<String>,
     Json(request): Json<CreateThreadRequest>,
@@ -587,6 +616,7 @@ pub async fn create_thread(
     let thread = state
         .core()
         .create_chat_thread(
+            &request_user,
             parse_session_id(&session_id)?,
             AgentId::new(request.template_id),
             request.provider_id.map(ProviderId::new),
@@ -597,12 +627,17 @@ pub async fn create_thread(
 }
 
 pub async fn delete_thread(
+    request_user: RequestUser,
     State(state): State<AppState>,
     Path((session_id, thread_id)): Path<(String, String)>,
 ) -> Result<Json<MutationResponse<DeleteResponse>>, ApiError> {
     state
         .core()
-        .delete_chat_thread(parse_session_id(&session_id)?, parse_thread_id(&thread_id)?)
+        .delete_chat_thread(
+            &request_user,
+            parse_session_id(&session_id)?,
+            parse_thread_id(&thread_id)?,
+        )
         .await?;
     Ok(Json(MutationResponse::new(DeleteResponse {
         deleted: true,
@@ -610,18 +645,24 @@ pub async fn delete_thread(
 }
 
 pub async fn get_thread_snapshot(
+    request_user: RequestUser,
     State(state): State<AppState>,
     Path((session_id, thread_id)): Path<(String, String)>,
 ) -> Result<Json<ChatThreadSnapshot>, ApiError> {
     Ok(Json(
         state
             .core()
-            .get_chat_thread_snapshot(parse_session_id(&session_id)?, parse_thread_id(&thread_id)?)
+            .get_chat_thread_snapshot(
+                &request_user,
+                parse_session_id(&session_id)?,
+                parse_thread_id(&thread_id)?,
+            )
             .await?,
     ))
 }
 
 pub async fn rename_thread(
+    request_user: RequestUser,
     State(state): State<AppState>,
     Path((session_id, thread_id)): Path<(String, String)>,
     Json(request): Json<RenameThreadRequest>,
@@ -629,6 +670,7 @@ pub async fn rename_thread(
     let thread = state
         .core()
         .rename_chat_thread(
+            &request_user,
             parse_session_id(&session_id)?,
             parse_thread_id(&thread_id)?,
             request.title,
@@ -638,6 +680,7 @@ pub async fn rename_thread(
 }
 
 pub async fn update_thread_model(
+    request_user: RequestUser,
     State(state): State<AppState>,
     Path((session_id, thread_id)): Path<(String, String)>,
     Json(request): Json<UpdateThreadModelRequest>,
@@ -645,6 +688,7 @@ pub async fn update_thread_model(
     let binding = state
         .core()
         .update_chat_thread_model(
+            &request_user,
             parse_session_id(&session_id)?,
             parse_thread_id(&thread_id)?,
             ProviderId::new(request.provider_id),
@@ -655,29 +699,40 @@ pub async fn update_thread_model(
 }
 
 pub async fn activate_thread(
+    request_user: RequestUser,
     State(state): State<AppState>,
     Path((session_id, thread_id)): Path<(String, String)>,
 ) -> Result<Json<MutationResponse<ChatThreadBinding>>, ApiError> {
     let binding = state
         .core()
-        .activate_chat_thread(parse_session_id(&session_id)?, parse_thread_id(&thread_id)?)
+        .activate_chat_thread(
+            &request_user,
+            parse_session_id(&session_id)?,
+            parse_thread_id(&thread_id)?,
+        )
         .await?;
     Ok(Json(MutationResponse::new(binding)))
 }
 
 pub async fn list_messages(
+    request_user: RequestUser,
     State(state): State<AppState>,
     Path((session_id, thread_id)): Path<(String, String)>,
 ) -> Result<Json<Vec<ChatMessage>>, ApiError> {
     Ok(Json(
         state
             .core()
-            .get_chat_messages(parse_session_id(&session_id)?, parse_thread_id(&thread_id)?)
+            .get_chat_messages(
+                &request_user,
+                parse_session_id(&session_id)?,
+                parse_thread_id(&thread_id)?,
+            )
             .await?,
     ))
 }
 
 pub async fn send_message(
+    request_user: RequestUser,
     State(state): State<AppState>,
     Path((session_id, thread_id)): Path<(String, String)>,
     Json(request): Json<SendMessageRequest>,
@@ -685,6 +740,7 @@ pub async fn send_message(
     state
         .core()
         .send_chat_message(
+            &request_user,
             parse_session_id(&session_id)?,
             parse_thread_id(&thread_id)?,
             required_non_empty("message", request.message)?,
@@ -697,12 +753,17 @@ pub async fn send_message(
 }
 
 pub async fn cancel_thread(
+    request_user: RequestUser,
     State(state): State<AppState>,
     Path((session_id, thread_id)): Path<(String, String)>,
 ) -> Result<Json<MutationResponse<ChatActionResponse>>, ApiError> {
     state
         .core()
-        .cancel_chat_thread(parse_session_id(&session_id)?, parse_thread_id(&thread_id)?)
+        .cancel_chat_thread(
+            &request_user,
+            parse_session_id(&session_id)?,
+            parse_thread_id(&thread_id)?,
+        )
         .await?;
     Ok(Json(MutationResponse::new(ChatActionResponse {
         accepted: true,
@@ -710,6 +771,7 @@ pub async fn cancel_thread(
 }
 
 pub async fn thread_events(
+    request_user: RequestUser,
     State(state): State<AppState>,
     Path((session_id, thread_id)): Path<(String, String)>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
@@ -717,7 +779,7 @@ pub async fn thread_events(
     let thread_id = parse_thread_id(&thread_id)?;
     let receiver = state
         .core()
-        .subscribe_chat_thread(session_id, thread_id)
+        .subscribe_chat_thread(&request_user, session_id, thread_id)
         .await?;
     let session_id = session_id.to_string();
     let stream = stream::unfold(

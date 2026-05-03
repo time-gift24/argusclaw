@@ -1,20 +1,25 @@
 <script setup lang="ts">
-import { computed, ref, onMounted } from "vue";
-import { RouterLink, RouterView, useRoute } from "vue-router";
+import { computed, ref, onMounted, watchEffect } from "vue";
+import { RouterLink, RouterView, useRoute, useRouter } from "vue-router";
 
 import AppBreadcrumb from "@/components/AppBreadcrumb.vue";
-import { adminNavItems } from "@/app/nav";
+import { adminNavItems, navItemsForRole } from "@/app/nav";
+import { getApiClient } from "@/lib/api";
 
 const route = useRoute();
+const router = useRouter();
+const isAdminUser = ref(true);
+const visibleNavItems = computed(() => navItemsForRole(isAdminUser.value));
 const isImmersiveRoute = computed(() => route.meta?.immersive === true);
 const shouldShowRouteHeader = computed(() => route.meta?.hideRouteHeader !== true);
 const currentItem = computed(() => {
-  return adminNavItems.find((item) => item.to === route.path) ?? adminNavItems[0];
+  return visibleNavItems.value.find((item) => item.to === route.path) ?? visibleNavItems.value[0] ?? adminNavItems[0];
 });
 
 const isDark = ref(false);
 
 onMounted(() => {
+  void loadCurrentUserRole();
   const saved = localStorage.getItem("theme");
   if (saved === "dark") {
     isDark.value = true;
@@ -26,6 +31,21 @@ onMounted(() => {
     document.documentElement.classList.remove("theme-dark");
   }
 });
+
+watchEffect(() => {
+  if (!isAdminUser.value && route.path !== "/chat") {
+    void router.replace("/chat");
+  }
+});
+
+async function loadCurrentUserRole() {
+  try {
+    const bootstrap = await getApiClient().getBootstrap();
+    isAdminUser.value = bootstrap.current_user?.is_admin ?? true;
+  } catch {
+    isAdminUser.value = true;
+  }
+}
 
 function toggleTheme() {
   isDark.value = !isDark.value;
@@ -65,7 +85,7 @@ function toggleTheme() {
             aria-label="管理导航"
           >
             <RouterLink
-              v-for="item in adminNavItems"
+              v-for="item in visibleNavItems"
               :key="item.key"
               :to="item.to"
               class="nav-item"
