@@ -17,7 +17,7 @@ use argus_protocol::{
     AgentId, ArgusError, LlmProvider, LlmProviderId, MailboxMessage, MailboxMessageType,
     McpToolResolver, ProviderId, Result, SessionId, ThreadEvent, ThreadId, ThreadMessage,
     ThreadPoolEventReason, ThreadPoolRuntimeSummary, ThreadPoolSnapshot, ThreadPoolState,
-    ThreadRuntimeStatus, ToolError,
+    ThreadRuntimeStatus, ToolError, UserId,
 };
 use argus_repository::traits::{LlmProviderRepository, SessionRepository, ThreadRepository};
 use argus_template::TemplateManager;
@@ -1278,7 +1278,28 @@ impl SessionManager {
         explicit_provider_id: Option<ProviderId>,
         model_override: Option<&str>,
     ) -> Result<ThreadId> {
-        let session = self.load(session_id).await?;
+        self.create_thread_scoped(
+            None,
+            session_id,
+            template_id,
+            explicit_provider_id,
+            model_override,
+        )
+        .await
+    }
+
+    async fn create_thread_scoped(
+        &self,
+        user_id: Option<UserId>,
+        session_id: SessionId,
+        template_id: AgentId,
+        explicit_provider_id: Option<ProviderId>,
+        model_override: Option<&str>,
+    ) -> Result<ThreadId> {
+        let session = match user_id {
+            Some(user_id) => self.load_for_user(user_id, session_id).await?,
+            None => self.load(session_id).await?,
+        };
 
         // Get agent record (template)
         let agent_record = self
@@ -1383,18 +1404,23 @@ impl SessionManager {
             created_at: chrono::Utc::now().to_rfc3339(),
             updated_at: chrono::Utc::now().to_rfc3339(),
         };
-        self.thread_repo
-            .upsert_thread(&thread_record)
-            .await
-            .map_err(|e| {
-                let thread_trace_dir = thread_trace_dir.clone();
-                tokio::spawn(async move {
-                    let _ = tokio::fs::remove_dir_all(thread_trace_dir).await;
-                });
-                ArgusError::DatabaseError {
-                    reason: e.to_string(),
-                }
-            })?;
+        let upsert_result = match user_id {
+            Some(user_id) => {
+                self.thread_repo
+                    .upsert_thread_for_user(&user_id, &thread_record)
+                    .await
+            }
+            None => self.thread_repo.upsert_thread(&thread_record).await,
+        };
+        upsert_result.map_err(|e| {
+            let thread_trace_dir = thread_trace_dir.clone();
+            tokio::spawn(async move {
+                let _ = tokio::fs::remove_dir_all(thread_trace_dir).await;
+            });
+            ArgusError::DatabaseError {
+                reason: e.to_string(),
+            }
+        })?;
         self.register_chat_thread(session_id, thread_id);
         let thread = match self
             .ensure_thread_runtime_with_mcp(session_id, thread_id)
@@ -1403,7 +1429,14 @@ impl SessionManager {
             Ok(thread) => thread,
             Err(error) => {
                 self.thread_pool.remove_runtime(&thread_id).await;
-                let _ = self.thread_repo.delete_thread(&thread_id).await;
+                let _ = match user_id {
+                    Some(user_id) => {
+                        self.thread_repo
+                            .delete_thread_for_user(&user_id, &thread_id)
+                            .await
+                    }
+                    None => self.thread_repo.delete_thread(&thread_id).await,
+                };
                 let _ = tokio::fs::remove_dir_all(&thread_trace_dir).await;
                 return Err(ArgusError::LlmError {
                     reason: error.to_string(),
@@ -1764,6 +1797,387 @@ impl SessionManager {
             self.register_chat_thread(session_id, *thread_id);
         }
         self.thread_pool.subscribe(thread_id)
+    }
+
+    /// List sessions owned by a user (from DB).
+    pub async fn list_sessions_for_user(&self, user_id: UserId) -> Result<Vec<SessionSummary>> {
+        let sessions = self
+            .session_repo
+            .list_with_counts_for_user(&user_id)
+            .await
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })?;
+
+        Ok(sessions
+            .into_iter()
+            .map(|swc| {
+                let updated_at = chrono::DateTime::parse_from_rfc3339(&swc.session.updated_at)
+                    .map(|dt| dt.with_timezone(&chrono::Utc))
+                    .unwrap_or_else(|_| chrono::Utc::now());
+
+                SessionSummary {
+                    id: swc.session.id,
+                    name: swc.session.name,
+                    thread_count: swc.thread_count,
+                    updated_at,
+                }
+            })
+            .collect())
+    }
+
+    /// Validate user ownership before returning a cached or freshly loaded session.
+    pub async fn load_for_user(
+        &self,
+        user_id: UserId,
+        session_id: SessionId,
+    ) -> Result<Arc<Session>> {
+        self.session_repo
+            .get_for_user(&user_id, &session_id)
+            .await
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })?
+            .ok_or(ArgusError::SessionNotFound(session_id))?;
+        self.load(session_id).await
+    }
+
+    /// Create a new user-owned session.
+    pub async fn create_for_user(&self, user_id: UserId, name: String) -> Result<SessionId> {
+        let session_id = SessionId::new();
+        self.session_repo
+            .create_for_user(&user_id, &session_id, &name)
+            .await
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })?;
+        Ok(session_id)
+    }
+
+    /// Delete a user-owned session and all its threads.
+    pub async fn delete_for_user(&self, user_id: UserId, session_id: SessionId) -> Result<()> {
+        self.load_for_user(user_id, session_id).await?;
+        let thread_ids = self
+            .thread_repo
+            .list_threads_in_session_for_user(&user_id, &session_id)
+            .await
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })?
+            .into_iter()
+            .map(|thread| thread.id)
+            .collect::<Vec<_>>();
+
+        self.thread_repo
+            .delete_threads_in_session_for_user(&user_id, &session_id)
+            .await
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })?;
+
+        let deleted = self
+            .session_repo
+            .delete_for_user(&user_id, &session_id)
+            .await
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })?;
+        if !deleted {
+            return Err(ArgusError::SessionNotFound(session_id));
+        }
+
+        self.sessions.remove(&session_id);
+        for thread_id in thread_ids {
+            self.forget_thread_session(&thread_id);
+            self.thread_pool.remove_runtime(&thread_id).await;
+        }
+
+        let session_dir = self.trace_dir.join(session_id.to_string());
+        if session_dir.exists() {
+            if let Err(e) = tokio::fs::remove_dir_all(&session_dir).await {
+                tracing::warn!(session_id = %session_id, error = %e, "Failed to remove session trace directory");
+            }
+        }
+        Ok(())
+    }
+
+    /// Rename a user-owned session.
+    pub async fn rename_session_for_user(
+        &self,
+        user_id: UserId,
+        session_id: SessionId,
+        name: String,
+    ) -> Result<()> {
+        let found = self
+            .session_repo
+            .rename_for_user(&user_id, &session_id, name.trim())
+            .await
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })?;
+        if !found {
+            return Err(ArgusError::SessionNotFound(session_id));
+        }
+        Ok(())
+    }
+
+    /// List user-owned threads for a user-owned session.
+    pub async fn list_threads_for_user(
+        &self,
+        user_id: UserId,
+        session_id: SessionId,
+    ) -> Result<Vec<ThreadSummary>> {
+        self.load_for_user(user_id, session_id).await?;
+        let thread_records = self
+            .thread_repo
+            .list_threads_in_session_for_user(&user_id, &session_id)
+            .await
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })?;
+
+        Ok(thread_records
+            .into_iter()
+            .map(|record| {
+                let updated_at = chrono::DateTime::parse_from_rfc3339(&record.updated_at)
+                    .map(|dt| dt.with_timezone(&chrono::Utc))
+                    .unwrap_or_else(|_| chrono::Utc::now());
+                ThreadSummary {
+                    id: record.id,
+                    title: record.title,
+                    token_count: record.token_count as i64,
+                    turn_count: record.turn_count as i64,
+                    updated_at,
+                }
+            })
+            .collect())
+    }
+
+    /// Create a new thread in a user-owned session.
+    pub async fn create_thread_for_user(
+        &self,
+        user_id: UserId,
+        session_id: SessionId,
+        template_id: AgentId,
+        explicit_provider_id: Option<ProviderId>,
+        model_override: Option<&str>,
+    ) -> Result<ThreadId> {
+        self.create_thread_scoped(
+            Some(user_id),
+            session_id,
+            template_id,
+            explicit_provider_id,
+            model_override,
+        )
+        .await
+    }
+
+    /// Delete a user-owned thread from a user-owned session.
+    pub async fn delete_thread_for_user(
+        &self,
+        user_id: UserId,
+        session_id: SessionId,
+        thread_id: &ThreadId,
+    ) -> Result<()> {
+        self.ensure_thread_in_session_for_user(user_id, session_id, thread_id)
+            .await?;
+        let deleted = self
+            .thread_repo
+            .delete_thread_for_user(&user_id, thread_id)
+            .await
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })?;
+        if !deleted {
+            return Err(ArgusError::ThreadNotFound(thread_id.inner().to_string()));
+        }
+        self.forget_thread_session(thread_id);
+        self.thread_pool.remove_runtime(thread_id).await;
+        if let Some(session) = self.sessions.get(&session_id) {
+            session.remove_thread(thread_id);
+        }
+        Ok(())
+    }
+
+    /// Rename a user-owned thread title.
+    pub async fn rename_thread_for_user(
+        &self,
+        user_id: UserId,
+        session_id: SessionId,
+        thread_id: &ThreadId,
+        title: String,
+    ) -> Result<()> {
+        let normalized = title.trim().to_string();
+        let persisted_title = if normalized.is_empty() {
+            None
+        } else {
+            Some(normalized.as_str())
+        };
+        let in_memory_title = if normalized.is_empty() {
+            None
+        } else {
+            Some(normalized.clone())
+        };
+        let found = self
+            .thread_repo
+            .rename_thread_for_user(&user_id, thread_id, &session_id, persisted_title)
+            .await
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })?;
+        if !found {
+            return Err(ArgusError::ThreadNotFound(thread_id.inner().to_string()));
+        }
+        if self.loaded_chat_thread(thread_id).is_some() {
+            self.thread_pool
+                .set_runtime_title(thread_id, in_memory_title)
+                .await
+                .map_err(|error| ArgusError::LlmError {
+                    reason: error.to_string(),
+                })?;
+        }
+        Ok(())
+    }
+
+    /// Update provider/model for a user-owned thread.
+    pub async fn update_thread_model_for_user(
+        &self,
+        user_id: UserId,
+        session_id: SessionId,
+        thread_id: &ThreadId,
+        provider_id: ProviderId,
+        model: &str,
+    ) -> Result<(ProviderId, String)> {
+        let provider = self
+            .provider_resolver
+            .resolve_with_model(provider_id, model)
+            .await?;
+        let effective_model = provider.model_name().to_string();
+        let found = self
+            .thread_repo
+            .update_thread_model_for_user(
+                &user_id,
+                thread_id,
+                &session_id,
+                LlmProviderId::new(provider_id.inner()),
+                Some(&effective_model),
+            )
+            .await
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })?;
+        if !found {
+            return Err(ArgusError::ThreadNotFound(thread_id.inner().to_string()));
+        }
+        if self.loaded_chat_thread(thread_id).is_some() {
+            self.thread_pool
+                .set_runtime_provider(thread_id, provider)
+                .await
+                .map_err(|error| ArgusError::LlmError {
+                    reason: error.to_string(),
+                })?;
+        }
+        Ok((provider_id, effective_model))
+    }
+
+    /// Send a message after validating user ownership.
+    pub async fn send_message_for_user(
+        &self,
+        user_id: UserId,
+        session_id: SessionId,
+        thread_id: &ThreadId,
+        message: String,
+    ) -> Result<()> {
+        self.ensure_thread_in_session_for_user(user_id, session_id, thread_id)
+            .await?;
+        self.send_message(session_id, thread_id, message).await
+    }
+
+    /// Cancel a user-owned thread.
+    pub async fn cancel_thread_for_user(
+        &self,
+        user_id: UserId,
+        session_id: SessionId,
+        thread_id: &ThreadId,
+    ) -> Result<()> {
+        self.ensure_thread_in_session_for_user(user_id, session_id, thread_id)
+            .await?;
+        self.cancel_thread(session_id, thread_id).await
+    }
+
+    /// Get messages after validating user ownership.
+    pub async fn get_thread_messages_for_user(
+        &self,
+        user_id: UserId,
+        session_id: SessionId,
+        thread_id: &ThreadId,
+    ) -> Result<Vec<ChatMessage>> {
+        self.ensure_thread_in_session_for_user(user_id, session_id, thread_id)
+            .await?;
+        self.get_thread_messages(session_id, thread_id).await
+    }
+
+    /// Get snapshot after validating user ownership.
+    pub async fn get_thread_snapshot_for_user(
+        &self,
+        user_id: UserId,
+        session_id: SessionId,
+        thread_id: &ThreadId,
+    ) -> Result<(Vec<ChatMessage>, u32, u32, u32)> {
+        self.ensure_thread_in_session_for_user(user_id, session_id, thread_id)
+            .await?;
+        self.get_thread_snapshot(session_id, thread_id).await
+    }
+
+    /// Activate a user-owned thread.
+    pub async fn activate_thread_for_user(
+        &self,
+        user_id: UserId,
+        session_id: SessionId,
+        thread_id: &ThreadId,
+    ) -> Result<(AgentId, Option<ProviderId>, Option<String>)> {
+        self.ensure_thread_in_session_for_user(user_id, session_id, thread_id)
+            .await?;
+        self.activate_thread(session_id, thread_id).await
+    }
+
+    /// Subscribe to user-owned thread events.
+    pub async fn subscribe_for_user(
+        &self,
+        user_id: UserId,
+        session_id: SessionId,
+        thread_id: &ThreadId,
+    ) -> Option<broadcast::Receiver<ThreadEvent>> {
+        self.load_for_user(user_id, session_id).await.ok()?;
+        self.thread_repo
+            .get_thread_in_session_for_user(&user_id, thread_id, &session_id)
+            .await
+            .ok()
+            .flatten()?;
+        if self.thread_pool.subscribe(thread_id).is_none() {
+            self.register_chat_thread(session_id, *thread_id);
+        }
+        self.thread_pool.subscribe(thread_id)
+    }
+
+    async fn ensure_thread_in_session_for_user(
+        &self,
+        user_id: UserId,
+        session_id: SessionId,
+        thread_id: &ThreadId,
+    ) -> Result<()> {
+        self.load_for_user(user_id, session_id).await?;
+        let thread_record = self
+            .thread_repo
+            .get_thread_in_session_for_user(&user_id, thread_id, &session_id)
+            .await
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })?;
+        if thread_record.is_none() {
+            return Err(ArgusError::ThreadNotFound(thread_id.inner().to_string()));
+        }
+        Ok(())
     }
 
     async fn ensure_thread_in_session(

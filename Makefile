@@ -6,6 +6,7 @@ SERVICE_GROUP ?= $(SERVICE_USER)
 SERVICE_NAME ?= arguswing
 DEPLOY_MODE ?= server
 ARGUS_SERVER_ADDR ?= 0.0.0.0:3010
+DATABASE_URL ?= postgres://argus:argus_dev@127.0.0.1:5432/argus_dev
 ETC_DIR ?= /etc/arguswing
 SYSTEMD_DIR ?= /etc/systemd/system
 NGINX_CONF_DIR ?= /etc/nginx/conf.d
@@ -66,12 +67,12 @@ linux-build:
 	cargo build --release -p argus-server
 	cd apps/web && pnpm install --frozen-lockfile && pnpm build
 
-# Run the server-hosted release build locally for manual testing.
-server-dev:
+# Build and run the server-hosted release build locally for manual testing.
+server-dev: linux-build
 	install -d "$(CURDIR)/.tmp/arguswing-dev/data" "$(CURDIR)/.tmp/arguswing-dev/traces"
 	ARGUS_SERVER_ADDR="$(ARGUS_SERVER_ADDR)" \
 	ARGUS_WEB_DIST_DIR="$(CURDIR)/apps/web/dist" \
-	DATABASE_URL="$(CURDIR)/.tmp/arguswing-dev/data/sqlite.db" \
+	DATABASE_URL="$(DATABASE_URL)" \
 	TRACE_DIR="$(CURDIR)/.tmp/arguswing-dev/traces" \
 	./target/release/argus-server
 
@@ -110,12 +111,12 @@ linux-deploy:
 		printf '%s\n' \
 			'ARGUS_SERVER_ADDR=$(SERVER_ADDR_SERVER)' \
 			'ARGUS_WEB_DIST_DIR=$(INSTALL_DIR)/web' \
-			'DATABASE_URL=$(INSTALL_DIR)/data/sqlite.db' \
+			'DATABASE_URL=$(DATABASE_URL)' \
 			'TRACE_DIR=$(INSTALL_DIR)/traces' > "$(ETC_DIR)/arguswing.env"; \
 	else \
 		printf '%s\n' \
 			'ARGUS_SERVER_ADDR=$(SERVER_ADDR_NGINX)' \
-			'DATABASE_URL=$(INSTALL_DIR)/data/sqlite.db' \
+			'DATABASE_URL=$(DATABASE_URL)' \
 			'TRACE_DIR=$(INSTALL_DIR)/traces' > "$(ETC_DIR)/arguswing.env"; \
 	fi
 	chown "$(SERVICE_USER):$(SERVICE_GROUP)" "$(ETC_DIR)/arguswing.env"

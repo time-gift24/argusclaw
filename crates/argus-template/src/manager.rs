@@ -1,14 +1,12 @@
 use std::sync::Arc;
 
 use argus_protocol::{AgentId, AgentRecord, ArgusError, Result};
-use argus_repository::traits::AgentRepository;
-use argus_repository::ArgusSqlite;
+use argus_repository::traits::{AgentRepository, TemplateRepairRepository};
 
 /// Manager for agent templates.
 pub struct TemplateManager {
     repository: Arc<dyn AgentRepository>,
-    /// Concrete instance for repair operations that need transactions.
-    sqlite: Arc<ArgusSqlite>,
+    repair_repository: Arc<dyn TemplateRepairRepository>,
 }
 
 fn format_delete_blocked_reason(
@@ -75,8 +73,14 @@ impl TemplateManager {
         Ok(())
     }
 
-    pub fn new(repository: Arc<dyn AgentRepository>, sqlite: Arc<ArgusSqlite>) -> Self {
-        Self { repository, sqlite }
+    pub fn new(
+        repository: Arc<dyn AgentRepository>,
+        repair_repository: Arc<dyn TemplateRepairRepository>,
+    ) -> Self {
+        Self {
+            repository,
+            repair_repository,
+        }
     }
 
     /// Upsert (create or update) an agent template.
@@ -105,7 +109,7 @@ impl TemplateManager {
 
     /// Repair legacy placeholder agent IDs that were incorrectly persisted as `0`.
     pub async fn repair_placeholder_ids(&self) -> Result<()> {
-        self.sqlite
+        self.repair_repository
             .repair_placeholder_ids()
             .await
             .map_err(|e| ArgusError::DatabaseError {

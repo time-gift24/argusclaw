@@ -65,9 +65,9 @@
 - chat / thread / message API 仅按 server-only 边界扩展；不改 desktop 主流程；thread event SSE 只允许镜像现有 `ThreadEvent`，不新增 desktop rewiring
 - 不新增 settings/admin_settings 持久化、repository、migration 或 HTTP route；实例名作为产品展示文案由 bootstrap 返回
 - `bootstrap.rs` 只返回 web shell 需要的最小实例初始化摘要，不承担 settings/profile 语义
-- `ServerCore::init(database_path)` 负责连接数据库、migration、manager/runtime 装配与 builtin template seed
+- `ServerCore::init(database_url)` 负责连接 PostgreSQL、migration、manager/runtime 装配与 builtin template seed
 - `ServerCore::with_pool(pool)` 只用于测试和 in-memory SQLite harness
-- 默认数据库路径保持 `DATABASE_URL` 优先，否则 `~/.arguswing/sqlite.db`
+- server/web 运行时必须提供 PostgreSQL `DATABASE_URL`（`postgres://` 或 `postgresql://`）；SQLite 只允许测试 harness 使用
 - 默认 trace 路径保持 `TRACE_DIR` 优先，否则 `~/.arguswing/traces`
 - 默认 bind address 保持 `ARGUS_SERVER_ADDR` 优先，否则 `127.0.0.1:3000`
 - response shape、状态码和错误 envelope 改动前必须同步更新 server 测试与 web API client

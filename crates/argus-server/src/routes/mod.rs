@@ -1,5 +1,6 @@
 pub mod account;
 pub mod agent_runs;
+pub mod auth;
 pub mod bootstrap;
 pub mod chat;
 pub mod health;
@@ -16,7 +17,11 @@ use crate::app_state::AppState;
 
 pub fn router() -> Router<AppState> {
     Router::new()
+        .route("/auth/login", get(auth::login))
+        .route("/auth/callback", get(auth::callback))
+        .route("/auth/logout", get(auth::logout))
         .route("/api/v1/health", get(health::get_health))
+        .route("/api/v1/auth/me", get(auth::me))
         .route(
             "/api/v1/account",
             get(account::get_account).put(account::configure_account),

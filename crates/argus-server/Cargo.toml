@@ -2,6 +2,7 @@
 name = "argus-server"
 version = "0.1.0"
 edition = "2024"
+license = "MIT OR Apache-2.0"
 
 [dependencies]
 argus-auth = { path = "../argus-auth" }
@@ -22,6 +23,9 @@ dirs = { workspace = true }
 futures-util = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+uuid = { workspace = true }
+url = { workspace = true }
+reqwest = { workspace = true }
 sqlx = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }

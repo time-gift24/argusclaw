@@ -10,25 +10,26 @@ use argus_protocol::{
     AgentId, AgentRecord, ArgusError, JobRuntimeState, LlmProviderId, LlmProviderRecord,
     McpDiscoveredToolRecord, McpServerRecord, McpServerStatus, McpToolResolver, ProviderId,
     ProviderResolver, ProviderTestResult, Result, RiskLevel, SessionId, ThreadEvent, ThreadId,
-    ThreadPoolState, ThreadRuntimeStatus,
+    ThreadPoolState, ThreadRuntimeStatus, UserId,
 };
 use argus_repository::traits::{
     AccountRepository, AgentRepository, AgentRunRepository, JobRepository, LlmProviderRepository,
-    McpRepository, SessionRepository, ThreadRepository,
+    McpRepository, SessionRepository, TemplateRepairRepository, ThreadRepository, UserRepository,
 };
 use argus_repository::types::{AgentRunId, AgentRunRecord, AgentRunStatus};
-use argus_repository::{ArgusSqlite, connect, connect_path, migrate};
+use argus_repository::{ArgusPostgres, ArgusSqlite, connect_postgres, migrate_postgres};
 use argus_session::{SessionManager, SessionSummary, ThreadSummary};
 use argus_template::TemplateManager;
 use argus_thread_pool::ThreadPool;
 use argus_tool::ToolManager;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use sqlx::SqlitePool;
+use sqlx::{PgPool, SqlitePool};
 use tokio::sync::broadcast;
 
-use crate::db::{DatabaseTarget, default_trace_dir, ensure_parent_dir, resolve_database_target};
+use crate::db::{DatabaseTarget, default_trace_dir, resolve_database_target};
 use crate::resolver::ProviderManagerResolver;
+use crate::user_context::RequestUser;
 
 const DEFAULT_AGENT_DISPLAY_NAME: &str = "ArgusWing";
 const DEFAULT_INSTANCE_NAME: &str = "ArgusWing";
@@ -43,6 +44,7 @@ pub struct ServerCore {
     account_manager: Arc<AccountManager>,
     mcp_repo: Arc<dyn McpRepository>,
     agent_run_repo: Arc<dyn AgentRunRepository>,
+    user_repo: Arc<dyn UserRepository>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -133,38 +135,77 @@ impl From<&AgentRunRecord> for AgentRunDetail {
 }
 
 impl ServerCore {
-    pub async fn init(database_path: Option<&str>) -> Result<Arc<Self>> {
-        let database_target = resolve_database_target(database_path)?;
-        let pool = match &database_target {
-            DatabaseTarget::Url(database_url) => connect(database_url).await,
-            DatabaseTarget::Path(path) => {
-                ensure_parent_dir(path)?;
-                connect_path(path).await
-            }
-        }?;
-        migrate(&pool).await?;
-
-        Self::from_pool(pool).await
+    pub async fn init(database_url: Option<&str>) -> Result<Arc<Self>> {
+        let database_target = resolve_database_target(database_url)?;
+        let DatabaseTarget::PostgresUrl(database_url) = database_target;
+        let pool = connect_postgres(&database_url).await?;
+        migrate_postgres(&pool).await?;
+        Self::from_postgres_pool(pool).await
     }
 
     pub async fn with_pool(pool: SqlitePool) -> Result<Arc<Self>> {
-        Self::from_pool(pool).await
+        Self::from_sqlite_pool(pool).await
     }
 
-    async fn from_pool(pool: SqlitePool) -> Result<Arc<Self>> {
+    async fn from_postgres_pool(pool: PgPool) -> Result<Arc<Self>> {
         let cipher = Arc::new(Cipher::new(FileKeySource::from_env_or_default()));
-        let account_repo: Arc<dyn AccountRepository> = Arc::new(ArgusSqlite::new(pool.clone()));
-        let account_manager = Arc::new(AccountManager::new(account_repo.clone(), cipher.clone()));
+        let postgres = Arc::new(ArgusPostgres::new(pool));
+        Self::from_repositories(
+            postgres.clone() as Arc<dyn AccountRepository>,
+            postgres.clone() as Arc<dyn LlmProviderRepository>,
+            postgres.clone() as Arc<dyn AgentRepository>,
+            postgres.clone() as Arc<dyn TemplateRepairRepository>,
+            postgres.clone() as Arc<dyn JobRepository>,
+            postgres.clone() as Arc<dyn ThreadRepository>,
+            postgres.clone() as Arc<dyn SessionRepository>,
+            postgres.clone() as Arc<dyn McpRepository>,
+            postgres.clone() as Arc<dyn AgentRunRepository>,
+            postgres.clone() as Arc<dyn UserRepository>,
+            cipher,
+        )
+        .await
+    }
 
-        let llm_repository: Arc<dyn LlmProviderRepository> =
-            Arc::new(ArgusSqlite::new(pool.clone()));
+    async fn from_sqlite_pool(pool: SqlitePool) -> Result<Arc<Self>> {
+        let cipher = Arc::new(Cipher::new(FileKeySource::from_env_or_default()));
+        let sqlite = Arc::new(ArgusSqlite::new(pool));
+        Self::from_repositories(
+            sqlite.clone() as Arc<dyn AccountRepository>,
+            sqlite.clone() as Arc<dyn LlmProviderRepository>,
+            sqlite.clone() as Arc<dyn AgentRepository>,
+            sqlite.clone() as Arc<dyn TemplateRepairRepository>,
+            sqlite.clone() as Arc<dyn JobRepository>,
+            sqlite.clone() as Arc<dyn ThreadRepository>,
+            sqlite.clone() as Arc<dyn SessionRepository>,
+            sqlite.clone() as Arc<dyn McpRepository>,
+            sqlite.clone() as Arc<dyn AgentRunRepository>,
+            sqlite.clone() as Arc<dyn UserRepository>,
+            cipher,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn from_repositories(
+        account_repo: Arc<dyn AccountRepository>,
+        llm_repository: Arc<dyn LlmProviderRepository>,
+        agent_repository: Arc<dyn AgentRepository>,
+        template_repair_repository: Arc<dyn TemplateRepairRepository>,
+        job_repository: Arc<dyn JobRepository>,
+        thread_repository: Arc<dyn ThreadRepository>,
+        session_repository: Arc<dyn SessionRepository>,
+        mcp_repo: Arc<dyn McpRepository>,
+        agent_run_repo: Arc<dyn AgentRunRepository>,
+        user_repo: Arc<dyn UserRepository>,
+        cipher: Arc<Cipher>,
+    ) -> Result<Arc<Self>> {
+        let account_manager = Arc::new(AccountManager::new(account_repo.clone(), cipher.clone()));
         let provider_manager =
             Arc::new(ProviderManager::new(llm_repository.clone()).with_auth(account_repo, cipher));
 
-        let sqlite = Arc::new(ArgusSqlite::new(pool));
         let template_manager = Arc::new(TemplateManager::new(
-            sqlite.clone() as Arc<dyn AgentRepository>,
-            sqlite.clone(),
+            agent_repository,
+            template_repair_repository,
         ));
         Self::bootstrap_template_manager(Arc::clone(&template_manager)).await?;
 
@@ -183,13 +224,11 @@ impl ServerCore {
             Arc::clone(&provider_resolver),
             Arc::clone(&tool_manager),
             trace_dir.clone(),
-            Some(sqlite.clone() as Arc<dyn JobRepository>),
-            Some(sqlite.clone() as Arc<dyn ThreadRepository>),
+            Some(Arc::clone(&job_repository)),
+            Some(Arc::clone(&thread_repository)),
             Some(Arc::clone(&llm_repository)),
         ));
 
-        let mcp_repo: Arc<dyn McpRepository> = sqlite.clone();
-        let agent_run_repo: Arc<dyn AgentRunRepository> = sqlite.clone();
         let mcp_runtime = Arc::new(McpRuntime::new(
             Arc::clone(&mcp_repo),
             Arc::new(RmcpConnector),
@@ -201,8 +240,8 @@ impl ServerCore {
         job_manager.set_mcp_tool_resolver(Some(Arc::clone(&mcp_tool_resolver)));
 
         let session_manager = Arc::new(SessionManager::new(
-            sqlite.clone() as Arc<dyn SessionRepository>,
-            sqlite.clone() as Arc<dyn ThreadRepository>,
+            session_repository,
+            Arc::clone(&thread_repository),
             Arc::clone(&llm_repository),
             Arc::clone(&template_manager),
             provider_resolver,
@@ -223,6 +262,7 @@ impl ServerCore {
             account_manager,
             mcp_repo,
             agent_run_repo,
+            user_repo,
         }))
     }
 
@@ -493,54 +533,115 @@ impl ServerCore {
         self.job_manager.job_runtime_state()
     }
 
-    pub async fn list_chat_sessions(&self) -> Result<Vec<SessionSummary>> {
-        self.session_manager.list_sessions().await
+    async fn resolve_chat_user(&self, request_user: &RequestUser) -> Result<UserId> {
+        self.user_repo
+            .resolve_user(request_user.external_id(), request_user.display_name())
+            .await
+            .map_err(database_error)
     }
 
-    pub async fn create_chat_session(&self, name: String) -> Result<SessionSummary> {
-        let session_id = self.session_manager.create(name).await?;
-        self.list_chat_sessions()
+    async fn cleanup_failed_chat_session_for_user(&self, user_id: UserId, session_id: SessionId) {
+        if let Err(error) = self
+            .session_manager
+            .delete_for_user(user_id, session_id)
+            .await
+        {
+            tracing::warn!(
+                session_id = %session_id,
+                error = %error,
+                "failed to clean up user chat session after materialization error"
+            );
+        }
+    }
+
+    pub async fn list_chat_sessions(
+        &self,
+        request_user: &RequestUser,
+    ) -> Result<Vec<SessionSummary>> {
+        tracing::trace!(external_user_id = %request_user.external_id(), "listing chat sessions for request user");
+        let user_id = self.resolve_chat_user(request_user).await?;
+        self.session_manager.list_sessions_for_user(user_id).await
+    }
+
+    pub async fn create_chat_session(
+        &self,
+        request_user: &RequestUser,
+        name: String,
+    ) -> Result<SessionSummary> {
+        let user_id = self.resolve_chat_user(request_user).await?;
+        let session_id = self.session_manager.create_for_user(user_id, name).await?;
+        self.session_manager
+            .list_sessions_for_user(user_id)
             .await?
             .into_iter()
             .find(|session| session.id == session_id)
             .ok_or_else(|| missing_after_mutation("session", session_id))
     }
 
-    pub async fn delete_chat_session(&self, session_id: SessionId) -> Result<()> {
-        self.session_manager.delete(session_id).await
+    pub async fn delete_chat_session(
+        &self,
+        request_user: &RequestUser,
+        session_id: SessionId,
+    ) -> Result<()> {
+        tracing::trace!(external_user_id = %request_user.external_id(), %session_id, "deleting chat session for request user");
+        let user_id = self.resolve_chat_user(request_user).await?;
+        self.session_manager
+            .delete_for_user(user_id, session_id)
+            .await
     }
 
     pub async fn rename_chat_session(
         &self,
+        request_user: &RequestUser,
         session_id: SessionId,
         name: String,
     ) -> Result<SessionSummary> {
+        let user_id = self.resolve_chat_user(request_user).await?;
         self.session_manager
-            .rename_session(session_id, name)
+            .rename_session_for_user(user_id, session_id, name)
             .await?;
-        self.list_chat_sessions()
+        self.session_manager
+            .list_sessions_for_user(user_id)
             .await?
             .into_iter()
             .find(|session| session.id == session_id)
             .ok_or_else(|| missing_after_mutation("session", session_id))
     }
 
-    pub async fn list_chat_threads(&self, session_id: SessionId) -> Result<Vec<ThreadSummary>> {
-        self.session_manager.list_threads(session_id).await
+    pub async fn list_chat_threads(
+        &self,
+        request_user: &RequestUser,
+        session_id: SessionId,
+    ) -> Result<Vec<ThreadSummary>> {
+        tracing::trace!(external_user_id = %request_user.external_id(), %session_id, "listing chat threads for request user");
+        let user_id = self.resolve_chat_user(request_user).await?;
+        self.session_manager
+            .list_threads_for_user(user_id, session_id)
+            .await
     }
 
     pub async fn create_chat_thread(
         &self,
+        request_user: &RequestUser,
         session_id: SessionId,
         template_id: AgentId,
         provider_id: Option<ProviderId>,
         model: Option<String>,
     ) -> Result<ThreadSummary> {
+        tracing::trace!(external_user_id = %request_user.external_id(), %session_id, "creating chat thread for request user");
+        let user_id = self.resolve_chat_user(request_user).await?;
         let thread_id = self
             .session_manager
-            .create_thread(session_id, template_id, provider_id, model.as_deref())
+            .create_thread_for_user(
+                user_id,
+                session_id,
+                template_id,
+                provider_id,
+                model.as_deref(),
+            )
             .await?;
-        self.list_chat_threads(session_id)
+        self.session_manager
+            .list_threads_for_user(user_id, session_id)
             .await?
             .into_iter()
             .find(|thread| thread.id == thread_id)
@@ -549,27 +650,44 @@ impl ServerCore {
 
     pub async fn create_chat_session_with_thread(
         &self,
+        request_user: &RequestUser,
         session_name: String,
         template_id: AgentId,
         provider_id: Option<ProviderId>,
         model: Option<String>,
     ) -> Result<ChatSessionPayload> {
-        let session_id = self.session_manager.create(session_name).await?;
+        tracing::trace!(external_user_id = %request_user.external_id(), "creating chat session with thread for request user");
+        let user_id = self.resolve_chat_user(request_user).await?;
+        let session_id = self
+            .session_manager
+            .create_for_user(user_id, session_name)
+            .await?;
         let thread_id = match self
             .session_manager
-            .create_thread(session_id, template_id, provider_id, model.as_deref())
+            .create_thread_for_user(
+                user_id,
+                session_id,
+                template_id,
+                provider_id,
+                model.as_deref(),
+            )
             .await
         {
             Ok(thread_id) => thread_id,
             Err(error) => {
-                self.cleanup_failed_chat_session(session_id).await;
+                self.cleanup_failed_chat_session_for_user(user_id, session_id)
+                    .await;
                 return Err(error);
             }
         };
-        let binding = match self.activate_chat_thread(session_id, thread_id).await {
+        let binding = match self
+            .activate_chat_thread(request_user, session_id, thread_id)
+            .await
+        {
             Ok(binding) => binding,
             Err(error) => {
-                self.cleanup_failed_chat_session(session_id).await;
+                self.cleanup_failed_chat_session_for_user(user_id, session_id)
+                    .await;
                 return Err(error);
             }
         };
@@ -599,24 +717,31 @@ impl ServerCore {
 
     pub async fn delete_chat_thread(
         &self,
+        request_user: &RequestUser,
         session_id: SessionId,
         thread_id: ThreadId,
     ) -> Result<()> {
+        tracing::trace!(external_user_id = %request_user.external_id(), %session_id, %thread_id, "deleting chat thread for request user");
+        let user_id = self.resolve_chat_user(request_user).await?;
         self.session_manager
-            .delete_thread(session_id, &thread_id)
+            .delete_thread_for_user(user_id, session_id, &thread_id)
             .await
     }
 
     pub async fn rename_chat_thread(
         &self,
+        request_user: &RequestUser,
         session_id: SessionId,
         thread_id: ThreadId,
         title: String,
     ) -> Result<ThreadSummary> {
+        tracing::trace!(external_user_id = %request_user.external_id(), %session_id, %thread_id, "renaming chat thread for request user");
+        let user_id = self.resolve_chat_user(request_user).await?;
         self.session_manager
-            .rename_thread(session_id, &thread_id, title)
+            .rename_thread_for_user(user_id, session_id, &thread_id, title)
             .await?;
-        self.list_chat_threads(session_id)
+        self.session_manager
+            .list_threads_for_user(user_id, session_id)
             .await?
             .into_iter()
             .find(|thread| thread.id == thread_id)
@@ -625,18 +750,21 @@ impl ServerCore {
 
     pub async fn update_chat_thread_model(
         &self,
+        request_user: &RequestUser,
         session_id: SessionId,
         thread_id: ThreadId,
         provider_id: ProviderId,
         model: String,
     ) -> Result<ChatThreadBinding> {
+        tracing::trace!(external_user_id = %request_user.external_id(), %session_id, %thread_id, "updating chat thread model for request user");
+        let user_id = self.resolve_chat_user(request_user).await?;
         let (effective_provider_id, effective_model) = self
             .session_manager
-            .update_thread_model(session_id, &thread_id, provider_id, &model)
+            .update_thread_model_for_user(user_id, session_id, &thread_id, provider_id, &model)
             .await?;
         let (template_id, activated_provider_id, _activated_model) = self
             .session_manager
-            .activate_thread(session_id, &thread_id)
+            .activate_thread_for_user(user_id, session_id, &thread_id)
             .await?;
 
         Ok(ChatThreadBinding {
@@ -650,22 +778,28 @@ impl ServerCore {
 
     pub async fn get_chat_messages(
         &self,
+        request_user: &RequestUser,
         session_id: SessionId,
         thread_id: ThreadId,
     ) -> Result<Vec<ChatMessage>> {
+        tracing::trace!(external_user_id = %request_user.external_id(), %session_id, %thread_id, "getting chat messages for request user");
+        let user_id = self.resolve_chat_user(request_user).await?;
         self.session_manager
-            .get_thread_messages(session_id, &thread_id)
+            .get_thread_messages_for_user(user_id, session_id, &thread_id)
             .await
     }
 
     pub async fn get_chat_thread_snapshot(
         &self,
+        request_user: &RequestUser,
         session_id: SessionId,
         thread_id: ThreadId,
     ) -> Result<ChatThreadSnapshot> {
+        tracing::trace!(external_user_id = %request_user.external_id(), %session_id, %thread_id, "getting chat thread snapshot for request user");
+        let user_id = self.resolve_chat_user(request_user).await?;
         let (messages, turn_count, token_count, plan_item_count) = self
             .session_manager
-            .get_thread_snapshot(session_id, &thread_id)
+            .get_thread_snapshot_for_user(user_id, session_id, &thread_id)
             .await?;
         Ok(ChatThreadSnapshot {
             session_id,
@@ -679,12 +813,15 @@ impl ServerCore {
 
     pub async fn activate_chat_thread(
         &self,
+        request_user: &RequestUser,
         session_id: SessionId,
         thread_id: ThreadId,
     ) -> Result<ChatThreadBinding> {
+        tracing::trace!(external_user_id = %request_user.external_id(), %session_id, %thread_id, "activating chat thread for request user");
+        let user_id = self.resolve_chat_user(request_user).await?;
         let (template_id, effective_provider_id, effective_model) = self
             .session_manager
-            .activate_thread(session_id, &thread_id)
+            .activate_thread_for_user(user_id, session_id, &thread_id)
             .await?;
         Ok(ChatThreadBinding {
             session_id,
@@ -697,32 +834,41 @@ impl ServerCore {
 
     pub async fn send_chat_message(
         &self,
+        request_user: &RequestUser,
         session_id: SessionId,
         thread_id: ThreadId,
         message: String,
     ) -> Result<()> {
+        tracing::trace!(external_user_id = %request_user.external_id(), %session_id, %thread_id, "sending chat message for request user");
+        let user_id = self.resolve_chat_user(request_user).await?;
         self.session_manager
-            .send_message(session_id, &thread_id, message)
+            .send_message_for_user(user_id, session_id, &thread_id, message)
             .await
     }
 
     pub async fn cancel_chat_thread(
         &self,
+        request_user: &RequestUser,
         session_id: SessionId,
         thread_id: ThreadId,
     ) -> Result<()> {
+        tracing::trace!(external_user_id = %request_user.external_id(), %session_id, %thread_id, "cancelling chat thread for request user");
+        let user_id = self.resolve_chat_user(request_user).await?;
         self.session_manager
-            .cancel_thread(session_id, &thread_id)
+            .cancel_thread_for_user(user_id, session_id, &thread_id)
             .await
     }
 
     pub async fn subscribe_chat_thread(
         &self,
+        request_user: &RequestUser,
         session_id: SessionId,
         thread_id: ThreadId,
     ) -> Result<broadcast::Receiver<ThreadEvent>> {
+        tracing::trace!(external_user_id = %request_user.external_id(), %session_id, %thread_id, "subscribing to chat thread for request user");
+        let user_id = self.resolve_chat_user(request_user).await?;
         self.session_manager
-            .subscribe(session_id, &thread_id)
+            .subscribe_for_user(user_id, session_id, &thread_id)
             .await
             .ok_or_else(|| ArgusError::ThreadNotFound(thread_id.to_string()))
     }

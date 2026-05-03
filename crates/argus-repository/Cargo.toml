@@ -9,7 +9,7 @@ async-trait = { workspace = true }
 chrono = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-sqlx = { workspace = true, features = ["migrate", "macros"] }
+sqlx = { workspace = true, features = ["sqlite", "postgres", "uuid", "runtime-tokio-rustls", "migrate", "macros"] }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

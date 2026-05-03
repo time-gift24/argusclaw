@@ -78,12 +78,13 @@ describe("HttpApiClient", () => {
 
     expect(fetchMock).toHaveBeenNthCalledWith(1, "/api/v1/agents/runs", {
       body: JSON.stringify({ agent_id: 7, prompt: "Inspect the plan" }),
+      credentials: "same-origin",
       headers: {
         "Content-Type": "application/json",
       },
       method: "POST",
     });
-    expect(fetchMock).toHaveBeenNthCalledWith(2, "/api/v1/agents/runs/run-1", undefined);
+    expect(fetchMock).toHaveBeenNthCalledWith(2, "/api/v1/agents/runs/run-1", { credentials: "same-origin" });
     expect(created.run_id).toBe("run-1");
     expect(created.status).toBe("queued");
     expect(detail.status).toBe("completed");
@@ -125,12 +126,13 @@ describe("HttpApiClient", () => {
       password: "first-secret",
     });
 
-    expect(fetchMock).toHaveBeenNthCalledWith(1, "/api/v1/account", undefined);
+    expect(fetchMock).toHaveBeenNthCalledWith(1, "/api/v1/account", { credentials: "same-origin" });
     expect(fetchMock).toHaveBeenNthCalledWith(2, "/api/v1/account", {
       body: JSON.stringify({
         username: "alice",
         password: "first-secret",
       }),
+      credentials: "same-origin",
       headers: {
         "Content-Type": "application/json",
       },
@@ -143,4 +145,35 @@ describe("HttpApiClient", () => {
     });
     expect("password" in configured).toBe(false);
   });
+
+  it("redirects to OAuth login when the API returns unauthorized", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 401,
+      headers: {
+        get: () => "application/json",
+      },
+      json: async () => ({
+        error: {
+          code: "unauthorized",
+          message: "authentication required",
+        },
+      }),
+    });
+    const assign = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("window", {
+      location: {
+        pathname: "/chat",
+        search: "?session=1",
+        hash: "#thread",
+        assign,
+      },
+    });
+
+    await expect(getApiClient().getBootstrap()).rejects.toThrow("authentication required");
+
+    expect(assign).toHaveBeenCalledWith("/auth/login?next=%2Fchat%3Fsession%3D1%23thread");
+  });
+
 });

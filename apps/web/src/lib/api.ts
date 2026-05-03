@@ -513,7 +513,7 @@ class HttpApiClient implements ApiClient {
   }
 
   subscribeRuntimeState(handlers: RuntimeEventHandlers): RuntimeEventSubscription {
-    const events = new EventSource(`${this.baseUrl}/runtime/events`);
+    const events = new EventSource(`${this.baseUrl}/runtime/events`, { withCredentials: true });
 
     events.addEventListener("runtime.snapshot", (event) => {
       try {
@@ -830,7 +830,7 @@ class HttpApiClient implements ApiClient {
     threadId: string,
     handlers: ChatThreadEventHandlers,
   ): RuntimeEventSubscription {
-    const events = new EventSource(`${this.baseUrl}/chat/sessions/${sessionId}/threads/${threadId}/events`);
+    const events = new EventSource(`${this.baseUrl}/chat/sessions/${sessionId}/threads/${threadId}/events`, { withCredentials: true });
 
     events.onopen = () => {
       handlers.onOpen?.();
@@ -857,12 +857,27 @@ class HttpApiClient implements ApiClient {
   }
 
   private async request<T>(path: string, init?: RequestInit): Promise<T> {
-    const response = await fetch(`${this.baseUrl}${path}`, init);
+    const requestInit: RequestInit = {
+      ...init,
+      credentials: init?.credentials ?? "same-origin",
+    };
+    const response = await fetch(`${this.baseUrl}${path}`, requestInit);
     if (!response.ok) {
+      if (response.status === 401) {
+        this.redirectToLogin();
+      }
       throw new Error(await this.readErrorMessage(response));
     }
 
     return (await response.json()) as T;
+  }
+
+  private redirectToLogin(): void {
+    if (typeof window === "undefined") {
+      return;
+    }
+    const current = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+    window.location.assign(`/auth/login?next=${encodeURIComponent(current)}`);
   }
 
   private async readErrorMessage(response: Response): Promise<string> {
