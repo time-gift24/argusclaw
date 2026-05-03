@@ -14,6 +14,7 @@ async fn bootstrap_returns_instance_summary() {
     let body: BootstrapResponse = support::json_body(response).await;
     assert_eq!(body.instance_name, "ArgusWing");
     assert!(body.provider_count >= 1);
-    assert!(body.template_count >= 1);
+    assert_eq!(body.template_count, 0);
+    assert_eq!(body.default_template_id, None);
     assert!(body.default_provider_id > 0);
 }

@@ -220,6 +220,7 @@ impl TemplateManager {
 mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     use argus_repository::{connect_path, migrate, AgentRepository, ArgusSqlite};
 
@@ -229,7 +230,14 @@ mod tests {
 
     async fn make_template_manager_for_test() -> TemplateManager {
         let unique = NEXT_TEST_DB_ID.fetch_add(1, Ordering::Relaxed);
-        let db_path = std::env::temp_dir().join(format!("argus-template-test-{unique}.sqlite"));
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos();
+        let db_path = std::env::temp_dir().join(format!(
+            "argus-template-test-{}-{nanos}-{unique}.sqlite",
+            std::process::id()
+        ));
         let pool = connect_path(&db_path)
             .await
             .expect("test sqlite database should open");
@@ -242,17 +250,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn seed_builtin_agents_includes_chrome_explore() {
+    async fn seed_builtin_agents_allows_empty_agent_definitions() {
         let manager = make_template_manager_for_test().await;
         manager.seed_builtin_agents().await.unwrap();
 
-        let record = manager
-            .find_by_display_name("Chrome Explore")
-            .await
-            .unwrap()
-            .unwrap();
-
-        assert_eq!(record.tool_names, vec!["chrome"]);
+        let records = manager.list().await.unwrap();
+        assert!(records.is_empty());
     }
 
     #[tokio::test]

@@ -4,7 +4,10 @@ use std::collections::HashMap;
 
 use argus_protocol::ThreadId;
 use argus_protocol::llm::ModelConfig;
-use argus_protocol::{AgentRecord, LlmProviderKind, LlmProviderRecordJson, ProviderSecretStatus};
+use argus_protocol::{
+    AgentId, AgentRecord, LlmProviderKind, LlmProviderRecordJson, ProviderSecretStatus,
+    ThinkingConfig,
+};
 use argus_server::response::MutationResponse;
 use argus_session::{SessionSummary, ThreadSummary};
 use axum::http::{Method, StatusCode};
@@ -638,8 +641,30 @@ async fn first_template(ctx: &support::TestContext) -> AgentRecord {
     let response = ctx.get("/api/v1/agents/templates").await;
     assert_eq!(response.status(), StatusCode::OK);
     let templates: Vec<AgentRecord> = support::json_body(response).await;
-    templates
-        .into_iter()
-        .next()
-        .expect("test server should seed at least one template")
+    if let Some(template) = templates.into_iter().next() {
+        return template;
+    }
+
+    let response = ctx
+        .post_json(
+            "/api/v1/agents/templates",
+            &AgentRecord {
+                id: AgentId::new(0),
+                display_name: "Test Chat Agent".to_string(),
+                description: "created by chat API test".to_string(),
+                version: "1.0.0".to_string(),
+                provider_id: None,
+                model_id: Some("alpha".to_string()),
+                system_prompt: "You are a test chat agent.".to_string(),
+                tool_names: vec![],
+                subagent_names: vec![],
+                max_tokens: None,
+                temperature: None,
+                thinking_config: Some(ThinkingConfig::enabled()),
+            },
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let created: MutationResponse<AgentRecord> = support::json_body(response).await;
+    created.item
 }
