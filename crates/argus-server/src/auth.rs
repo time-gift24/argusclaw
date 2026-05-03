@@ -185,8 +185,33 @@ impl AuthConfig {
 
     fn from_env_values(values: AuthEnvValues<'_>) -> Result<Option<Self>, AuthConfigError> {
         if !env_bool_value(values.enabled) {
+            tracing::info!(
+                oauth_enabled = false,
+                oauth_base_url = env_value_for_log(values.base_url),
+                oauth_client_id = env_value_for_log(values.client_id),
+                oauth_client_secret_set = env_value_present(values.client_secret),
+                oauth_redirect_uri = env_value_for_log(values.redirect_uri),
+                oauth_scope = env_value_for_log(values.scope),
+                oauth_cookie_secure = env_value_for_log(values.cookie_secure),
+                "OAuth2 authentication disabled"
+            );
             return Ok(None);
         }
+
+        tracing::info!(
+            oauth_enabled = true,
+            oauth_base_url = env_value_for_log(values.base_url),
+            oauth_client_id = env_value_for_log(values.client_id),
+            oauth_client_secret_set = env_value_present(values.client_secret),
+            oauth_authorize_url = env_value_for_log(values.authorize_url),
+            oauth_token_url = env_value_for_log(values.token_url),
+            oauth_userinfo_url = env_value_for_log(values.userinfo_url),
+            oauth_logout_url = env_value_for_log(values.logout_url),
+            oauth_redirect_uri = env_value_for_log(values.redirect_uri),
+            oauth_scope = env_value_for_log(values.scope),
+            oauth_cookie_secure = env_value_for_log(values.cookie_secure),
+            "OAuth2 authentication environment detected"
+        );
 
         let client_id = required_value("ARGUS_OAUTH_CLIENT_ID", values.client_id)?;
         let client_secret = required_value("ARGUS_OAUTH_CLIENT_SECRET", values.client_secret)?;
@@ -226,6 +251,31 @@ impl AuthConfig {
             OAUTH_LOGOUT_PATH,
         )?;
         let cookie_secure = values.cookie_secure.map(parse_bool).unwrap_or(true);
+
+        tracing::info!(
+            oauth_enabled = true,
+            oauth_base_url = base_url
+                .as_ref()
+                .map(Url::as_str)
+                .unwrap_or("<not set>"),
+            oauth_client_id = %client_id,
+            oauth_client_secret_set = env_value_present(values.client_secret),
+            oauth_authorize_url = %authorize_url,
+            oauth_authorize_url_override = env_value_present(values.authorize_url),
+            oauth_token_url = %token_url,
+            oauth_token_url_override = env_value_present(values.token_url),
+            oauth_userinfo_url = %userinfo_url,
+            oauth_userinfo_url_override = env_value_present(values.userinfo_url),
+            oauth_logout_url = logout_url
+                .as_ref()
+                .map(Url::as_str)
+                .unwrap_or("<not set>"),
+            oauth_logout_url_override = env_value_present(values.logout_url),
+            oauth_redirect_uri = %redirect_uri,
+            oauth_scope = %scope,
+            oauth_cookie_secure = cookie_secure,
+            "OAuth2 authentication configured"
+        );
 
         Ok(Some(Self {
             enabled: true,
@@ -602,6 +652,17 @@ fn env_bool_value(value: Option<&str>) -> bool {
     value.map(parse_bool).unwrap_or(false)
 }
 
+fn env_value_present(value: Option<&str>) -> bool {
+    value.map(str::trim).is_some_and(|value| !value.is_empty())
+}
+
+fn env_value_for_log(value: Option<&str>) -> &str {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("<not set>")
+}
+
 fn parse_bool(value: &str) -> bool {
     matches!(value, "1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON")
 }
@@ -744,6 +805,14 @@ mod tests {
             Some("https://auth.example.test/saaslogin1/oauth2/logout")
         );
         assert_eq!(config.scope, DEFAULT_SCOPE);
+    }
+
+    #[test]
+    fn env_value_present_trims_empty_values() {
+        assert!(!env_value_present(None));
+        assert!(!env_value_present(Some("")));
+        assert!(!env_value_present(Some("  ")));
+        assert!(env_value_present(Some("client")));
     }
 
     #[test]
