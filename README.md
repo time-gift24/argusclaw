@@ -60,7 +60,7 @@ curl http://127.0.0.1:3010/api/v1/health
 
 - 程序：`/opt/arguswing/bin/argus-server`
 - 前端：`/opt/arguswing/web`
-- 数据库：`/opt/arguswing/data/sqlite.db`
+- 数据库：通过 `DATABASE_URL` 指向 PostgreSQL
 - traces：`/opt/arguswing/traces`
 - 环境变量：`/etc/arguswing/arguswing.env`
 

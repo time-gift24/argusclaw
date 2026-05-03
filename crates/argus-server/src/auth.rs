@@ -664,7 +664,10 @@ fn env_value_for_log(value: Option<&str>) -> &str {
 }
 
 fn parse_bool(value: &str) -> bool {
-    matches!(value, "1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON")
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
 }
 
 fn required_value(name: &'static str, value: Option<&str>) -> Result<String, AuthConfigError> {
@@ -813,6 +816,16 @@ mod tests {
         assert!(!env_value_present(Some("")));
         assert!(!env_value_present(Some("  ")));
         assert!(env_value_present(Some("client")));
+    }
+
+    #[test]
+    fn parse_bool_accepts_trimmed_case_insensitive_values() {
+        assert!(parse_bool("true"));
+        assert!(parse_bool(" True "));
+        assert!(parse_bool("YES"));
+        assert!(parse_bool(" on "));
+        assert!(parse_bool("1"));
+        assert!(!parse_bool("false"));
     }
 
     #[test]
