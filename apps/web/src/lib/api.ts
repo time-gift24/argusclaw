@@ -16,6 +16,13 @@ export interface HealthResponse {
   status: string;
 }
 
+export interface CurrentUserResponse {
+  id: string | null;
+  external_id: string;
+  display_name: string | null;
+  is_admin: boolean;
+}
+
 export interface BootstrapResponse {
   instance_name: string;
   provider_count: number;
@@ -24,6 +31,7 @@ export interface BootstrapResponse {
   default_provider_id: number | null;
   default_template_id: number | null;
   mcp_ready_count: number;
+  current_user?: CurrentUserResponse;
 }
 
 export interface LlmProviderRecord {
@@ -69,6 +77,11 @@ export interface AgentRecord {
 export interface AgentMcpBinding {
   server_id: number;
   allowed_tools?: string[] | null;
+}
+
+export interface ChatOptionsResponse {
+  providers: LlmProviderRecord[];
+  templates: AgentRecord[];
 }
 
 export type McpTransportConfig =
@@ -449,6 +462,7 @@ export interface ApiClient {
   deleteProvider?(providerId: number): Promise<DeleteResponse>;
   testProvider?(providerId: number, model?: string): Promise<ProviderTestResult>;
   testProviderDraft?(input: LlmProviderRecord): Promise<ProviderTestResult>;
+  getChatOptions?(): Promise<ChatOptionsResponse>;
   listTemplates(): Promise<AgentRecord[]>;
   saveTemplate(input: AgentRecord): Promise<AgentRecord>;
   deleteTemplate?(templateId: number): Promise<DeleteResponse>;
@@ -535,6 +549,10 @@ class HttpApiClient implements ApiClient {
 
   listProviders(): Promise<LlmProviderRecord[]> {
     return this.request("/providers");
+  }
+
+  getChatOptions(): Promise<ChatOptionsResponse> {
+    return this.request("/chat/options");
   }
 
   async saveProvider(input: SaveProviderRequest): Promise<LlmProviderRecord> {

@@ -14,6 +14,19 @@ use axum::routing::{get, post};
 use axum::{Router, http::StatusCode, routing::any, routing::patch};
 
 use crate::app_state::AppState;
+use crate::error::ApiError;
+use crate::user_context::RequestUser;
+
+pub(crate) async fn require_admin(
+    state: &AppState,
+    request_user: &RequestUser,
+) -> Result<(), ApiError> {
+    if state.core().is_request_user_admin(request_user).await? {
+        Ok(())
+    } else {
+        Err(ApiError::forbidden("admin access is required"))
+    }
+}
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -35,6 +48,7 @@ pub fn router() -> Router<AppState> {
             "/api/v1/agents/runs/{run_id}",
             get(agent_runs::get_agent_run),
         )
+        .route("/api/v1/chat/options", get(chat::get_chat_options))
         .route(
             "/api/v1/chat/sessions",
             get(chat::list_sessions).post(chat::create_session),

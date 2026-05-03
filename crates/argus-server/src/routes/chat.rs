@@ -2,8 +2,9 @@ use std::convert::Infallible;
 
 use argus_protocol::llm::ChatMessage;
 use argus_protocol::{
-    AgentId, JobRuntimeSnapshot, JobRuntimeSummary, LlmStreamEvent, MailboxMessage, ProviderId,
-    SessionId, ThreadEvent, ThreadId, ThreadNoticeLevel, ThreadPoolEventReason, ThreadPoolSnapshot,
+    AgentId, AgentRecord, JobRuntimeSnapshot, JobRuntimeSummary, LlmProviderRecordJson,
+    LlmStreamEvent, MailboxMessage, ProviderId, SessionId, ThreadEvent, ThreadId,
+    ThreadNoticeLevel, ThreadPoolEventReason, ThreadPoolSnapshot,
 };
 use argus_session::{SessionSummary, ThreadSummary};
 use axum::Json;
@@ -68,11 +69,29 @@ pub struct CreateSessionWithThreadRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatOptionsResponse {
+    pub providers: Vec<LlmProviderRecordJson>,
+    pub templates: Vec<AgentRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatThreadEventEnvelope {
     pub session_id: String,
     pub thread_id: String,
     pub turn_number: Option<u32>,
     pub payload: ChatThreadEventPayload,
+}
+
+pub async fn get_chat_options(
+    _request_user: RequestUser,
+    State(state): State<AppState>,
+) -> Result<Json<ChatOptionsResponse>, ApiError> {
+    let providers = state.core().list_providers().await?;
+    let templates = state.core().list_templates().await?;
+    Ok(Json(ChatOptionsResponse {
+        providers: providers.into_iter().map(Into::into).collect(),
+        templates,
+    }))
 }
 
 impl ChatThreadEventEnvelope {

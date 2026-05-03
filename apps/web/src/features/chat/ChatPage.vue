@@ -85,14 +85,24 @@ async function loadInitialState() {
   chatSessions.loading.value = true;
   chatComposer.error.value = "";
   try {
-    const [providersResult, templatesResult] = await Promise.allSettled([
-      api.listProviders(),
-      api.listTemplates(),
-    ]);
-    if (providersResult.status === "fulfilled") providers.value = providersResult.value;
-    else loadErrors.push(`模型提供方加载失败：${formatErrorMessage(providersResult.reason)}`);
-    if (templatesResult.status === "fulfilled") templates.value = templatesResult.value;
-    else loadErrors.push(`智能体模板加载失败：${formatErrorMessage(templatesResult.reason)}`);
+    if (api.getChatOptions) {
+      try {
+        const options = await api.getChatOptions();
+        providers.value = options.providers;
+        templates.value = options.templates;
+      } catch (reason) {
+        loadErrors.push(`对话配置加载失败：${formatErrorMessage(reason)}`);
+      }
+    } else {
+      const [providersResult, templatesResult] = await Promise.allSettled([
+        api.listProviders(),
+        api.listTemplates(),
+      ]);
+      if (providersResult.status === "fulfilled") providers.value = providersResult.value;
+      else loadErrors.push(`模型提供方加载失败：${formatErrorMessage(providersResult.reason)}`);
+      if (templatesResult.status === "fulfilled") templates.value = templatesResult.value;
+      else loadErrors.push(`智能体模板加载失败：${formatErrorMessage(templatesResult.reason)}`);
+    }
 
     const firstProvider = providers.value.find((p) => p.is_default) ?? providers.value[0] ?? null;
     const firstTemplate = templates.value[0] ?? null;

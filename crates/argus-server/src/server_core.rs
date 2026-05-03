@@ -14,7 +14,8 @@ use argus_protocol::{
 };
 use argus_repository::traits::{
     AccountRepository, AgentRepository, AgentRunRepository, JobRepository, LlmProviderRepository,
-    McpRepository, SessionRepository, TemplateRepairRepository, ThreadRepository, UserRepository,
+    McpRepository, ResolvedUser, SessionRepository, TemplateRepairRepository, ThreadRepository,
+    UserRepository,
 };
 use argus_repository::types::{AgentRunId, AgentRunRecord, AgentRunStatus};
 use argus_repository::{ArgusPostgres, ArgusSqlite, connect_postgres, migrate_postgres};
@@ -533,11 +534,23 @@ impl ServerCore {
         self.job_manager.job_runtime_state()
     }
 
-    async fn resolve_chat_user(&self, request_user: &RequestUser) -> Result<UserId> {
+    async fn resolve_request_user(&self, request_user: &RequestUser) -> Result<ResolvedUser> {
         self.user_repo
             .resolve_user(request_user.external_id(), request_user.display_name())
             .await
             .map_err(database_error)
+    }
+
+    async fn resolve_chat_user(&self, request_user: &RequestUser) -> Result<UserId> {
+        Ok(self.resolve_request_user(request_user).await?.id)
+    }
+
+    pub async fn is_request_user_admin(&self, request_user: &RequestUser) -> Result<bool> {
+        Ok(self.resolve_request_user(request_user).await?.is_admin)
+    }
+
+    pub async fn current_user(&self, request_user: &RequestUser) -> Result<ResolvedUser> {
+        self.resolve_request_user(request_user).await
     }
 
     async fn cleanup_failed_chat_session_for_user(&self, user_id: UserId, session_id: SessionId) {

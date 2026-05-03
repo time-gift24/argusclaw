@@ -22,8 +22,9 @@ use argus_protocol::{
 
 use crate::error::DbError;
 use crate::traits::{
-    AgentRepository, AgentRunRepository, JobRepository, McpRepository, SessionRepository,
-    SessionWithCount, TemplateRepairRepository, ThreadRepository, UserRepository,
+    AgentRepository, AgentRunRepository, JobRepository, McpRepository, ResolvedUser,
+    SessionRepository, SessionWithCount, TemplateRepairRepository, ThreadRepository,
+    UserRepository,
 };
 use crate::types::{
     AgentRunId, AgentRunRecord, AgentRunStatus, JobId, JobRecord, JobResult, JobStatus, JobType,
@@ -340,13 +341,13 @@ impl UserRepository for ArgusPostgres {
         &self,
         external_id: &str,
         display_name: Option<&str>,
-    ) -> DbResult<UserId> {
+    ) -> DbResult<ResolvedUser> {
         let id = UserId::new();
         let row = sqlx::query(
             "INSERT INTO users (id, external_id, display_name, created_at, updated_at)
              VALUES ($1, $2, $3, CURRENT_TIMESTAMP::TEXT, CURRENT_TIMESTAMP::TEXT)
              ON CONFLICT(external_id) DO UPDATE SET display_name = COALESCE(EXCLUDED.display_name, users.display_name), updated_at = CURRENT_TIMESTAMP::TEXT
-             RETURNING id",
+             RETURNING id, is_admin",
         )
         .bind(*id.inner())
         .bind(external_id)
@@ -354,7 +355,10 @@ impl UserRepository for ArgusPostgres {
         .fetch_one(&self.pool)
         .await
         .map_err(|e| DbError::QueryFailed { reason: e.to_string() })?;
-        Ok(Self::parse_user_id(Self::get(&row, "id")?))
+        Ok(ResolvedUser {
+            id: Self::parse_user_id(Self::get(&row, "id")?),
+            is_admin: Self::get(&row, "is_admin")?,
+        })
     }
 }
 

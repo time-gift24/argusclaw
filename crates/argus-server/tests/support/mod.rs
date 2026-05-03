@@ -15,7 +15,7 @@ pub const DEFAULT_TEST_USER_ID: &str = "test-chat-user";
 #[allow(dead_code)]
 pub const ALT_TEST_USER_ID: &str = "alt-chat-user";
 pub const POSTGRES_TEST_URL_ENV: &str = "ARGUS_TEST_POSTGRES_URL";
-const CHAT_TEST_USER_ID: &str = DEFAULT_TEST_USER_ID;
+const DEFAULT_REQUEST_USER_ID: &str = DEFAULT_TEST_USER_ID;
 
 #[allow(dead_code)]
 pub struct TestContext {
@@ -55,6 +55,7 @@ impl TestContext {
         let core = ServerCore::init(Some(&database_url))
             .await
             .expect("server core should initialize against postgres test database");
+        mark_postgres_test_user_admin(&database_url).await;
         let app = argus_server::router(argus_server::app_state::AppState::new(Arc::clone(&core)));
         Some(Self {
             app,
@@ -227,10 +228,10 @@ impl TestContext {
         T: Serialize,
     {
         let mut headers = HeaderMap::new();
-        if include_chat_user && path.starts_with("/api/v1/chat/") {
+        if include_chat_user && should_attach_default_user(path) {
             headers.insert(
                 "x-argus-user-id",
-                CHAT_TEST_USER_ID
+                DEFAULT_REQUEST_USER_ID
                     .parse()
                     .expect("test user id header should be valid"),
             );
@@ -271,6 +272,29 @@ impl TestContext {
             .await
             .expect("response should succeed")
     }
+}
+
+async fn mark_postgres_test_user_admin(database_url: &str) {
+    let pool = sqlx::PgPool::connect(database_url)
+        .await
+        .expect("postgres admin seed pool should connect");
+    sqlx::query(
+        "INSERT INTO users (id, external_id, display_name, is_admin, created_at, updated_at)
+         VALUES ($1, $2, $3, TRUE, CURRENT_TIMESTAMP::TEXT, CURRENT_TIMESTAMP::TEXT)
+         ON CONFLICT(external_id) DO UPDATE SET is_admin = TRUE, updated_at = CURRENT_TIMESTAMP::TEXT",
+    )
+    .bind(uuid::Uuid::new_v4())
+    .bind(DEFAULT_TEST_USER_ID)
+    .bind("Test Admin")
+    .execute(&pool)
+    .await
+    .expect("postgres test user should be marked as admin");
+}
+
+fn should_attach_default_user(path: &str) -> bool {
+    path.starts_with("/api/v1/")
+        && !path.starts_with("/api/v1/health")
+        && !path.starts_with("/api/v1/auth/")
 }
 
 #[allow(dead_code)]

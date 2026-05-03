@@ -46,6 +46,7 @@
 - `POST /api/v1/mcp/servers/test`
 - `POST /api/v1/mcp/servers/{server_id}/test`
 - `GET /api/v1/mcp/servers/{server_id}/tools`
+- `GET /api/v1/chat/options`
 - `GET|POST /api/v1/chat/sessions`
 - `POST /api/v1/chat/sessions/with-thread`
 - `PATCH|DELETE /api/v1/chat/sessions/{session_id}`
@@ -68,6 +69,7 @@
 - `ServerCore::init(database_url)` 负责连接 PostgreSQL、migration、manager/runtime 装配与 builtin template seed
 - `ServerCore::with_pool(pool)` 只用于测试和 in-memory SQLite harness
 - server/web 运行时必须提供 PostgreSQL `DATABASE_URL`（`postgres://` 或 `postgresql://`）；SQLite 只允许测试 harness 使用
+- 管理类 API 需要当前 `users.id` 对应 `is_admin=true`；普通用户只允许 bootstrap/auth 和 chat API
 - 默认 trace 路径保持 `TRACE_DIR` 优先，否则 `~/.arguswing/traces`
 - 默认 bind address 保持 `ARGUS_SERVER_ADDR` 优先，否则 `127.0.0.1:3000`
 - response shape、状态码和错误 envelope 改动前必须同步更新 server 测试与 web API client

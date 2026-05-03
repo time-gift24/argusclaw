@@ -39,7 +39,7 @@ async fn postgres_migration_and_user_scoped_chat_records() {
         .expect("user B should resolve");
 
     let session_id = SessionId::new();
-    repo.create_for_user(&user_a, &session_id, "User A Session")
+    repo.create_for_user(&user_a.id, &session_id, "User A Session")
         .await
         .expect("user A session should be created");
 
@@ -62,12 +62,12 @@ async fn postgres_migration_and_user_scoped_chat_records() {
         created_at: now.clone(),
         updated_at: now,
     };
-    repo.upsert_thread_for_user(&user_a, &thread)
+    repo.upsert_thread_for_user(&user_a.id, &thread)
         .await
         .expect("user A should create a thread in its own session");
 
     let user_a_sessions = repo
-        .list_with_counts_for_user(&user_a)
+        .list_with_counts_for_user(&user_a.id)
         .await
         .expect("user A sessions should list");
     assert!(
@@ -77,7 +77,7 @@ async fn postgres_migration_and_user_scoped_chat_records() {
     );
 
     let user_b_sessions = repo
-        .list_with_counts_for_user(&user_b)
+        .list_with_counts_for_user(&user_b.id)
         .await
         .expect("user B sessions should list");
     assert!(
@@ -87,37 +87,37 @@ async fn postgres_migration_and_user_scoped_chat_records() {
     );
 
     assert!(
-        repo.get_for_user(&user_b, &session_id)
+        repo.get_for_user(&user_b.id, &session_id)
             .await
             .expect("user B session lookup should succeed")
             .is_none()
     );
     assert!(
-        repo.get_thread_in_session_for_user(&user_b, &thread_id, &session_id)
+        repo.get_thread_in_session_for_user(&user_b.id, &thread_id, &session_id)
             .await
             .expect("user B thread lookup should succeed")
             .is_none()
     );
     assert!(
-        repo.list_threads_in_session_for_user(&user_b, &session_id)
+        repo.list_threads_in_session_for_user(&user_b.id, &session_id)
             .await
             .expect("user B thread list should succeed")
             .is_empty()
     );
     assert!(
         !repo
-            .rename_thread_for_user(&user_b, &thread_id, &session_id, Some("User B Rename"))
+            .rename_thread_for_user(&user_b.id, &thread_id, &session_id, Some("User B Rename"))
             .await
             .expect("user B rename should be denied without error")
     );
 
     assert!(
-        repo.rename_thread_for_user(&user_a, &thread_id, &session_id, Some("User A Rename"))
+        repo.rename_thread_for_user(&user_a.id, &thread_id, &session_id, Some("User A Rename"))
             .await
             .expect("user A rename should succeed")
     );
     let renamed = repo
-        .get_thread_in_session_for_user(&user_a, &thread_id, &session_id)
+        .get_thread_in_session_for_user(&user_a.id, &thread_id, &session_id)
         .await
         .expect("user A thread lookup should succeed")
         .expect("user A thread should exist");
@@ -125,12 +125,12 @@ async fn postgres_migration_and_user_scoped_chat_records() {
 
     assert!(
         !repo
-            .delete_for_user(&user_b, &session_id)
+            .delete_for_user(&user_b.id, &session_id)
             .await
             .expect("user B delete should be denied without error")
     );
     assert!(
-        repo.delete_for_user(&user_a, &session_id)
+        repo.delete_for_user(&user_a.id, &session_id)
             .await
             .expect("user A delete should succeed")
     );

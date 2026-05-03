@@ -11,6 +11,9 @@ use argus_protocol::{
 use crate::app_state::AppState;
 use crate::error::ApiError;
 use crate::response::{DeleteResponse, MutationResponse};
+use crate::user_context::RequestUser;
+
+use super::require_admin;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ProviderConnectionTestRequest {
@@ -34,16 +37,20 @@ pub struct ProviderUpdateRequest {
 }
 
 pub async fn list_providers(
+    request_user: RequestUser,
     State(state): State<AppState>,
 ) -> Result<Json<Vec<LlmProviderRecordJson>>, ApiError> {
+    require_admin(&state, &request_user).await?;
     let providers = state.core().list_providers().await?;
     Ok(Json(providers.into_iter().map(Into::into).collect()))
 }
 
 pub async fn create_provider(
+    request_user: RequestUser,
     State(state): State<AppState>,
     Json(mut record): Json<LlmProviderRecordJson>,
 ) -> Result<(StatusCode, Json<MutationResponse<LlmProviderRecordJson>>), ApiError> {
+    require_admin(&state, &request_user).await?;
     record.id = 0;
     let id = state.core().upsert_provider(from_json(record)).await?;
     let saved = state.core().get_provider_record(id).await?;
@@ -54,10 +61,12 @@ pub async fn create_provider(
 }
 
 pub async fn update_provider(
+    request_user: RequestUser,
     State(state): State<AppState>,
     Path(provider_id): Path<i64>,
     Json(mut record): Json<ProviderUpdateRequest>,
 ) -> Result<Json<MutationResponse<LlmProviderRecordJson>>, ApiError> {
+    require_admin(&state, &request_user).await?;
     record.id = provider_id;
     let existing = state
         .core()
@@ -72,9 +81,11 @@ pub async fn update_provider(
 }
 
 pub async fn delete_provider(
+    request_user: RequestUser,
     State(state): State<AppState>,
     Path(provider_id): Path<i64>,
 ) -> Result<Json<MutationResponse<DeleteResponse>>, ApiError> {
+    require_admin(&state, &request_user).await?;
     let deleted = state
         .core()
         .delete_provider(LlmProviderId::new(provider_id))
@@ -83,10 +94,12 @@ pub async fn delete_provider(
 }
 
 pub async fn test_provider_connection(
+    request_user: RequestUser,
     State(state): State<AppState>,
     Path(provider_id): Path<i64>,
     payload: Option<Json<ProviderConnectionTestRequest>>,
 ) -> Result<Json<ProviderTestResult>, ApiError> {
+    require_admin(&state, &request_user).await?;
     let model = payload.and_then(|Json(request)| request.model);
     Ok(Json(
         state
@@ -97,9 +110,11 @@ pub async fn test_provider_connection(
 }
 
 pub async fn test_provider_record(
+    request_user: RequestUser,
     State(state): State<AppState>,
     Json(record): Json<LlmProviderRecordJson>,
 ) -> Result<Json<ProviderTestResult>, ApiError> {
+    require_admin(&state, &request_user).await?;
     Ok(Json(
         state
             .core()
