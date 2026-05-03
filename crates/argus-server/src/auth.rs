@@ -21,6 +21,10 @@ const SESSION_COOKIE_NAME: &str = "argus_session";
 const LOGIN_STATE_COOKIE_NAME: &str = "argus_oauth_state";
 const SESSION_TTL_SECONDS: i64 = 8 * 60 * 60;
 const REFRESH_SKEW_SECONDS: i64 = 60;
+const OAUTH_AUTHORIZE_PATH: &str = "/saaslogin1/oauth2/authorize";
+const OAUTH_TOKEN_PATH: &str = "/saaslogin1/oauth2/accesstoken";
+const OAUTH_USERINFO_PATH: &str = "/saaslogin1/oauth2/userinfo";
+const OAUTH_LOGOUT_PATH: &str = "/saaslogin1/oauth2/logout";
 
 #[derive(Debug, Clone)]
 pub struct AuthConfig {
@@ -46,6 +50,20 @@ pub enum AuthConfigError {
         #[source]
         source: url::ParseError,
     },
+}
+
+struct AuthEnvValues<'a> {
+    enabled: Option<&'a str>,
+    client_id: Option<&'a str>,
+    client_secret: Option<&'a str>,
+    base_url: Option<&'a str>,
+    authorize_url: Option<&'a str>,
+    token_url: Option<&'a str>,
+    userinfo_url: Option<&'a str>,
+    logout_url: Option<&'a str>,
+    redirect_uri: Option<&'a str>,
+    scope: Option<&'a str>,
+    cookie_secure: Option<&'a str>,
 }
 
 #[derive(Debug, Clone)]
@@ -138,28 +156,76 @@ struct RefreshTokenRequest<'a> {
 
 impl AuthConfig {
     pub fn from_env() -> Result<Option<Self>, AuthConfigError> {
-        if !env_bool("ARGUS_OAUTH_ENABLED") {
+        let enabled = std::env::var("ARGUS_OAUTH_ENABLED").ok();
+        let client_id = std::env::var("ARGUS_OAUTH_CLIENT_ID").ok();
+        let client_secret = std::env::var("ARGUS_OAUTH_CLIENT_SECRET").ok();
+        let base_url = std::env::var("ARGUS_OAUTH_BASE_URL").ok();
+        let authorize_url = std::env::var("ARGUS_OAUTH_AUTHORIZE_URL").ok();
+        let token_url = std::env::var("ARGUS_OAUTH_TOKEN_URL").ok();
+        let userinfo_url = std::env::var("ARGUS_OAUTH_USERINFO_URL").ok();
+        let logout_url = std::env::var("ARGUS_OAUTH_LOGOUT_URL").ok();
+        let redirect_uri = std::env::var("ARGUS_OAUTH_REDIRECT_URI").ok();
+        let scope = std::env::var("ARGUS_OAUTH_SCOPE").ok();
+        let cookie_secure = std::env::var("ARGUS_OAUTH_COOKIE_SECURE").ok();
+
+        Self::from_env_values(AuthEnvValues {
+            enabled: enabled.as_deref(),
+            client_id: client_id.as_deref(),
+            client_secret: client_secret.as_deref(),
+            base_url: base_url.as_deref(),
+            authorize_url: authorize_url.as_deref(),
+            token_url: token_url.as_deref(),
+            userinfo_url: userinfo_url.as_deref(),
+            logout_url: logout_url.as_deref(),
+            redirect_uri: redirect_uri.as_deref(),
+            scope: scope.as_deref(),
+            cookie_secure: cookie_secure.as_deref(),
+        })
+    }
+
+    fn from_env_values(values: AuthEnvValues<'_>) -> Result<Option<Self>, AuthConfigError> {
+        if !env_bool_value(values.enabled) {
             return Ok(None);
         }
 
-        let client_id = required_env("ARGUS_OAUTH_CLIENT_ID")?;
-        let client_secret = required_env("ARGUS_OAUTH_CLIENT_SECRET")?;
-        let authorize_url = required_url("ARGUS_OAUTH_AUTHORIZE_URL")?;
-        let token_url = required_url("ARGUS_OAUTH_TOKEN_URL")?;
-        let userinfo_url = required_url("ARGUS_OAUTH_USERINFO_URL")?;
-        let redirect_uri = required_env("ARGUS_OAUTH_REDIRECT_URI")?;
-        let scope =
-            std::env::var("ARGUS_OAUTH_SCOPE").unwrap_or_else(|_| DEFAULT_SCOPE.to_string());
-        let logout_url = optional_url("ARGUS_OAUTH_LOGOUT_URL")?;
-        let cookie_secure = std::env::var("ARGUS_OAUTH_COOKIE_SECURE")
-            .ok()
-            .map(|value| {
-                matches!(
-                    value.as_str(),
-                    "1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON"
-                )
-            })
-            .unwrap_or(true);
+        let client_id = required_value("ARGUS_OAUTH_CLIENT_ID", values.client_id)?;
+        let client_secret = required_value("ARGUS_OAUTH_CLIENT_SECRET", values.client_secret)?;
+        let base_url = values
+            .base_url
+            .map(|value| parse_url("ARGUS_OAUTH_BASE_URL", value))
+            .transpose()?;
+        let authorize_url = endpoint_url(
+            "ARGUS_OAUTH_AUTHORIZE_URL",
+            values.authorize_url,
+            base_url.as_ref(),
+            OAUTH_AUTHORIZE_PATH,
+        )?;
+        let token_url = endpoint_url(
+            "ARGUS_OAUTH_TOKEN_URL",
+            values.token_url,
+            base_url.as_ref(),
+            OAUTH_TOKEN_PATH,
+        )?;
+        let userinfo_url = endpoint_url(
+            "ARGUS_OAUTH_USERINFO_URL",
+            values.userinfo_url,
+            base_url.as_ref(),
+            OAUTH_USERINFO_PATH,
+        )?;
+        let redirect_uri = required_value("ARGUS_OAUTH_REDIRECT_URI", values.redirect_uri)?;
+        let scope = values
+            .scope
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(DEFAULT_SCOPE)
+            .to_string();
+        let logout_url = optional_endpoint_url(
+            "ARGUS_OAUTH_LOGOUT_URL",
+            values.logout_url,
+            base_url.as_ref(),
+            OAUTH_LOGOUT_PATH,
+        )?;
+        let cookie_secure = values.cookie_secure.map(parse_bool).unwrap_or(true);
 
         Ok(Some(Self {
             enabled: true,
@@ -532,45 +598,60 @@ fn sanitize_next(next: Option<&str>) -> String {
     }
 }
 
-fn env_bool(name: &str) -> bool {
-    std::env::var(name)
-        .map(|value| {
-            matches!(
-                value.as_str(),
-                "1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON"
-            )
-        })
-        .unwrap_or(false)
+fn env_bool_value(value: Option<&str>) -> bool {
+    value.map(parse_bool).unwrap_or(false)
 }
 
-fn required_env(name: &'static str) -> Result<String, AuthConfigError> {
-    std::env::var(name)
-        .ok()
+fn parse_bool(value: &str) -> bool {
+    matches!(value, "1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON")
+}
+
+fn required_value(name: &'static str, value: Option<&str>) -> Result<String, AuthConfigError> {
+    value
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .ok_or(AuthConfigError::MissingEnv(name))
 }
 
-fn required_url(name: &'static str) -> Result<Url, AuthConfigError> {
-    let value = required_env(name)?;
-    Url::parse(&value).map_err(|source| AuthConfigError::InvalidUrl { name, source })
+fn endpoint_url(
+    name: &'static str,
+    explicit: Option<&str>,
+    base_url: Option<&Url>,
+    path: &str,
+) -> Result<Url, AuthConfigError> {
+    if let Some(explicit) = explicit.map(str::trim).filter(|value| !value.is_empty()) {
+        return parse_url(name, explicit);
+    }
+    let base_url = base_url.ok_or(AuthConfigError::MissingEnv(name))?;
+    base_url
+        .join(path)
+        .map_err(|source| AuthConfigError::InvalidUrl { name, source })
+}
+
+fn optional_endpoint_url(
+    name: &'static str,
+    explicit: Option<&str>,
+    base_url: Option<&Url>,
+    path: &str,
+) -> Result<Option<Url>, AuthConfigError> {
+    if let Some(explicit) = explicit.map(str::trim).filter(|value| !value.is_empty()) {
+        return parse_url(name, explicit).map(Some);
+    }
+    base_url
+        .map(|base_url| {
+            base_url
+                .join(path)
+                .map_err(|source| AuthConfigError::InvalidUrl { name, source })
+        })
+        .transpose()
 }
 
 fn parse_static_url(name: &'static str, value: &str) -> Result<Url, AuthConfigError> {
-    Url::parse(value).map_err(|source| AuthConfigError::InvalidUrl { name, source })
+    parse_url(name, value)
 }
 
-fn optional_url(name: &'static str) -> Result<Option<Url>, AuthConfigError> {
-    let Some(value) = std::env::var(name)
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-    else {
-        return Ok(None);
-    };
-    Url::parse(&value)
-        .map(Some)
-        .map_err(|source| AuthConfigError::InvalidUrl { name, source })
+fn parse_url(name: &'static str, value: &str) -> Result<Url, AuthConfigError> {
+    Url::parse(value).map_err(|source| AuthConfigError::InvalidUrl { name, source })
 }
 
 fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
@@ -627,6 +708,43 @@ pub(crate) fn header_value(value: &str) -> Result<HeaderValue, ApiError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn config_derives_oauth_endpoints_from_base_url() {
+        let config = AuthConfig::from_env_values(AuthEnvValues {
+            enabled: Some("true"),
+            client_id: Some("client"),
+            client_secret: Some("secret"),
+            base_url: Some("https://auth.example.test"),
+            authorize_url: None,
+            token_url: None,
+            userinfo_url: None,
+            logout_url: None,
+            redirect_uri: Some("http://127.0.0.1:3010/auth/callback"),
+            scope: None,
+            cookie_secure: None,
+        })
+        .expect("base url config should parse")
+        .expect("enabled config should be present");
+
+        assert_eq!(
+            config.authorize_url.as_str(),
+            "https://auth.example.test/saaslogin1/oauth2/authorize"
+        );
+        assert_eq!(
+            config.token_url.as_str(),
+            "https://auth.example.test/saaslogin1/oauth2/accesstoken"
+        );
+        assert_eq!(
+            config.userinfo_url.as_str(),
+            "https://auth.example.test/saaslogin1/oauth2/userinfo"
+        );
+        assert_eq!(
+            config.logout_url.as_ref().map(Url::as_str),
+            Some("https://auth.example.test/saaslogin1/oauth2/logout")
+        );
+        assert_eq!(config.scope, DEFAULT_SCOPE);
+    }
 
     #[test]
     fn sanitize_next_rejects_external_urls() {
