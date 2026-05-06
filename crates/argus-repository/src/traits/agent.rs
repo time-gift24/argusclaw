@@ -34,8 +34,5 @@ pub trait AgentRepository: Send + Sync {
     async fn delete(&self, id: &AgentId) -> Result<bool, DbError>;
 
     /// Delete an agent and its explicit runtime associations.
-    async fn delete_with_associations(
-        &self,
-        id: &AgentId,
-    ) -> Result<AgentDeleteReport, DbError>;
+    async fn delete_with_associations(&self, id: &AgentId) -> Result<AgentDeleteReport, DbError>;
 }

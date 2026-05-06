@@ -1,5 +1,7 @@
 use argus_protocol::{AgentId, AgentRecord, LlmProviderId, SessionId, ThreadId};
-use argus_repository::traits::{AgentRepository, JobRepository, SessionRepository, ThreadRepository};
+use argus_repository::traits::{
+    AgentRepository, JobRepository, SessionRepository, ThreadRepository,
+};
 use argus_repository::types::{JobId, JobRecord, JobStatus, JobType, ThreadRecord};
 use argus_repository::{ArgusSqlite, migrate};
 
