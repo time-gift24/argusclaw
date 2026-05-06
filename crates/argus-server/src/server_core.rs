@@ -823,17 +823,17 @@ impl ServerCore {
     ) -> Result<ChatThreadSnapshot> {
         tracing::trace!(external_user_id = %request_user.external_id(), %session_id, %thread_id, "getting chat thread snapshot for request user");
         let user_id = self.resolve_chat_user(request_user).await?;
-        let (messages, turn_count, token_count, plan_item_count) = self
+        let snapshot = self
             .session_manager
             .get_thread_snapshot_for_user(user_id, session_id, &thread_id)
             .await?;
         Ok(ChatThreadSnapshot {
             session_id,
             thread_id,
-            messages,
-            turn_count,
-            token_count,
-            plan_item_count,
+            messages: snapshot.messages,
+            turn_count: snapshot.turn_count,
+            token_count: snapshot.token_count,
+            plan_item_count: snapshot.plan_item_count,
         })
     }
 

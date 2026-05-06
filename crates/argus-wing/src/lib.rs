@@ -54,6 +54,10 @@ use sqlx::SqlitePool;
 use tokio::sync::broadcast;
 
 pub use resolver::ProviderManagerResolver;
+pub use argus_agent::turn_event_store::{
+    PendingAssistantTrace, PendingToolCallTrace, PendingToolStatus,
+};
+pub use argus_session::ThreadSnapshot;
 
 /// Default agent display name for the ArgusWing template.
 const DEFAULT_AGENT_DISPLAY_NAME: &str = "ArgusWing";
@@ -582,7 +586,7 @@ impl ArgusWing {
         &self,
         session_id: SessionId,
         thread_id: ThreadId,
-    ) -> Result<(Vec<argus_protocol::llm::ChatMessage>, u32, u32, u32)> {
+    ) -> Result<ThreadSnapshot> {
         self.session_manager
             .get_thread_snapshot(session_id, &thread_id)
             .await

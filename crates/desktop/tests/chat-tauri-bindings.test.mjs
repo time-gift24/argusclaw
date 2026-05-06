@@ -10,6 +10,8 @@ test("desktop tauri bindings expose chat session and thread snapshot wrappers", 
     tauriSource.match(/export interface ThreadPoolRuntimeSummary \{[\s\S]*?\n\}/)?.[0] ?? "";
 
   assert.match(tauriSource, /export interface ChatSessionPayload/);
+  assert.match(tauriSource, /export interface PendingAssistantPayload/);
+  assert.match(tauriSource, /export interface PendingToolCallPayload/);
   assert.match(tauriSource, /export interface ThreadSnapshotPayload/);
   assert.match(tauriSource, /export interface ThreadPoolSnapshot/);
   assert.match(tauriSource, /export interface ThreadPoolRuntimeSummary/);
@@ -23,6 +25,11 @@ test("desktop tauri bindings expose chat session and thread snapshot wrappers", 
   assert.doesNotMatch(tauriSource, /export interface ThreadPoolRuntimeRef/);
   assert.doesNotMatch(tauriSource, /runtime:\s*ThreadPoolRuntimeRef/);
   assert.match(tauriSource, /plan_item_count:\s*number/);
+  assert.match(tauriSource, /pending_assistant:\s*PendingAssistantPayload \| null/);
+  assert.match(tauriSource, /status:\s*"pending" \| "started" \| "completed"/);
+  assert.match(commandSource, /pub struct PendingAssistantPayload/);
+  assert.match(commandSource, /pub struct PendingToolCallPayload/);
+  assert.match(commandSource, /pub pending_assistant: Option<PendingAssistantPayload>/);
   assert.match(
     tauriSource,
     /createChatSession:\s*\(\s*templateId: number,\s*providerPreferenceId: number \| null,\s*model: string \| null,\s*\)\s*=>\s*invoke<ChatSessionPayload>\("create_chat_session"/,
