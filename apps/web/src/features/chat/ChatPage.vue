@@ -2,7 +2,13 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import type { PromptProps } from "@opentiny/tiny-robot";
 
-import { getApiClient, type AgentRecord, type ChatSessionSummary, type ChatThreadSummary, type LlmProviderRecord } from "@/lib/api";
+import {
+  getApiClient,
+  type AgentRecord,
+  type ChatSessionSummary,
+  type ChatThreadSummary,
+  type LlmProviderRecord,
+} from "@/lib/api";
 import { useChatSessions } from "./composables/useChatSessions";
 import { useChatThreadStream } from "./composables/useChatThreadStream";
 import { useChatComposer } from "./composables/useChatComposer";
@@ -59,6 +65,7 @@ const historyDialogOpen = ref(false);
 const hasActiveThread = computed(() => Boolean(chatSessions.activeSessionId.value && chatSessions.activeThreadId.value));
 const activeProvider = computed(() => providers.value.find((p) => p.id === Number(selectedProviderId.value)) ?? null);
 const selectedTemplate = computed(() => templates.value.find((t) => t.id === Number(selectedTemplateId.value)) ?? null);
+const defaultProvider = computed(() => providers.value.find((p) => p.is_default) ?? providers.value[0] ?? null);
 
 const robotMessages = computed(() => toRobotMessages({
   messages: chatThreadStream.messages.value,
@@ -104,11 +111,14 @@ async function loadInitialState() {
       else loadErrors.push(`智能体模板加载失败：${formatErrorMessage(templatesResult.reason)}`);
     }
 
-    const firstProvider = providers.value.find((p) => p.is_default) ?? providers.value[0] ?? null;
     const firstTemplate = templates.value[0] ?? null;
-    selectedProviderId.value = firstProvider?.id ?? null;
-    selectedModel.value = firstProvider?.default_model ?? "";
-    selectedTemplateId.value = firstTemplate?.id ?? null;
+    if (firstTemplate) {
+      applyTemplateSelection(firstTemplate.id);
+    } else {
+      selectedProviderId.value = defaultProvider.value?.id ?? null;
+      selectedModel.value = defaultProvider.value?.default_model ?? "";
+      selectedTemplateId.value = null;
+    }
 
     try {
       await chatSessions.loadInitialState();
@@ -192,20 +202,80 @@ function handleNewChat() {
   chatComposer.draftMessage.value = "";
   chatThreadStream.messages.value = [];
   chatThreadStream.resetRuntimeActivity();
+  chatComposer.actionMessage.value = "";
 }
 
-function handleTemplateChange(value: number | null) {
-  selectedTemplateId.value = value;
+async function handleTemplateChange(value: number | null) {
+  const previousSelection = {
+    templateId: selectedTemplateId.value,
+    providerId: selectedProviderId.value,
+    model: selectedModel.value,
+    sessionId: chatSessions.activeSessionId.value,
+    threadId: chatSessions.activeThreadId.value,
+    binding: chatSessions.activeBinding.value,
+    messages: chatThreadStream.messages.value,
+  };
+  const selection = applyTemplateSelection(value);
+  chatComposer.error.value = "";
+  chatComposer.actionMessage.value = "";
+
+  if (!selection.template || !hasActiveConversationMessages()) {
+    return;
+  }
+
+  try {
+    const api = getApiClient();
+    const payload = await api.createChatSessionWithThread!({
+      name: "新的 Web 对话",
+      template_id: selection.template.id,
+      provider_id: selection.providerId,
+      model: selection.model || null,
+    });
+    chatThreadStream.closeThreadEvents();
+    chatThreadStream.resetTransientState();
+    chatThreadStream.resetRuntimeActivity();
+    chatThreadStream.messages.value = [];
+    chatSessions.applyChatSessionPayload(payload);
+    chatSessions.sessionName.value = "新的 Web 对话";
+    await chatSessions.refreshSessions();
+    await chatSessions.refreshThreads(payload.session_id);
+    chatComposer.actionMessage.value = `已切换到「${selection.template.display_name}」，新的消息将在新会话中发送。`;
+  } catch (reason) {
+    selectedTemplateId.value = previousSelection.templateId;
+    selectedProviderId.value = previousSelection.providerId;
+    selectedModel.value = previousSelection.model;
+    chatSessions.activeSessionId.value = previousSelection.sessionId;
+    chatSessions.activeThreadId.value = previousSelection.threadId;
+    chatSessions.activeBinding.value = previousSelection.binding;
+    chatThreadStream.messages.value = previousSelection.messages;
+    chatComposer.error.value = formatErrorMessage(reason);
+    chatComposer.actionMessage.value = "";
+  }
 }
 
-function handleProviderChange(value: number | null) {
-  selectedProviderId.value = value;
-  const provider = providers.value.find((p) => p.id === value);
-  if (provider) selectedModel.value = provider.default_model;
+function applyTemplateSelection(templateId: number | null) {
+  selectedTemplateId.value = templateId;
+  const template = templates.value.find((candidate) => candidate.id === Number(templateId)) ?? null;
+  const templateProviderId = template?.provider_id ?? null;
+  const provider =
+    providers.value.find((candidate) => templateProviderId !== null && candidate.id === templateProviderId) ??
+    providers.value.find((candidate) => candidate.id === selectedProviderId.value) ??
+    defaultProvider.value;
+  selectedProviderId.value = provider?.id ?? null;
+  selectedModel.value = template?.model_id || provider?.default_model || "";
+  return {
+    template,
+    providerId: provider?.id ?? null,
+    model: selectedModel.value,
+  };
 }
 
-function handleModelChange(value: string) {
-  selectedModel.value = value;
+function hasActiveConversationMessages() {
+  return Boolean(
+    chatSessions.activeSessionId.value &&
+      chatSessions.activeThreadId.value &&
+      chatThreadStream.messages.value.length > 0,
+  );
 }
 
 function applyPrompt(_event: MouseEvent, item: PromptProps) {
@@ -219,6 +289,7 @@ function applyPrompt(_event: MouseEvent, item: PromptProps) {
       <div class="chat-main-column">
         <ChatConversationPanel
           :error="chatComposer.error.value"
+          :notice="chatComposer.actionMessage.value"
           :thread-loading="chatThreadStream.threadLoading.value"
           :robot-messages="robotMessages"
           :bubble-roles="bubbleRoles"
@@ -234,7 +305,7 @@ function applyPrompt(_event: MouseEvent, item: PromptProps) {
           v-model="chatComposer.draftMessage.value"
           :templates="templates"
           :providers="providers"
-          v-model:selected-template-id="selectedTemplateId"
+          :selected-template-id="selectedTemplateId"
           v-model:selected-provider-id="selectedProviderId"
           v-model:selected-model="selectedModel"
           :disabled="!chatComposer.canSendMessage.value"
@@ -247,6 +318,7 @@ function applyPrompt(_event: MouseEvent, item: PromptProps) {
           @cancel="chatComposer.cancelThread"
           @new-chat="handleNewChat"
           @open-history="historyDialogOpen = true"
+          @update:selected-template-id="handleTemplateChange"
         />
       </div>
     </div>

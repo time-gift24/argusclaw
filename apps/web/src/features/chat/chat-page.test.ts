@@ -240,6 +240,148 @@ describe("ChatPage", () => {
     expect(selects[2].props("modelValue")).toBe("glm-4.7");
   });
 
+  it("renders the provider and model configured by the selected template on initial load", async () => {
+    setApiClient(
+      makeApiClient({
+        listChatSessions: vi.fn().mockResolvedValue([]),
+        listTemplates: vi.fn().mockResolvedValue([
+          template({ id: 9, display_name: "代码助手", provider_id: 8, model_id: "kimi-k2" }),
+        ]),
+        listProviders: vi.fn().mockResolvedValue([
+          provider({ id: 7, display_name: "默认提供方", default_model: "glm-4.7", models: ["glm-4.7"] }),
+          provider({ id: 8, display_name: "模板提供方", default_model: "kimi-default", models: ["kimi-default", "kimi-k2"] }),
+        ]),
+      }),
+    );
+    const wrapper = mount(ChatPage);
+    await flushPromises();
+
+    const selects = wrapper.findAllComponents({ name: "OpenTinySelectStub" });
+    expect(selects[0].props("modelValue")).toBe("9");
+    expect(selects[1].props("modelValue")).toBe("8");
+    expect(selects[2].props("modelValue")).toBe("kimi-k2");
+  });
+
+  it("creates a new session and shows a notice when switching agents from an existing conversation", async () => {
+    const createChatSessionWithThread = vi.fn().mockResolvedValue({
+      session_key: "session-2",
+      session_id: "session-2",
+      template_id: 9,
+      thread_id: "thread-2",
+      effective_provider_id: 8,
+      effective_model: "kimi-k2",
+    } satisfies ChatSessionPayload);
+    const listChatSessions = vi
+      .fn()
+      .mockResolvedValueOnce([session({ id: "session-1", name: "旧会话" })])
+      .mockResolvedValueOnce([
+        session({ id: "session-2", name: "新的 Web 对话" }),
+        session({ id: "session-1", name: "旧会话" }),
+      ]);
+    const listChatThreads = vi.fn().mockImplementation(async (sessionId: string) => {
+      if (sessionId === "session-2") return [thread({ id: "thread-2", title: null })];
+      return [thread({ id: "thread-1", title: "旧线程" })];
+    });
+    const listChatMessages = vi.fn().mockImplementation(async (sessionId: string, threadId: string) => {
+      if (sessionId === "session-1" && threadId === "thread-1") {
+        return [message("user", "旧消息"), message("assistant", "旧回复")];
+      }
+      return [];
+    });
+
+    setApiClient(
+      makeApiClient({
+        listChatSessions,
+        listChatThreads,
+        listChatMessages,
+        createChatSessionWithThread,
+        listTemplates: vi.fn().mockResolvedValue([
+          template({ id: 3, display_name: "通用助手", provider_id: 7, model_id: "glm-4.7" }),
+          template({ id: 9, display_name: "代码助手", provider_id: 8, model_id: "kimi-k2" }),
+        ]),
+        listProviders: vi.fn().mockResolvedValue([
+          provider({ id: 7, default_model: "glm-4.7", models: ["glm-4.7"] }),
+          provider({ id: 8, default_model: "kimi-default", models: ["kimi-default", "kimi-k2"] }),
+        ]),
+      }),
+    );
+    const wrapper = mount(ChatPage);
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("旧回复");
+
+    await wrapper.findAll("select")[0]!.setValue("9");
+    await flushPromises();
+
+    expect(createChatSessionWithThread).toHaveBeenCalledWith({
+      name: "新的 Web 对话",
+      template_id: 9,
+      provider_id: 8,
+      model: "kimi-k2",
+    });
+    expect(wrapper.text()).toContain("已切换到「代码助手」，新的消息将在新会话中发送。");
+    expect(wrapper.text()).not.toContain("旧回复");
+  });
+
+  it("only syncs provider and model when switching agents from an empty draft", async () => {
+    const createChatSessionWithThread = vi.fn();
+    setApiClient(
+      makeApiClient({
+        listChatSessions: vi.fn().mockResolvedValue([]),
+        createChatSessionWithThread,
+        listTemplates: vi.fn().mockResolvedValue([
+          template({ id: 3, display_name: "通用助手", provider_id: 7, model_id: "glm-4.7" }),
+          template({ id: 9, display_name: "代码助手", provider_id: 8, model_id: "kimi-k2" }),
+        ]),
+        listProviders: vi.fn().mockResolvedValue([
+          provider({ id: 7, default_model: "glm-4.7", models: ["glm-4.7"] }),
+          provider({ id: 8, default_model: "kimi-default", models: ["kimi-default", "kimi-k2"] }),
+        ]),
+      }),
+    );
+    const wrapper = mount(ChatPage);
+    await flushPromises();
+
+    await wrapper.findAll("select")[0]!.setValue("9");
+    await flushPromises();
+
+    const selects = wrapper.findAllComponents({ name: "OpenTinySelectStub" });
+    expect(createChatSessionWithThread).not.toHaveBeenCalled();
+    expect(selects[1].props("modelValue")).toBe("8");
+    expect(selects[2].props("modelValue")).toBe("kimi-k2");
+  });
+
+  it("keeps the existing conversation when switching agents fails to create the new session", async () => {
+    setApiClient(
+      makeApiClient({
+        listChatSessions: vi.fn().mockResolvedValue([session({ id: "session-1", name: "旧会话" })]),
+        listChatThreads: vi.fn().mockResolvedValue([thread({ id: "thread-1", title: "旧线程" })]),
+        listChatMessages: vi.fn().mockResolvedValue([message("assistant", "旧回复")]),
+        createChatSessionWithThread: vi.fn().mockRejectedValue(new Error("create failed")),
+        listTemplates: vi.fn().mockResolvedValue([
+          template({ id: 3, display_name: "通用助手", provider_id: 7, model_id: "glm-4.7" }),
+          template({ id: 9, display_name: "代码助手", provider_id: 8, model_id: "kimi-k2" }),
+        ]),
+        listProviders: vi.fn().mockResolvedValue([
+          provider({ id: 7, default_model: "glm-4.7", models: ["glm-4.7"] }),
+          provider({ id: 8, default_model: "kimi-default", models: ["kimi-default", "kimi-k2"] }),
+        ]),
+      }),
+    );
+    const wrapper = mount(ChatPage);
+    await flushPromises();
+
+    await wrapper.findAll("select")[0]!.setValue("9");
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("旧回复");
+    expect(wrapper.text()).toContain("create failed");
+    const selects = wrapper.findAllComponents({ name: "OpenTinySelectStub" });
+    expect(selects[0].props("modelValue")).toBe("3");
+    expect(selects[1].props("modelValue")).toBe("7");
+    expect(selects[2].props("modelValue")).toBe("glm-4.7");
+  });
+
   it("opens history dialog when clicking the history button", async () => {
     setApiClient(
       makeApiClient({
