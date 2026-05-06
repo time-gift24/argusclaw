@@ -52,6 +52,11 @@ impl JobManager {
                 )
                 .await;
 
+            Self::record_completed_job_result_in_store(
+                &manager.tracked_jobs,
+                originating_thread_id,
+                result.clone(),
+            );
             manager
                 .forward_job_result_to_runtime(
                     originating_thread_id,
@@ -59,11 +64,6 @@ impl JobManager {
                     result.clone(),
                 )
                 .await;
-            Self::record_completed_job_result_in_store(
-                &manager.tracked_jobs,
-                originating_thread_id,
-                result.clone(),
-            );
             Self::broadcast_job_result(&pipe_tx_clone, originating_thread_id, result);
         });
 

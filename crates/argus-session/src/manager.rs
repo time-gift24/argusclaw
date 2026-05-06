@@ -15,9 +15,9 @@ use argus_job::{JobLookup, JobManager};
 use argus_protocol::{
     llm::{ChatMessage, CompletionRequest, CompletionResponse, LlmError, LlmEventStream},
     AgentId, ArgusError, LlmProvider, LlmProviderId, MailboxMessage, MailboxMessageType,
-    McpToolResolver, ProviderId, Result, SessionId, ThreadEvent, ThreadId, ThreadMessage,
-    ThreadPoolEventReason, ThreadPoolRuntimeSummary, ThreadPoolSnapshot, ThreadPoolState,
-    ThreadRuntimeStatus, ToolError, UserId,
+    McpToolResolver, ProviderId, Result, SessionId, ThreadEvent, ThreadId, ThreadJobResult,
+    ThreadMessage, ThreadPoolEventReason, ThreadPoolRuntimeSummary, ThreadPoolSnapshot,
+    ThreadPoolState, ThreadRuntimeStatus, ToolError, UserId,
 };
 use argus_repository::traits::{LlmProviderRepository, SessionRepository, ThreadRepository};
 use argus_template::TemplateManager;
@@ -214,26 +214,6 @@ impl SessionSchedulerBackend {
                 agent_description: result.agent_description,
             }),
         }
-    }
-
-    async fn claim_queued_runtime_result(
-        &self,
-        thread_id: ThreadId,
-        job_id: &str,
-    ) -> std::result::Result<(), ToolError> {
-        if self
-            .job_manager
-            .claim_delivered_job_result(thread_id, job_id)
-            .is_none()
-        {
-            tracing::debug!(
-                job_id,
-                thread_id = %thread_id,
-                "claim delivered job result missed because the mailbox item was already absent"
-            );
-        }
-
-        Ok(())
     }
 
     async fn source_label(&self, thread_id: ThreadId) -> String {
@@ -567,20 +547,13 @@ impl SchedulerBackend for SessionSchedulerBackend {
     ) -> std::result::Result<SchedulerJobLookup, ToolError> {
         let lookup = self
             .job_manager
-            .get_job_result_status_persisted(request.thread_id, &request.job_id, false)
+            .get_job_result_status_persisted(
+                request.thread_id,
+                &request.job_id,
+                request.consume,
+            )
             .await
             .map_err(|error| Self::scheduler_error(error.to_string()))?;
-
-        if request.consume && matches!(lookup, JobLookup::Completed(_)) {
-            self.claim_queued_runtime_result(request.thread_id, &request.job_id)
-                .await?;
-            let consumed_lookup = self
-                .job_manager
-                .get_job_result_status_persisted(request.thread_id, &request.job_id, true)
-                .await
-                .map_err(|error| Self::scheduler_error(error.to_string()))?;
-            return Ok(Self::map_job_lookup(consumed_lookup));
-        }
 
         Ok(Self::map_job_lookup(lookup))
     }
@@ -639,6 +612,7 @@ pub struct SessionManager {
     tool_manager: Arc<ToolManager>,
     trace_dir: PathBuf,
     thread_pool: Arc<ThreadPool>,
+    job_manager: Arc<JobManager>,
 }
 
 impl SessionManager {
@@ -670,6 +644,7 @@ impl SessionManager {
             tool_manager: Arc::clone(&tool_manager),
             trace_dir,
             thread_pool,
+            job_manager: Arc::clone(&job_manager),
         };
         let scheduler_backend = Arc::new(SessionSchedulerBackend::new(
             Arc::clone(&manager.template_manager),
@@ -865,6 +840,13 @@ impl SessionManager {
         let Some(session_id) = self.session_id_for_thread(&thread_id) else {
             return Err(ArgusError::ThreadNotFound(thread_id.inner().to_string()));
         };
+        let message = match self
+            .resolve_chat_mailbox_message(thread_id, message)
+            .await?
+        {
+            Some(message) => message,
+            None => return Ok(()),
+        };
         let session = self.load(session_id).await?;
         let thread = self
             .ensure_thread_runtime_with_mcp(session_id, thread_id)
@@ -882,6 +864,64 @@ impl SessionManager {
             ThreadEvent::MailboxMessageQueued { thread_id, message },
         );
         Ok(())
+    }
+
+    async fn resolve_chat_mailbox_message(
+        &self,
+        thread_id: ThreadId,
+        message: MailboxMessage,
+    ) -> Result<Option<MailboxMessage>> {
+        let Some(job_id) = message.job_id().map(str::to_string) else {
+            return Ok(Some(message));
+        };
+
+        let lookup = self
+            .job_manager
+            .get_job_result_status_persisted(thread_id, &job_id, true)
+            .await
+            .map_err(|error| ArgusError::LlmError {
+                reason: error.to_string(),
+            })?;
+
+        match lookup {
+            JobLookup::Completed(result) => {
+                Ok(Some(Self::mailbox_message_from_job_result(message, result)))
+            }
+            JobLookup::Consumed(_) => Ok(None),
+            JobLookup::Pending | JobLookup::NotFound => {
+                tracing::debug!(
+                    job_id,
+                    thread_id = %thread_id,
+                    "job-result mailbox notification did not resolve to a completed job"
+                );
+                Ok(None)
+            }
+        }
+    }
+
+    fn mailbox_message_from_job_result(
+        notification: MailboxMessage,
+        result: ThreadJobResult,
+    ) -> MailboxMessage {
+        MailboxMessage {
+            id: notification.id,
+            from_thread_id: notification.from_thread_id,
+            to_thread_id: notification.to_thread_id,
+            from_label: result.agent_display_name.clone(),
+            message_type: MailboxMessageType::JobResult {
+                job_id: result.job_id.clone(),
+                success: result.success,
+                cancelled: result.cancelled,
+                token_usage: result.token_usage.clone(),
+                agent_id: result.agent_id,
+                agent_display_name: result.agent_display_name.clone(),
+                agent_description: result.agent_description.clone(),
+            },
+            text: result.message,
+            timestamp: notification.timestamp,
+            read: false,
+            summary: notification.summary,
+        }
     }
 
     fn loaded_chat_thread(&self, thread_id: &ThreadId) -> Option<ThreadHandle> {
@@ -2292,7 +2332,7 @@ mod tests {
     };
     use argus_protocol::{
         AgentId, AgentRecord, MailboxMessage, MailboxMessageType, McpToolResolver, ProviderId,
-        ResolvedMcpTools, SessionId, ThinkingConfig, ThreadEvent, ThreadId, ThreadPoolEventReason,
+        ResolvedMcpTools, SessionId, ThinkingConfig, ThreadEvent, ThreadId, ThreadJobResult,
         ThreadRuntimeStatus, TokenUsage, ToolError,
     };
     use argus_repository::migrate;
@@ -2543,33 +2583,24 @@ mod tests {
         .expect("runtime should start the queued turn");
     }
 
-    async fn wait_until_runtime_status(
-        manager: &SessionManager,
-        thread_id: ThreadId,
-        expected_status: argus_protocol::ThreadRuntimeStatus,
-    ) {
-        timeout(Duration::from_secs(5), async {
-            loop {
-                let Some(summary) = manager.chat_runtime_summary(&thread_id) else {
-                    panic!(
-                        "thread {thread_id} should stay registered while waiting for runtime status"
-                    );
-                };
-                if summary.status == expected_status {
-                    break;
-                }
-                sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("runtime should reach the expected thread-pool status");
-    }
-
     fn usage(total_tokens: u32) -> TokenUsage {
         TokenUsage {
             input_tokens: total_tokens.saturating_sub(1),
             output_tokens: 1,
             total_tokens,
+        }
+    }
+
+    fn sample_thread_job_result(job_id: impl Into<String>, agent_id: AgentId) -> ThreadJobResult {
+        ThreadJobResult {
+            job_id: job_id.into(),
+            success: true,
+            cancelled: false,
+            message: "finished work".to_string(),
+            token_usage: None,
+            agent_id,
+            agent_display_name: "Routing Test Agent".to_string(),
+            agent_description: "Used to verify session mailbox routing".to_string(),
         }
     }
 
@@ -2903,6 +2934,10 @@ mod tests {
             .subscribe(harness.session_id, &harness.thread_id)
             .await
             .expect("chat thread should expose an event receiver");
+        harness.job_manager.record_completed_job_result(
+            harness.thread_id,
+            sample_thread_job_result("job-shared-metrics", harness.agent_id),
+        );
         let message = MailboxMessage {
             id: Uuid::new_v4().to_string(),
             from_thread_id: ThreadId::new(),
@@ -2955,17 +2990,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn consume_job_result_clears_evicted_runtime_inbox_copy() {
+    async fn consumed_job_result_mailbox_notification_does_not_wake_thread() {
         let harness = test_session_manager_harness_with_provider(Arc::new(FixedProvider {
             model_name: "routing-test".to_string(),
         }))
         .await;
-        let _session = harness
-            .manager
-            .load(harness.session_id)
+        let job_id = "job-consumed-skip".to_string();
+        harness.job_manager.record_completed_job_result(
+            harness.thread_id,
+            sample_thread_job_result(job_id.clone(), harness.agent_id),
+        );
+        let backend = SessionSchedulerBackend::new(
+            Arc::clone(&harness.template_manager),
+            Arc::clone(&harness.job_manager),
+            Arc::clone(&harness.manager.sessions),
+            Arc::clone(&harness.manager.thread_pool),
+            Arc::clone(&harness.manager.thread_sessions),
+            harness.manager.chat_delivery_handler(),
+        );
+        let lookup = backend
+            .get_job_result(SchedulerLookupRequest {
+                thread_id: harness.thread_id,
+                job_id: job_id.clone(),
+                consume: true,
+            })
             .await
-            .expect("session should load");
-        let job_id = "job-evicted-claim".to_string();
+            .expect("consume should return the completed job result");
+        assert!(
+            matches!(lookup, argus_tool::SchedulerJobLookup::Completed(_)),
+            "first consume should claim the completed job result"
+        );
+
         let message = MailboxMessage {
             id: Uuid::new_v4().to_string(),
             from_thread_id: ThreadId::new(),
@@ -2990,49 +3045,16 @@ mod tests {
             .manager
             .deliver_chat_mailbox_message(harness.thread_id, message)
             .await
-            .expect("thread pool should enqueue the job-result mailbox message");
+            .expect("consumed job-result notification should be ignored");
 
-        wait_until_runtime_status(
-            &harness.manager,
-            harness.thread_id,
-            argus_protocol::ThreadRuntimeStatus::Cooling,
-        )
-        .await;
-
-        harness
-            .manager
-            .thread_pool
-            .evict_runtime(&harness.thread_id, ThreadPoolEventReason::CoolingExpired)
-            .await
-            .expect("chat runtime should evict once cooling");
-        assert!(
+        assert_eq!(
             harness
                 .manager
-                .thread_pool
-                .loaded_thread(&harness.thread_id)
-                .is_none(),
-            "evicted runtime should no longer be loaded"
-        );
-
-        let backend = SessionSchedulerBackend::new(
-            Arc::clone(&harness.template_manager),
-            Arc::clone(&harness.job_manager),
-            Arc::clone(&harness.manager.sessions),
-            Arc::clone(&harness.manager.thread_pool),
-            Arc::clone(&harness.manager.thread_sessions),
-            harness.manager.chat_delivery_handler(),
-        );
-        backend
-            .claim_queued_runtime_result(harness.thread_id, &job_id)
-            .await
-            .expect("consume path should clear queued job results even after eviction");
-
-        assert!(
-            harness
-                .job_manager
-                .claim_delivered_job_result(harness.thread_id, &job_id)
-                .is_none(),
-            "job-result inbox copy should already be claimed from the evicted runtime entry"
+                .chat_runtime_summary(&harness.thread_id)
+                .expect("thread runtime should stay registered")
+                .status,
+            argus_protocol::ThreadRuntimeStatus::Inactive,
+            "consumed job-result notifications should not wake the chat runtime into work"
         );
     }
 

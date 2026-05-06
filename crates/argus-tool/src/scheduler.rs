@@ -197,7 +197,7 @@ fn scheduler_get_result_variant() -> serde_json::Value {
         "properties": {
             "action": {
                 "const": "get_job_result",
-                "description": "查询子代理后台任务结果；dispatch_job 返回 job_id 后用此操作检查完成状态。如果任务仍在运行，应主动调用 sleep 后再查询，避免连续空转查询。"
+                "description": "查询子代理后台任务结果；dispatch_job 返回 job_id 后用此操作检查完成状态。job 结果和 mailbox 唤起共享同一条消费语义：consume=true 会认领结果，避免后续重复回放。如果任务仍在运行，不要无脑 sleep 轮询；应优先完成当前 turn 中可并行推进的工作，当前工作完成后再等待 job 结果唤起。"
             },
             "job_id": {
                 "type": "string",
@@ -242,7 +242,7 @@ fn scheduler_send_message_variant() -> serde_json::Value {
 fn scheduler_definition() -> ToolDefinition {
     ToolDefinition {
         name: "scheduler".to_string(),
-        description: "用于子代理编排和线程协作的 scheduler 工具。先用 list_subagents 查看可派发的子代理及 agent_id；用 dispatch_job 将明确的后台任务派发给子代理，并在 prompt 中写清目标、上下文、产出格式和完成标准，派发后会返回 job_id；用 get_job_result 根据 job_id 查询或消费子代理结果。等待子代理任务完成时，不要高频连续查询；应在 get_job_result 仍未完成后主动调用 sleep，再继续查询，推荐等待节奏为 10000ms -> 20000ms -> 30000ms，之后仍未完成则继续按 30000ms 间隔等待。用 send_message 向父线程、子任务或匹配目标补充上下文、催办进展、请求澄清或同步新信息。".to_string(),
+        description: "用于子代理编排和线程协作的 scheduler 工具。先用 list_subagents 查看可派发的子代理及 agent_id；用 dispatch_job 将明确的后台任务派发给子代理，并在 prompt 中写清目标、上下文、产出格式和完成标准，派发后会返回 job_id；用 get_job_result 根据 job_id 查询或消费子代理结果。job 结果会通过 mailbox 唤起父线程；如果主动 get_job_result 且 consume=true，同一结果会被认领，避免后续重复回放。等待子代理任务时，不要无脑 sleep 轮询；应优先完成当前 turn 中可并行推进的工作，当前工作完成后再等待 job 结果唤起。用 send_message 向父线程、子任务或匹配目标补充上下文、催办进展、请求澄清或同步新信息。".to_string(),
         parameters: serde_json::json!({
             "oneOf": [
                 scheduler_dispatch_variant(),
@@ -559,9 +559,9 @@ mod tests {
             "send_message",
             "job_id",
             "sleep",
-            "10000ms",
-            "20000ms",
-            "30000ms",
+            "并行推进",
+            "mailbox",
+            "consume=true",
         ] {
             assert!(
                 definition.description.contains(expected),
@@ -608,7 +608,7 @@ mod tests {
         assert!(
             get_result_variant["properties"]["action"]["description"]
                 .as_str()
-                .is_some_and(|desc| desc.contains("sleep") && desc.contains("空转查询"))
+                .is_some_and(|desc| desc.contains("consume=true") && desc.contains("重复回放"))
         );
         assert!(
             send_message_variant["properties"]["to"]["description"]
