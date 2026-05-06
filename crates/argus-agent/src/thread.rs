@@ -1228,8 +1228,17 @@ impl Thread {
             .as_ref()
             .ok()
             .map(|record| record.token_usage.clone());
+        let failed_error = result
+            .as_ref()
+            .err()
+            .filter(|error| {
+                !matches!(
+                    error,
+                    ThreadError::TurnFailed(crate::TurnError::Cancelled)
+                )
+            })
+            .map(ToString::to_string);
 
-        self.broadcast_turn_terminal_event(settled_turn_number, &result);
         match &result {
             Ok(_) => {}
             Err(ThreadError::TurnFailed(crate::TurnError::Cancelled)) => {}
@@ -1270,10 +1279,19 @@ impl Thread {
 
         let append_settled_process_event = !committed || committed_trace_persisted;
 
-        self.broadcast_to_self(ThreadEvent::TurnSettled {
-            thread_id: thread_id.clone(),
-            turn_number: settled_turn_number,
-        });
+        if let Some(token_usage) = completed_usage.clone() {
+            self.broadcast_to_self(ThreadEvent::TurnCompleted {
+                thread_id: self.id.to_string(),
+                turn_number: settled_turn_number,
+                token_usage,
+            });
+        } else if let Some(error) = failed_error {
+            self.broadcast_to_self(ThreadEvent::TurnFailed {
+                thread_id: self.id.to_string(),
+                turn_number: settled_turn_number,
+                error,
+            });
+        }
         if append_settled_process_event {
             Self::append_terminal_turn_event(
                 turn_event_writer.as_ref(),
@@ -1282,6 +1300,10 @@ impl Thread {
             )
             .await;
         }
+        self.broadcast_to_self(ThreadEvent::TurnSettled {
+            thread_id: thread_id.clone(),
+            turn_number: settled_turn_number,
+        });
 
         if shutdown_requested {
             self.reset_runtime_loop_state();
@@ -1353,7 +1375,6 @@ impl Thread {
             Err(error) => Err(Self::map_turn_join_error(error)),
         };
 
-        self.broadcast_turn_terminal_event(turn_number, &result);
         match &result {
             Ok(_) => {}
             Err(ThreadError::TurnFailed(crate::TurnError::Cancelled)) => {}
@@ -1379,10 +1400,7 @@ impl Thread {
                     )
                     .await;
                 }
-                self.broadcast_to_self(ThreadEvent::TurnSettled {
-                    thread_id: thread_id_for_events.clone(),
-                    turn_number,
-                });
+                self.broadcast_turn_terminal_event(turn_number, &Ok(record.clone()));
                 if committed_trace_persisted {
                     Self::append_terminal_turn_event(
                         turn_event_writer.as_ref(),
@@ -1391,6 +1409,10 @@ impl Thread {
                     )
                     .await;
                 }
+                self.broadcast_to_self(ThreadEvent::TurnSettled {
+                    thread_id: thread_id_for_events.clone(),
+                    turn_number,
+                });
                 self.broadcast_to_self(ThreadEvent::Idle {
                     thread_id: thread_id_for_events.clone(),
                 });
@@ -1398,16 +1420,16 @@ impl Thread {
             }
             Err(ThreadError::TurnFailed(crate::TurnError::Cancelled)) => {
                 self.finish_turn(Err(ThreadError::TurnFailed(crate::TurnError::Cancelled)))?;
-                self.broadcast_to_self(ThreadEvent::TurnSettled {
-                    thread_id: thread_id_for_events.clone(),
-                    turn_number,
-                });
                 Self::append_terminal_turn_event(
                     turn_event_writer.as_ref(),
                     turn_number,
                     TurnTraceEventPayload::turn_settled(),
                 )
                 .await;
+                self.broadcast_to_self(ThreadEvent::TurnSettled {
+                    thread_id: thread_id_for_events.clone(),
+                    turn_number,
+                });
                 self.broadcast_to_self(ThreadEvent::Idle {
                     thread_id: thread_id_for_events.clone(),
                 });
@@ -1416,9 +1438,10 @@ impl Thread {
             Err(error) => match self.finish_turn(Err(error)) {
                 Ok(()) => unreachable!("only cancelled turns should settle without committing"),
                 Err(error) => {
-                    self.broadcast_to_self(ThreadEvent::TurnSettled {
+                    self.broadcast_to_self(ThreadEvent::TurnFailed {
                         thread_id: thread_id_for_events.clone(),
                         turn_number,
+                        error: error.to_string(),
                     });
                     Self::append_terminal_turn_event(
                         turn_event_writer.as_ref(),
@@ -1426,6 +1449,10 @@ impl Thread {
                         TurnTraceEventPayload::turn_settled(),
                     )
                     .await;
+                    self.broadcast_to_self(ThreadEvent::TurnSettled {
+                        thread_id: thread_id_for_events.clone(),
+                        turn_number,
+                    });
                     self.broadcast_to_self(ThreadEvent::Idle {
                         thread_id: thread_id_for_events,
                     });
