@@ -12,29 +12,25 @@ fn main() {
 
     let agents_dir = workspace_root.join("agents");
 
-    if !agents_dir.exists() {
-        panic!("agents directory not found at {}", agents_dir.display());
-    }
-
     // Watch the agents directory for changes
     println!("cargo:rerun-if-changed={}", agents_dir.display());
 
     // Find all .toml files
-    let toml_files: Vec<_> = fs::read_dir(&agents_dir)
-        .expect("Failed to read agents directory")
-        .filter_map(|entry| entry.ok())
-        .filter(|entry| {
-            entry
-                .path()
-                .extension()
-                .map(|ext| ext == "toml")
-                .unwrap_or(false)
-        })
-        .collect();
-
-    if toml_files.is_empty() {
-        panic!("No .toml files found in {}", agents_dir.display());
-    }
+    let toml_files: Vec<_> = if agents_dir.exists() {
+        fs::read_dir(&agents_dir)
+            .expect("Failed to read agents directory")
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                entry
+                    .path()
+                    .extension()
+                    .map(|ext| ext == "toml")
+                    .unwrap_or(false)
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
 
     // Watch each individual TOML file
     for entry in &toml_files {

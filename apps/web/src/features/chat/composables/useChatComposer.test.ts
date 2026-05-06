@@ -216,4 +216,21 @@ describe("useChatComposer", () => {
     await sendPromise;
     expect(sendChatMessage).toHaveBeenCalledWith("session-9", "thread-9", "先连上流，再发消息");
   });
+
+  it("clears local streaming state after requesting cancellation", async () => {
+    const cancelChatThread = vi.fn().mockResolvedValue({ accepted: true });
+    const { composer, streaming, clearPendingAssistant } = createComposer({
+      apiOverrides: {
+        cancelChatThread,
+      },
+    });
+    streaming.value = true;
+
+    await composer.cancelThread();
+
+    expect(cancelChatThread).toHaveBeenCalledWith("session-1", "thread-1");
+    expect(streaming.value).toBe(false);
+    expect(clearPendingAssistant).toHaveBeenCalled();
+    expect(composer.actionMessage.value).toBe("已请求停止当前对话。");
+  });
 });

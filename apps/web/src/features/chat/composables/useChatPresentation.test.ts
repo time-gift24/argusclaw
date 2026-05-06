@@ -265,6 +265,39 @@ describe("useChatPresentation", () => {
     ]);
   });
 
+  it("keeps background jobs distinct from normal tool calls in the pending bubble", () => {
+    const messages = toRobotMessages({
+      messages: [],
+      streaming: true,
+      hasActiveThread: true,
+      pendingAssistantContent: "",
+      pendingAssistantReasoning: "",
+      runtimeActivities: [
+        {
+          id: "job-42",
+          kind: "job",
+          name: "后台 Job job-42",
+          status: "running",
+          argumentsPreview: "正在执行后台任务",
+          resultPreview: "",
+        },
+      ],
+    });
+
+    expect(messages[0].content).toEqual([
+      {
+        type: "argus-tool-summary",
+        toolDetails: [
+          expect.objectContaining({
+            id: "job-42",
+            kind: "job",
+            name: "后台 Job job-42",
+          }),
+        ],
+      },
+    ]);
+  });
+
   it("maps starter prompt ids to Chinese draft messages", () => {
     expect(draftMessageForPrompt("provider")).toContain("当前默认模型");
     expect(draftMessageForPrompt("mcp")).toContain("当前 MCP 服务");

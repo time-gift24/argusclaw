@@ -76,4 +76,30 @@ describe("ChatMessageStage", () => {
     expect(wrapper.find(".message-stage--flat").exists()).toBe(true);
     expect(wrapper.find(".message-stage--centered-assistant").exists()).toBe(true);
   });
+
+  it("configures TinyRobot markdown rendering for richer assistant output", () => {
+    const wrapper = mount(ChatMessageStage, {
+      props: {
+        loading: false,
+        messages: [
+          {
+            role: "assistant",
+            content: "| 列 A | 列 B |\n| --- | --- |\n| 1 | 2 |",
+            reasoning_content: undefined,
+          },
+        ],
+        bubbleRoles: {},
+        starterPrompts: [],
+      },
+    });
+
+    const provider = wrapper.get(".tr-bubble-provider-stub");
+
+    expect(provider.attributes("data-fallback-content-renderer")).toBe("set");
+    expect(JSON.parse(provider.attributes("data-md-config") ?? "{}")).toMatchObject({
+      html: false,
+      linkify: true,
+      typographer: true,
+    });
+  });
 });

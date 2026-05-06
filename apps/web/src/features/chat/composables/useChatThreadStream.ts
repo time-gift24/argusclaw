@@ -11,6 +11,7 @@ export type ToolActivityStatus = "running" | "success" | "error";
 
 export interface ToolActivity {
   id: string;
+  kind?: "job" | "tool";
   name: string;
   status: ToolActivityStatus;
   argumentsPreview: string;
@@ -109,6 +110,7 @@ export function useChatThreadStream(options: UseChatThreadStreamOptions) {
         streaming.value = true;
         upsertToolActivity({
           id: payload.tool_call_id,
+          kind: "tool",
           name: payload.tool_name,
           status: "running",
           argumentsPreview: previewValue(payload.arguments),
@@ -121,10 +123,50 @@ export function useChatThreadStream(options: UseChatThreadStreamOptions) {
       case "tool_completed":
         upsertToolActivity({
           id: payload.tool_call_id,
+          kind: "tool",
           name: payload.tool_name,
           status: payload.is_error ? "error" : "success",
           argumentsPreview: "",
           resultPreview: previewValue(payload.result),
+        });
+        break;
+      case "job_dispatched":
+        streaming.value = true;
+        upsertJobActivity(payload.job_id, {
+          status: "running",
+          argumentsPreview: typeof payload.prompt === "string" ? payload.prompt : "后台任务已派发",
+          resultPreview: "",
+        });
+        break;
+      case "job_runtime_queued":
+        streaming.value = true;
+        upsertJobActivity(payload.job_id, {
+          status: "running",
+          argumentsPreview: "等待后台 Job runtime",
+          resultPreview: "",
+        });
+        break;
+      case "job_runtime_started":
+        streaming.value = true;
+        upsertJobActivity(payload.job_id, {
+          status: "running",
+          argumentsPreview: "后台 Job runtime 已启动",
+          resultPreview: "",
+        });
+        break;
+      case "job_runtime_cooling":
+      case "job_runtime_evicted":
+        upsertJobActivity(payload.job_id, {
+          status: "success",
+          argumentsPreview: "",
+          resultPreview: "后台 Job runtime 已结束",
+        });
+        break;
+      case "job_result":
+        upsertJobActivity(payload.job_id, {
+          status: payload.success && !payload.cancelled ? "success" : "error",
+          argumentsPreview: "",
+          resultPreview: typeof payload.message === "string" ? payload.message : previewValue(payload),
         });
         break;
       case "turn_failed":
@@ -146,7 +188,7 @@ export function useChatThreadStream(options: UseChatThreadStreamOptions) {
   function upsertToolActivity(nextActivity: ToolActivity) {
     const existingIndex = runtimeActivities.value.findIndex((item) => item.id === nextActivity.id);
     if (existingIndex === -1) {
-      runtimeActivities.value = [nextActivity, ...runtimeActivities.value];
+      runtimeActivities.value = [...runtimeActivities.value, nextActivity];
       return;
     }
     const existing = runtimeActivities.value[existingIndex];
@@ -160,6 +202,19 @@ export function useChatThreadStream(options: UseChatThreadStreamOptions) {
           }
         : item,
     );
+  }
+
+  function upsertJobActivity(
+    jobId: unknown,
+    update: Pick<ToolActivity, "status" | "argumentsPreview" | "resultPreview">,
+  ) {
+    const normalizedJobId = typeof jobId === "string" && jobId.trim() ? jobId.trim() : "unknown";
+    upsertToolActivity({
+      id: normalizedJobId,
+      kind: "job",
+      name: `后台 Job ${normalizedJobId}`,
+      ...update,
+    });
   }
 
   function resetRuntimeActivity() {

@@ -4,6 +4,7 @@
 .vendor/
 .playwright-mcp/
 /tmp/
+/.tmp
 **/tmp/
 *.tsbuildinfo
 # Auto-generated files

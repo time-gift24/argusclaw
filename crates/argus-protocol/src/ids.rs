@@ -74,6 +74,39 @@ impl std::fmt::Display for ThreadId {
     }
 }
 
+/// Internal chat user ID - UUID-backed persisted owner identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct UserId(pub Uuid);
+
+impl UserId {
+    /// Create a new internal UserId using UUIDv7 (time-sortable).
+    pub fn new() -> Self {
+        Self(Uuid::now_v7())
+    }
+
+    /// Parse a UserId from a string representation.
+    pub fn parse(s: &str) -> Result<Self, uuid::Error> {
+        Ok(Self(Uuid::parse_str(s)?))
+    }
+
+    /// Get the inner UUID value.
+    pub fn inner(&self) -> &Uuid {
+        &self.0
+    }
+}
+
+impl Default for UserId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Display for UserId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 /// Agent ID - INTEGER auto-increment from database
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, JsonSchema)]
 pub struct AgentId(pub i64);
@@ -179,7 +212,15 @@ impl std::fmt::Display for ProviderId {
 
 #[cfg(test)]
 mod tests {
-    use super::AgentId;
+    use super::{AgentId, UserId};
+
+    #[test]
+    fn user_id_round_trips_as_uuid_string() {
+        let user_id = UserId::new();
+        let parsed = UserId::parse(&user_id.to_string()).expect("user id should parse");
+        assert_eq!(parsed, user_id);
+        assert_eq!(parsed.inner(), user_id.inner());
+    }
 
     #[test]
     fn agent_id_deserializes_from_integer() {

@@ -89,6 +89,7 @@ ignore = [
     { id = "RUSTSEC-2024-0412", reason = "tauri 2.0 间接依赖" },
     { id = "RUSTSEC-2024-0413", reason = "tauri 2.0 间接依赖" },
     { id = "RUSTSEC-2025-0057", reason = "tauri 2.0 间接依赖" },
+    { id = "RUSTSEC-2024-0436", reason = "thirtyfour 间接依赖 paste，暂无安全替代升级" },
 ]
 # If this is true, then cargo deny will use the git executable to fetch advisory database.
 # If this is false, then it uses a built-in git library.
@@ -117,6 +118,7 @@ allow = [
     "CC0-1.0",
     "Unicode-3.0",
     "CDLA-Permissive-2.0", # webpki-roots (sqlx 依赖)
+    "bzip2-1.0.6", # libbz2-rs-sys via zip
 ]
 # The confidence threshold for detecting a license from license text.
 # The higher the value, the more closely the license text must be to the

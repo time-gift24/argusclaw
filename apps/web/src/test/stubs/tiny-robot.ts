@@ -106,6 +106,10 @@ export const TrBubbleProvider = defineComponent({
       type: [Object, Function, String] as PropType<unknown>,
       default: null,
     },
+    store: {
+      type: Object as PropType<Record<string, unknown>>,
+      default: () => ({}),
+    },
   },
   setup(props, { slots }) {
     provide(BUBBLE_MATCHES_KEY, props.contentRendererMatches);
@@ -117,6 +121,7 @@ export const TrBubbleProvider = defineComponent({
           class: "tr-bubble-provider-stub",
           "data-fallback-content-renderer":
             props.fallbackContentRenderer == null ? "unset" : "set",
+          "data-md-config": JSON.stringify(props.store.mdConfig ?? null),
         },
         slots.default?.(),
       );
@@ -176,9 +181,9 @@ export const TrSender = defineComponent({
           {
             disabled: props.disabled,
             type: "button",
-            onClick: () => emit("submit", props.modelValue),
+            onClick: () => (props.loading ? emit("cancel") : emit("submit", props.modelValue)),
           },
-          props.loading ? "发送中" : "发送",
+          props.loading ? "停止" : "发送",
         ),
       ]);
   },

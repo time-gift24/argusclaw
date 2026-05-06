@@ -16,6 +16,13 @@ export interface HealthResponse {
   status: string;
 }
 
+export interface CurrentUserResponse {
+  id: string | null;
+  external_id: string;
+  display_name: string | null;
+  is_admin: boolean;
+}
+
 export interface BootstrapResponse {
   instance_name: string;
   provider_count: number;
@@ -24,6 +31,7 @@ export interface BootstrapResponse {
   default_provider_id: number | null;
   default_template_id: number | null;
   mcp_ready_count: number;
+  current_user?: CurrentUserResponse;
 }
 
 export interface LlmProviderRecord {
@@ -69,6 +77,11 @@ export interface AgentRecord {
 export interface AgentMcpBinding {
   server_id: number;
   allowed_tools?: string[] | null;
+}
+
+export interface ChatOptionsResponse {
+  providers: LlmProviderRecord[];
+  templates: AgentRecord[];
 }
 
 export type McpTransportConfig =
@@ -449,6 +462,7 @@ export interface ApiClient {
   deleteProvider?(providerId: number): Promise<DeleteResponse>;
   testProvider?(providerId: number, model?: string): Promise<ProviderTestResult>;
   testProviderDraft?(input: LlmProviderRecord): Promise<ProviderTestResult>;
+  getChatOptions?(): Promise<ChatOptionsResponse>;
   listTemplates(): Promise<AgentRecord[]>;
   saveTemplate(input: AgentRecord): Promise<AgentRecord>;
   deleteTemplate?(templateId: number): Promise<DeleteResponse>;
@@ -513,7 +527,7 @@ class HttpApiClient implements ApiClient {
   }
 
   subscribeRuntimeState(handlers: RuntimeEventHandlers): RuntimeEventSubscription {
-    const events = new EventSource(`${this.baseUrl}/runtime/events`);
+    const events = new EventSource(`${this.baseUrl}/runtime/events`, { withCredentials: true });
 
     events.addEventListener("runtime.snapshot", (event) => {
       try {
@@ -535,6 +549,10 @@ class HttpApiClient implements ApiClient {
 
   listProviders(): Promise<LlmProviderRecord[]> {
     return this.request("/providers");
+  }
+
+  getChatOptions(): Promise<ChatOptionsResponse> {
+    return this.request("/chat/options");
   }
 
   async saveProvider(input: SaveProviderRequest): Promise<LlmProviderRecord> {
@@ -830,7 +848,7 @@ class HttpApiClient implements ApiClient {
     threadId: string,
     handlers: ChatThreadEventHandlers,
   ): RuntimeEventSubscription {
-    const events = new EventSource(`${this.baseUrl}/chat/sessions/${sessionId}/threads/${threadId}/events`);
+    const events = new EventSource(`${this.baseUrl}/chat/sessions/${sessionId}/threads/${threadId}/events`, { withCredentials: true });
 
     events.onopen = () => {
       handlers.onOpen?.();
@@ -857,12 +875,27 @@ class HttpApiClient implements ApiClient {
   }
 
   private async request<T>(path: string, init?: RequestInit): Promise<T> {
-    const response = await fetch(`${this.baseUrl}${path}`, init);
+    const requestInit: RequestInit = {
+      ...init,
+      credentials: init?.credentials ?? "same-origin",
+    };
+    const response = await fetch(`${this.baseUrl}${path}`, requestInit);
     if (!response.ok) {
+      if (response.status === 401) {
+        this.redirectToLogin();
+      }
       throw new Error(await this.readErrorMessage(response));
     }
 
     return (await response.json()) as T;
+  }
+
+  private redirectToLogin(): void {
+    if (typeof window === "undefined") {
+      return;
+    }
+    const current = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+    window.location.assign(`/auth/login?next=${encodeURIComponent(current)}`);
   }
 
   private async readErrorMessage(response: Response): Promise<string> {

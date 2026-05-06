@@ -1,5 +1,6 @@
 pub mod account;
 pub mod agent_runs;
+pub mod auth;
 pub mod bootstrap;
 pub mod chat;
 pub mod health;
@@ -13,10 +14,28 @@ use axum::routing::{get, post};
 use axum::{Router, http::StatusCode, routing::any, routing::patch};
 
 use crate::app_state::AppState;
+use crate::error::ApiError;
+use crate::user_context::RequestUser;
+
+pub(crate) async fn require_admin(
+    state: &AppState,
+    request_user: &RequestUser,
+) -> Result<(), ApiError> {
+    if state.core().is_request_user_admin(request_user).await? {
+        Ok(())
+    } else {
+        Err(ApiError::forbidden("admin access is required"))
+    }
+}
 
 pub fn router() -> Router<AppState> {
     Router::new()
+        .route("/auth/login", get(auth::login))
+        .route("/auth/dev-login", get(auth::dev_login))
+        .route("/auth/callback", get(auth::callback))
+        .route("/auth/logout", get(auth::logout))
         .route("/api/v1/health", get(health::get_health))
+        .route("/api/v1/auth/me", get(auth::me))
         .route(
             "/api/v1/account",
             get(account::get_account).put(account::configure_account),
@@ -30,6 +49,7 @@ pub fn router() -> Router<AppState> {
             "/api/v1/agents/runs/{run_id}",
             get(agent_runs::get_agent_run),
         )
+        .route("/api/v1/chat/options", get(chat::get_chat_options))
         .route(
             "/api/v1/chat/sessions",
             get(chat::list_sessions).post(chat::create_session),

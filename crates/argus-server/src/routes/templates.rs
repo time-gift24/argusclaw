@@ -8,6 +8,9 @@ use argus_protocol::{AgentId, AgentMcpBinding, AgentMcpServerBinding, AgentRecor
 use crate::app_state::AppState;
 use crate::error::ApiError;
 use crate::response::{DeleteResponse, MutationResponse};
+use crate::user_context::RequestUser;
+
+use super::require_admin;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentMcpBindingPayload {
@@ -57,8 +60,10 @@ impl TemplateRecordPayload {
 }
 
 pub async fn list_templates(
+    request_user: RequestUser,
     State(state): State<AppState>,
 ) -> Result<Json<Vec<TemplateRecordPayload>>, ApiError> {
+    require_admin(&state, &request_user).await?;
     let templates = state.core().list_templates().await?;
     let mut payloads = Vec::with_capacity(templates.len());
     for record in templates {
@@ -68,9 +73,11 @@ pub async fn list_templates(
 }
 
 pub async fn create_template(
+    request_user: RequestUser,
     State(state): State<AppState>,
     Json(payload): Json<TemplateRecordPayload>,
 ) -> Result<(StatusCode, Json<MutationResponse<TemplateRecordPayload>>), ApiError> {
+    require_admin(&state, &request_user).await?;
     let TemplateRecordPayload {
         mut record,
         mcp_bindings,
@@ -92,10 +99,12 @@ pub async fn create_template(
 }
 
 pub async fn update_template(
+    request_user: RequestUser,
     State(state): State<AppState>,
     Path(template_id): Path<i64>,
     Json(payload): Json<TemplateRecordPayload>,
 ) -> Result<Json<MutationResponse<TemplateRecordPayload>>, ApiError> {
+    require_admin(&state, &request_user).await?;
     let TemplateRecordPayload {
         mut record,
         mcp_bindings,
@@ -117,9 +126,11 @@ pub async fn update_template(
 }
 
 pub async fn delete_template(
+    request_user: RequestUser,
     State(state): State<AppState>,
     Path(template_id): Path<i64>,
 ) -> Result<Json<MutationResponse<DeleteResponse>>, ApiError> {
+    require_admin(&state, &request_user).await?;
     state
         .core()
         .delete_template(AgentId::new(template_id))

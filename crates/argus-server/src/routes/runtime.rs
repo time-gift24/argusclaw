@@ -12,6 +12,9 @@ use argus_protocol::{JobRuntimeState, ThreadPoolState};
 
 use crate::app_state::AppState;
 use crate::error::ApiError;
+use crate::user_context::RequestUser;
+
+use super::require_admin;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RuntimeStateResponse {
@@ -29,14 +32,18 @@ impl RuntimeStateResponse {
 }
 
 pub async fn get_runtime_state(
+    request_user: RequestUser,
     State(state): State<AppState>,
 ) -> Result<Json<RuntimeStateResponse>, ApiError> {
+    require_admin(&state, &request_user).await?;
     Ok(Json(RuntimeStateResponse::from_state(&state)))
 }
 
 pub async fn runtime_events(
+    request_user: RequestUser,
     State(state): State<AppState>,
-) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
+    require_admin(&state, &request_user).await?;
     let mut interval = tokio::time::interval(Duration::from_secs(5));
     interval.tick().await;
     let stream = stream::unfold(
@@ -60,5 +67,5 @@ pub async fn runtime_events(
         },
     );
 
-    Sse::new(stream).keep_alive(KeepAlive::default())
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }

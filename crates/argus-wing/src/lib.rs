@@ -845,7 +845,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn with_pool_bootstraps_templates_like_init() {
+    async fn with_pool_allows_empty_builtin_agent_definitions() {
         use argus_repository::ArgusSqlite;
 
         let temp_dir = tempfile::tempdir().expect("temp dir should exist");
@@ -879,8 +879,8 @@ mod tests {
         assert!(
             templates
                 .iter()
-                .any(|template| template.display_name == "Chrome Explore"),
-            "with_pool should seed builtin agents just like init"
+                .any(|template| template.display_name == "Legacy Zero Agent"),
+            "with_pool should still repair existing templates when no builtin agents exist"
         );
     }
 

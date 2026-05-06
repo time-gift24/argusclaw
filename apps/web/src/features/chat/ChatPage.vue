@@ -2,7 +2,13 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import type { PromptProps } from "@opentiny/tiny-robot";
 
-import { getApiClient, type AgentRecord, type ChatSessionSummary, type ChatThreadSummary, type LlmProviderRecord } from "@/lib/api";
+import {
+  getApiClient,
+  type AgentRecord,
+  type ChatSessionSummary,
+  type ChatThreadSummary,
+  type LlmProviderRecord,
+} from "@/lib/api";
 import { useChatSessions } from "./composables/useChatSessions";
 import { useChatThreadStream } from "./composables/useChatThreadStream";
 import { useChatComposer } from "./composables/useChatComposer";
@@ -15,6 +21,7 @@ import {
 import ChatComposerBar from "./components/ChatComposerBar.vue";
 import ChatConversationPanel from "./components/ChatConversationPanel.vue";
 import ChatHistoryDialog from "./components/ChatHistoryDialog.vue";
+import RuntimeActivityRail from "./components/RuntimeActivityRail.vue";
 
 const chatSessions = useChatSessions();
 const chatThreadStream = useChatThreadStream({
@@ -59,6 +66,7 @@ const historyDialogOpen = ref(false);
 const hasActiveThread = computed(() => Boolean(chatSessions.activeSessionId.value && chatSessions.activeThreadId.value));
 const activeProvider = computed(() => providers.value.find((p) => p.id === Number(selectedProviderId.value)) ?? null);
 const selectedTemplate = computed(() => templates.value.find((t) => t.id === Number(selectedTemplateId.value)) ?? null);
+const defaultProvider = computed(() => providers.value.find((p) => p.is_default) ?? providers.value[0] ?? null);
 
 const robotMessages = computed(() => toRobotMessages({
   messages: chatThreadStream.messages.value,
@@ -66,7 +74,7 @@ const robotMessages = computed(() => toRobotMessages({
   hasActiveThread: hasActiveThread.value,
   pendingAssistantContent: chatThreadStream.pendingAssistantContent.value,
   pendingAssistantReasoning: chatThreadStream.pendingAssistantReasoning.value,
-  runtimeActivities: chatThreadStream.runtimeActivities.value,
+  runtimeActivities: [],
 }));
 const bubbleRoles = createBubbleRoles();
 const starterPrompts = createStarterPrompts();
@@ -85,20 +93,33 @@ async function loadInitialState() {
   chatSessions.loading.value = true;
   chatComposer.error.value = "";
   try {
-    const [providersResult, templatesResult] = await Promise.allSettled([
-      api.listProviders(),
-      api.listTemplates(),
-    ]);
-    if (providersResult.status === "fulfilled") providers.value = providersResult.value;
-    else loadErrors.push(`模型提供方加载失败：${formatErrorMessage(providersResult.reason)}`);
-    if (templatesResult.status === "fulfilled") templates.value = templatesResult.value;
-    else loadErrors.push(`智能体模板加载失败：${formatErrorMessage(templatesResult.reason)}`);
+    if (api.getChatOptions) {
+      try {
+        const options = await api.getChatOptions();
+        providers.value = options.providers;
+        templates.value = options.templates;
+      } catch (reason) {
+        loadErrors.push(`对话配置加载失败：${formatErrorMessage(reason)}`);
+      }
+    } else {
+      const [providersResult, templatesResult] = await Promise.allSettled([
+        api.listProviders(),
+        api.listTemplates(),
+      ]);
+      if (providersResult.status === "fulfilled") providers.value = providersResult.value;
+      else loadErrors.push(`模型提供方加载失败：${formatErrorMessage(providersResult.reason)}`);
+      if (templatesResult.status === "fulfilled") templates.value = templatesResult.value;
+      else loadErrors.push(`智能体模板加载失败：${formatErrorMessage(templatesResult.reason)}`);
+    }
 
-    const firstProvider = providers.value.find((p) => p.is_default) ?? providers.value[0] ?? null;
     const firstTemplate = templates.value[0] ?? null;
-    selectedProviderId.value = firstProvider?.id ?? null;
-    selectedModel.value = firstProvider?.default_model ?? "";
-    selectedTemplateId.value = firstTemplate?.id ?? null;
+    if (firstTemplate) {
+      applyTemplateSelection(firstTemplate.id);
+    } else {
+      selectedProviderId.value = defaultProvider.value?.id ?? null;
+      selectedModel.value = defaultProvider.value?.default_model ?? "";
+      selectedTemplateId.value = null;
+    }
 
     try {
       await chatSessions.loadInitialState();
@@ -182,20 +203,80 @@ function handleNewChat() {
   chatComposer.draftMessage.value = "";
   chatThreadStream.messages.value = [];
   chatThreadStream.resetRuntimeActivity();
+  chatComposer.actionMessage.value = "";
 }
 
-function handleTemplateChange(value: number | null) {
-  selectedTemplateId.value = value;
+async function handleTemplateChange(value: number | null) {
+  const previousSelection = {
+    templateId: selectedTemplateId.value,
+    providerId: selectedProviderId.value,
+    model: selectedModel.value,
+    sessionId: chatSessions.activeSessionId.value,
+    threadId: chatSessions.activeThreadId.value,
+    binding: chatSessions.activeBinding.value,
+    messages: chatThreadStream.messages.value,
+  };
+  const selection = applyTemplateSelection(value);
+  chatComposer.error.value = "";
+  chatComposer.actionMessage.value = "";
+
+  if (!selection.template || !hasActiveConversationMessages()) {
+    return;
+  }
+
+  try {
+    const api = getApiClient();
+    const payload = await api.createChatSessionWithThread!({
+      name: "新的 Web 对话",
+      template_id: selection.template.id,
+      provider_id: selection.providerId,
+      model: selection.model || null,
+    });
+    chatThreadStream.closeThreadEvents();
+    chatThreadStream.resetTransientState();
+    chatThreadStream.resetRuntimeActivity();
+    chatThreadStream.messages.value = [];
+    chatSessions.applyChatSessionPayload(payload);
+    chatSessions.sessionName.value = "新的 Web 对话";
+    await chatSessions.refreshSessions();
+    await chatSessions.refreshThreads(payload.session_id);
+    chatComposer.actionMessage.value = `已切换到「${selection.template.display_name}」，新的消息将在新会话中发送。`;
+  } catch (reason) {
+    selectedTemplateId.value = previousSelection.templateId;
+    selectedProviderId.value = previousSelection.providerId;
+    selectedModel.value = previousSelection.model;
+    chatSessions.activeSessionId.value = previousSelection.sessionId;
+    chatSessions.activeThreadId.value = previousSelection.threadId;
+    chatSessions.activeBinding.value = previousSelection.binding;
+    chatThreadStream.messages.value = previousSelection.messages;
+    chatComposer.error.value = formatErrorMessage(reason);
+    chatComposer.actionMessage.value = "";
+  }
 }
 
-function handleProviderChange(value: number | null) {
-  selectedProviderId.value = value;
-  const provider = providers.value.find((p) => p.id === value);
-  if (provider) selectedModel.value = provider.default_model;
+function applyTemplateSelection(templateId: number | null) {
+  selectedTemplateId.value = templateId;
+  const template = templates.value.find((candidate) => candidate.id === Number(templateId)) ?? null;
+  const templateProviderId = template?.provider_id ?? null;
+  const provider =
+    providers.value.find((candidate) => templateProviderId !== null && candidate.id === templateProviderId) ??
+    providers.value.find((candidate) => candidate.id === selectedProviderId.value) ??
+    defaultProvider.value;
+  selectedProviderId.value = provider?.id ?? null;
+  selectedModel.value = template?.model_id || provider?.default_model || "";
+  return {
+    template,
+    providerId: provider?.id ?? null,
+    model: selectedModel.value,
+  };
 }
 
-function handleModelChange(value: string) {
-  selectedModel.value = value;
+function hasActiveConversationMessages() {
+  return Boolean(
+    chatSessions.activeSessionId.value &&
+      chatSessions.activeThreadId.value &&
+      chatThreadStream.messages.value.length > 0,
+  );
 }
 
 function applyPrompt(_event: MouseEvent, item: PromptProps) {
@@ -209,6 +290,7 @@ function applyPrompt(_event: MouseEvent, item: PromptProps) {
       <div class="chat-main-column">
         <ChatConversationPanel
           :error="chatComposer.error.value"
+          :notice="chatComposer.actionMessage.value"
           :thread-loading="chatThreadStream.threadLoading.value"
           :robot-messages="robotMessages"
           :bubble-roles="bubbleRoles"
@@ -216,6 +298,7 @@ function applyPrompt(_event: MouseEvent, item: PromptProps) {
           @prompt="applyPrompt"
         />
       </div>
+      <RuntimeActivityRail :activities="chatThreadStream.runtimeActivities.value" />
     </div>
 
     <div class="chat-page__composer-dock">
@@ -224,11 +307,11 @@ function applyPrompt(_event: MouseEvent, item: PromptProps) {
           v-model="chatComposer.draftMessage.value"
           :templates="templates"
           :providers="providers"
-          v-model:selected-template-id="selectedTemplateId"
+          :selected-template-id="selectedTemplateId"
           v-model:selected-provider-id="selectedProviderId"
           v-model:selected-model="selectedModel"
           :disabled="!chatComposer.canSendMessage.value"
-          :loading="chatComposer.sending.value"
+          :loading="chatComposer.sending.value || chatThreadStream.streaming.value"
           :placeholder="chatComposer.senderPlaceholder.value"
           :has-active-thread="hasActiveThread"
           :active-provider="activeProvider"
@@ -237,6 +320,7 @@ function applyPrompt(_event: MouseEvent, item: PromptProps) {
           @cancel="chatComposer.cancelThread"
           @new-chat="handleNewChat"
           @open-history="historyDialogOpen = true"
+          @update:selected-template-id="handleTemplateChange"
         />
       </div>
     </div>
@@ -257,7 +341,9 @@ function applyPrompt(_event: MouseEvent, item: PromptProps) {
 <style scoped>
 .chat-page {
   width: 100%;
-  --chat-main-width: 980px;
+  --chat-main-width: 1280px;
+  --chat-rail-width: 320px;
+  --chat-layout-gap: var(--space-5);
   --chat-dock-clearance: 212px;
   height: calc(100vh - (var(--space-6) * 2));
   min-height: calc(100vh - (var(--space-6) * 2));
@@ -278,11 +364,18 @@ function applyPrompt(_event: MouseEvent, item: PromptProps) {
   min-height: 0;
 }
 
+.chat-workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) var(--chat-rail-width);
+  gap: var(--chat-layout-gap);
+  width: min(100%, var(--chat-main-width));
+  margin-inline: auto;
+}
+
 .chat-main-column {
   display: flex;
   flex-direction: column;
-  width: min(100%, var(--chat-main-width));
-  margin-inline: auto;
+  min-width: 0;
 }
 
 .chat-page__composer-dock {
@@ -296,7 +389,7 @@ function applyPrompt(_event: MouseEvent, item: PromptProps) {
 }
 
 .chat-page__composer-shell {
-  width: min(100%, var(--chat-main-width));
+  width: min(100%, calc(var(--chat-main-width) - var(--chat-rail-width) - var(--chat-layout-gap)));
 }
 
 @media (max-width: 1180px) {
@@ -311,6 +404,18 @@ function applyPrompt(_event: MouseEvent, item: PromptProps) {
     left: var(--space-4);
     right: var(--space-4);
     bottom: var(--space-4);
+  }
+}
+
+@media (max-width: 1280px) {
+  .chat-workspace {
+    grid-template-columns: 1fr;
+    overflow: auto;
+    padding-bottom: calc(var(--chat-dock-clearance, 228px) + var(--space-4));
+  }
+
+  .chat-page__composer-shell {
+    width: min(100%, var(--chat-main-width));
   }
 }
 </style>

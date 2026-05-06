@@ -4,7 +4,7 @@ use async_trait::async_trait;
 
 use crate::error::DbError;
 use crate::types::SessionRecord;
-use argus_protocol::SessionId;
+use argus_protocol::{SessionId, UserId};
 
 /// A session with its thread count (from LEFT JOIN).
 #[derive(Debug)]
@@ -30,4 +30,46 @@ pub trait SessionRepository: Send + Sync {
 
     /// Delete a session (caller is responsible for deleting threads first).
     async fn delete(&self, id: &SessionId) -> Result<bool, DbError>;
+
+    /// List sessions owned by one user. Backends without user ownership may fall back to raw listing.
+    async fn list_with_counts_for_user(
+        &self,
+        _user_id: &UserId,
+    ) -> Result<Vec<SessionWithCount>, DbError> {
+        self.list_with_counts().await
+    }
+
+    /// Get a session owned by one user.
+    async fn get_for_user(
+        &self,
+        _user_id: &UserId,
+        id: &SessionId,
+    ) -> Result<Option<SessionRecord>, DbError> {
+        self.get(id).await
+    }
+
+    /// Create a new session owned by one user.
+    async fn create_for_user(
+        &self,
+        _user_id: &UserId,
+        id: &SessionId,
+        name: &str,
+    ) -> Result<(), DbError> {
+        self.create(id, name).await
+    }
+
+    /// Rename a session owned by one user.
+    async fn rename_for_user(
+        &self,
+        _user_id: &UserId,
+        id: &SessionId,
+        name: &str,
+    ) -> Result<bool, DbError> {
+        self.rename(id, name).await
+    }
+
+    /// Delete a session owned by one user.
+    async fn delete_for_user(&self, _user_id: &UserId, id: &SessionId) -> Result<bool, DbError> {
+        self.delete(id).await
+    }
 }

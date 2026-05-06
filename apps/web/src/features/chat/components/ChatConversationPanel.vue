@@ -6,6 +6,7 @@ import ChatMessageStage from "./ChatMessageStage.vue";
 
 interface Props {
   error: string;
+  notice: string;
   threadLoading: boolean;
   robotMessages: ChatRobotMessage[];
   bubbleRoles: Record<string, BubbleRoleConfig>;
@@ -27,6 +28,7 @@ function handlePrompt(event: MouseEvent, item: PromptProps) {
 <template>
   <article class="chat-panel chat-panel--immersive">
     <div v-if="error" class="notice notice--danger">{{ error }}</div>
+    <div v-else-if="notice" class="notice notice--info">{{ notice }}</div>
     <ChatMessageStage
       :loading="threadLoading"
       :messages="robotMessages"
@@ -74,5 +76,11 @@ function handlePrompt(event: MouseEvent, item: PromptProps) {
   background: color-mix(in srgb, var(--status-danger-bg) 80%, white);
   border: 1px solid color-mix(in srgb, var(--status-danger) 58%, white);
   color: var(--status-danger);
+}
+
+.notice--info {
+  background: color-mix(in srgb, var(--accent-subtle) 72%, white);
+  border: 1px solid color-mix(in srgb, var(--accent) 34%, var(--border-default));
+  color: var(--text-secondary);
 }
 </style>

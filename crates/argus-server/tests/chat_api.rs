@@ -4,11 +4,33 @@ use std::collections::HashMap;
 
 use argus_protocol::ThreadId;
 use argus_protocol::llm::ModelConfig;
-use argus_protocol::{AgentRecord, LlmProviderKind, LlmProviderRecordJson, ProviderSecretStatus};
+use argus_protocol::{
+    AgentId, AgentRecord, LlmProviderKind, LlmProviderRecordJson, ProviderSecretStatus,
+    ThinkingConfig,
+};
 use argus_server::response::MutationResponse;
 use argus_session::{SessionSummary, ThreadSummary};
-use axum::http::StatusCode;
+use axum::http::{Method, StatusCode};
 use serde_json::json;
+
+#[tokio::test]
+async fn chat_routes_fail_closed_without_trusted_user_header() {
+    let ctx = support::TestContext::new().await;
+
+    let response = ctx
+        .get_without_default_user_header("/api/v1/chat/sessions")
+        .await;
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let body: serde_json::Value = support::json_body(response).await;
+    assert_eq!(body["error"]["code"], "unauthorized");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .expect("error message should be a string")
+            .contains("x-argus-user-id")
+    );
+}
 
 #[tokio::test]
 async fn chat_session_routes_create_list_and_show_empty_threads() {
@@ -41,6 +63,17 @@ async fn chat_session_routes_create_list_and_show_empty_threads() {
     assert_eq!(threads_response.status(), StatusCode::OK);
     let threads: Vec<ThreadSummary> = support::json_body(threads_response).await;
     assert!(threads.is_empty());
+}
+
+#[tokio::test]
+async fn chat_session_routes_fail_closed_without_user_header() {
+    let ctx = support::TestContext::new().await;
+
+    let response = ctx.get_without_chat_user("/api/v1/chat/sessions").await;
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let body: serde_json::Value = support::json_body(response).await;
+    assert_eq!(body["error"]["code"], "unauthorized");
 }
 
 #[tokio::test]
@@ -224,6 +257,94 @@ async fn chat_thread_events_route_opens_stream_for_materialized_thread() {
         .and_then(|value| value.to_str().ok())
         .expect("event stream should set content-type");
     assert!(content_type.starts_with("text/event-stream"));
+}
+
+#[tokio::test]
+async fn chat_routes_fail_closed_without_trusted_user_header_all_methods() {
+    let ctx = support::TestContext::new().await;
+
+    for (method, path, body) in [
+        (Method::GET, "/api/v1/chat/sessions", None),
+        (
+            Method::POST,
+            "/api/v1/chat/sessions",
+            Some(json!({ "name": "No Header" })),
+        ),
+    ] {
+        let response = ctx
+            .request_without_trusted_user(method, path, body.as_ref())
+            .await;
+
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "{path} must reject missing trusted user context"
+        );
+    }
+}
+
+#[tokio::test]
+async fn chat_routes_hide_sessions_and_threads_across_trusted_users() {
+    let Some(ctx) = support::TestContext::postgres_if_configured().await else {
+        return;
+    };
+    let provider = create_test_provider(&ctx).await;
+    let template = first_template(&ctx).await;
+
+    let create_response = ctx
+        .post_json_as(
+            "/api/v1/chat/sessions",
+            &json!({ "name": "User A Session" }),
+            support::DEFAULT_TEST_USER_ID,
+        )
+        .await;
+    assert_eq!(create_response.status(), StatusCode::CREATED);
+    let session: MutationResponse<SessionSummary> = support::json_body(create_response).await;
+
+    let thread_response = ctx
+        .post_json_as(
+            &format!("/api/v1/chat/sessions/{}/threads", session.item.id),
+            &json!({
+                "template_id": template.id,
+                "provider_id": provider.id,
+                "model": "alpha"
+            }),
+            support::DEFAULT_TEST_USER_ID,
+        )
+        .await;
+    assert_eq!(thread_response.status(), StatusCode::CREATED);
+    let thread: MutationResponse<ThreadSummary> = support::json_body(thread_response).await;
+
+    let user_b_sessions = ctx
+        .get_as("/api/v1/chat/sessions", support::ALT_TEST_USER_ID)
+        .await;
+    assert_eq!(user_b_sessions.status(), StatusCode::OK);
+    let sessions: Vec<SessionSummary> = support::json_body(user_b_sessions).await;
+    assert!(
+        sessions
+            .iter()
+            .all(|candidate| candidate.id != session.item.id),
+        "user B must not list user A sessions"
+    );
+
+    let user_b_threads = ctx
+        .get_as(
+            &format!("/api/v1/chat/sessions/{}/threads", session.item.id),
+            support::ALT_TEST_USER_ID,
+        )
+        .await;
+    assert_eq!(user_b_threads.status(), StatusCode::NOT_FOUND);
+
+    let user_b_snapshot = ctx
+        .get_as(
+            &format!(
+                "/api/v1/chat/sessions/{}/threads/{}",
+                session.item.id, thread.item.id
+            ),
+            support::ALT_TEST_USER_ID,
+        )
+        .await;
+    assert_eq!(user_b_snapshot.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -520,8 +641,30 @@ async fn first_template(ctx: &support::TestContext) -> AgentRecord {
     let response = ctx.get("/api/v1/agents/templates").await;
     assert_eq!(response.status(), StatusCode::OK);
     let templates: Vec<AgentRecord> = support::json_body(response).await;
-    templates
-        .into_iter()
-        .next()
-        .expect("test server should seed at least one template")
+    if let Some(template) = templates.into_iter().next() {
+        return template;
+    }
+
+    let response = ctx
+        .post_json(
+            "/api/v1/agents/templates",
+            &AgentRecord {
+                id: AgentId::new(0),
+                display_name: "Test Chat Agent".to_string(),
+                description: "created by chat API test".to_string(),
+                version: "1.0.0".to_string(),
+                provider_id: None,
+                model_id: Some("alpha".to_string()),
+                system_prompt: "You are a test chat agent.".to_string(),
+                tool_names: vec![],
+                subagent_names: vec![],
+                max_tokens: None,
+                temperature: None,
+                thinking_config: Some(ThinkingConfig::enabled()),
+            },
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let created: MutationResponse<AgentRecord> = support::json_body(response).await;
+    created.item
 }
