@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 
 use crate::error::DbError;
-use crate::types::{AgentId, AgentRecord};
+use crate::types::{AgentDeleteReport, AgentId, AgentRecord};
 
 /// Repository trait for agent persistence.
 #[async_trait]
@@ -32,4 +32,10 @@ pub trait AgentRepository: Send + Sync {
 
     /// Delete an agent.
     async fn delete(&self, id: &AgentId) -> Result<bool, DbError>;
+
+    /// Delete an agent and its explicit runtime associations.
+    async fn delete_with_associations(
+        &self,
+        id: &AgentId,
+    ) -> Result<AgentDeleteReport, DbError>;
 }
