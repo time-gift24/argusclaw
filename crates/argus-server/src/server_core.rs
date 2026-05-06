@@ -19,7 +19,10 @@ use argus_repository::traits::{
 };
 use argus_repository::types::{AgentRunId, AgentRunRecord, AgentRunStatus};
 use argus_repository::{ArgusPostgres, ArgusSqlite, connect_postgres, migrate_postgres};
-use argus_session::{SessionManager, SessionSummary, ThreadSummary};
+use argus_session::{
+    PendingAssistantTrace, PendingToolCallTrace, PendingToolStatus, SessionManager,
+    SessionSummary, ThreadSummary,
+};
 use argus_template::TemplateManager;
 use argus_thread_pool::ThreadPool;
 use argus_tool::ToolManager;
@@ -64,6 +67,75 @@ pub struct ChatThreadSnapshot {
     pub turn_count: u32,
     pub token_count: u32,
     pub plan_item_count: u32,
+    pub pending_assistant: Option<PendingAssistantPayload>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PendingAssistantPayload {
+    pub turn_number: u32,
+    pub content: String,
+    pub reasoning: String,
+    pub tool_calls: Vec<PendingToolCallPayload>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PendingToolCallPayload {
+    pub index: usize,
+    pub call_id: Option<String>,
+    pub name: Option<String>,
+    pub arguments_text: String,
+    pub status: PendingToolStatusPayload,
+    pub arguments: Option<serde_json::Value>,
+    pub result: Option<serde_json::Value>,
+    pub is_error: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PendingToolStatusPayload {
+    Pending,
+    Started,
+    Completed,
+}
+
+impl From<PendingAssistantTrace> for PendingAssistantPayload {
+    fn from(pending: PendingAssistantTrace) -> Self {
+        Self {
+            turn_number: pending.turn_number,
+            content: pending.content,
+            reasoning: pending.reasoning,
+            tool_calls: pending
+                .tool_calls
+                .into_iter()
+                .map(PendingToolCallPayload::from)
+                .collect(),
+        }
+    }
+}
+
+impl From<PendingToolCallTrace> for PendingToolCallPayload {
+    fn from(tool_call: PendingToolCallTrace) -> Self {
+        Self {
+            index: tool_call.index,
+            call_id: tool_call.call_id,
+            name: tool_call.name,
+            arguments_text: tool_call.arguments_text,
+            status: PendingToolStatusPayload::from(tool_call.status),
+            arguments: tool_call.arguments,
+            result: tool_call.result,
+            is_error: tool_call.is_error,
+        }
+    }
+}
+
+impl From<PendingToolStatus> for PendingToolStatusPayload {
+    fn from(status: PendingToolStatus) -> Self {
+        match status {
+            PendingToolStatus::Pending => Self::Pending,
+            PendingToolStatus::Started => Self::Started,
+            PendingToolStatus::Completed => Self::Completed,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -834,6 +906,7 @@ impl ServerCore {
             turn_count: snapshot.turn_count,
             token_count: snapshot.token_count,
             plan_item_count: snapshot.plan_item_count,
+            pending_assistant: snapshot.pending_assistant.map(PendingAssistantPayload::from),
         })
     }
 
