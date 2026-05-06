@@ -31,6 +31,7 @@ function snapshot(sessionId: string, threadId: string, messages: ChatMessageReco
     turn_count: messages.length,
     token_count: 0,
     plan_item_count: 0,
+    pending_assistant: null,
   };
 }
 

@@ -134,6 +134,7 @@ function makeApiClient(overrides: Partial<ApiClient> = {}): ApiClient {
       turn_count: 0,
       token_count: 0,
       plan_item_count: 0,
+      pending_assistant: null,
     }),
     updateChatThreadModel: vi.fn().mockResolvedValue({
       session_id: "session-1",
