@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use argus_protocol::TokenUsage;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -55,6 +56,9 @@ pub enum TurnTraceEventPayload {
         name: String,
         result: Value,
         is_error: bool,
+    },
+    TurnCompleted {
+        token_usage: TokenUsage,
     },
     TurnSettled,
     TurnFailed,
@@ -112,6 +116,11 @@ impl TurnTraceEventPayload {
             result,
             is_error,
         }
+    }
+
+    #[must_use]
+    pub fn turn_completed(token_usage: TokenUsage) -> Self {
+        Self::TurnCompleted { token_usage }
     }
 
     #[must_use]
@@ -346,9 +355,9 @@ pub async fn recover_pending_assistant(
                 tool_call.is_error = is_error;
                 tool_call.status = PendingToolStatus::Completed;
             }
-            TurnTraceEventPayload::TurnSettled | TurnTraceEventPayload::TurnFailed => {
-                return Ok(None);
-            }
+            TurnTraceEventPayload::TurnCompleted { .. }
+            | TurnTraceEventPayload::TurnSettled
+            | TurnTraceEventPayload::TurnFailed => return Ok(None),
         }
     }
 
@@ -412,6 +421,14 @@ fn tool_call_trace_index_by_identity(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn usage(total_tokens: u32) -> TokenUsage {
+        TokenUsage {
+            input_tokens: total_tokens.saturating_sub(1),
+            output_tokens: 1,
+            total_tokens,
+        }
+    }
 
     #[tokio::test]
     async fn recovers_pending_assistant_from_turn_events() {
@@ -489,6 +506,23 @@ mod tests {
             .unwrap();
         writer
             .append(1, TurnTraceEventPayload::turn_settled())
+            .await
+            .unwrap();
+
+        let pending = recover_pending_assistant(dir.path(), 0).await.unwrap();
+        assert!(pending.is_none());
+    }
+
+    #[tokio::test]
+    async fn completed_turn_does_not_recover_pending_assistant() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let writer = TurnEventTraceWriter::open(dir.path()).await.unwrap();
+        writer
+            .append(1, TurnTraceEventPayload::content_delta("done"))
+            .await
+            .unwrap();
+        writer
+            .append(1, TurnTraceEventPayload::turn_completed(usage(3)))
             .await
             .unwrap();
 
