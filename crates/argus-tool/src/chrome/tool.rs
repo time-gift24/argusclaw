@@ -26,6 +26,7 @@ use super::policy::ExplorePolicy;
 const RO_ACTIONS: &[ChromeAction] = &[
     ChromeAction::Install,
     ChromeAction::Navigate,
+    ChromeAction::Refresh,
     ChromeAction::Close,
     ChromeAction::Wait,
     ChromeAction::ExtractText,
@@ -38,6 +39,7 @@ const RO_ACTIONS: &[ChromeAction] = &[
 const INTERACTIVE_ACTIONS: &[ChromeAction] = &[
     ChromeAction::Install,
     ChromeAction::Navigate,
+    ChromeAction::Refresh,
     ChromeAction::Close,
     ChromeAction::Wait,
     ChromeAction::ExtractText,
@@ -236,6 +238,14 @@ impl ChromeTool {
                 let opened = self.manager.navigate(url).await?;
                 Self::serialize_response(ChromeNavigateResponse {
                     action: "navigate",
+                    final_url: opened.final_url,
+                    page_title: opened.page_title,
+                })
+            }
+            ChromeAction::Refresh => {
+                let opened = self.manager.refresh().await?;
+                Self::serialize_response(ChromeNavigateResponse {
+                    action: "refresh",
                     final_url: opened.final_url,
                     page_title: opened.page_title,
                 })
