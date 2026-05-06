@@ -297,6 +297,10 @@ const mapPendingAssistantSnapshot = (
       }
     : null;
 
+const resolveSnapshotSessionStatus = (
+  pendingAssistant: ChatSessionState["pendingAssistant"],
+): ChatSessionState["status"] => (pendingAssistant ? "running" : "idle");
+
 export interface ThreadPoolThreadState {
   threadId: string;
   kind: "chat" | "job";
@@ -709,6 +713,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         session.session_id,
         session.thread_id,
       );
+      const pendingAssistant = mapPendingAssistantSnapshot(
+        snapshot.pending_assistant,
+      );
 
       const newSessionState: ChatSessionState = {
         sessionKey: session.session_key,
@@ -717,10 +724,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         threadId: session.thread_id,
         effectiveProviderId: session.effective_provider_id,
         effectiveModel: session.effective_model,
-        status: "idle",
+        status: resolveSnapshotSessionStatus(pendingAssistant),
         messages: snapshot.messages,
         pendingUserMessage: null,
-        pendingAssistant: mapPendingAssistantSnapshot(snapshot.pending_assistant),
+        pendingAssistant,
         jobStatuses: {},
         jobDetails: {},
         selectedJobDetailId: null,
@@ -808,6 +815,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     try {
       const activated = await chat.activateExistingThread(sessionId, threadId);
       const snapshot = await chat.getThreadSnapshot(sessionId, threadId);
+      const pendingAssistant = mapPendingAssistantSnapshot(
+        snapshot.pending_assistant,
+      );
 
       const nextSessionState: ChatSessionState = {
         sessionKey: activated.session_key,
@@ -816,10 +826,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         threadId: threadId,
         effectiveProviderId: activated.effective_provider_id,
         effectiveModel: activated.effective_model,
-        status: "idle",
+        status: resolveSnapshotSessionStatus(pendingAssistant),
         messages: snapshot.messages,
         pendingUserMessage: null,
-        pendingAssistant: mapPendingAssistantSnapshot(snapshot.pending_assistant),
+        pendingAssistant,
         jobStatuses: existingSession?.jobStatuses ?? {},
         jobDetails: existingSession?.jobDetails ?? {},
         selectedJobDetailId: null,
@@ -1204,6 +1214,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         session.sessionId,
         session.threadId,
       );
+      const pendingAssistant = mapPendingAssistantSnapshot(
+        snapshot.pending_assistant,
+      );
       set((state) => ({
         errorMessage: options?.preserveError ? state.errorMessage : null,
         sessionsByKey: {
@@ -1212,8 +1225,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             ...state.sessionsByKey[sessionKey],
             messages: snapshot.messages,
             pendingUserMessage: null,
-            pendingAssistant: mapPendingAssistantSnapshot(snapshot.pending_assistant),
-            status: options?.preserveError ? "error" : "idle",
+            pendingAssistant,
+            status: options?.preserveError
+              ? "error"
+              : resolveSnapshotSessionStatus(pendingAssistant),
             error: options?.preserveError
               ? state.sessionsByKey[sessionKey].error
               : null,
