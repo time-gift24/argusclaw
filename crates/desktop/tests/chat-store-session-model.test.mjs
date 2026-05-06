@@ -73,9 +73,11 @@ test("chat store keeps sessions keyed by template and provider preference", () =
   assert.match(typesSource, /export interface PendingAssistantSnapshotPayload/);
   assert.match(typesSource, /pending_assistant:\s*PendingAssistantSnapshotPayload \| null/);
   assert.match(storeSource, /const mapPendingAssistantSnapshot = \(/);
+  assert.match(storeSource, /const extractPlanFromPendingSnapshot = \(/);
   assert.match(storeSource, /const resolveSnapshotSessionStatus = \(/);
-  assert.match(storeSource, /pendingAssistant:\s*mapPendingAssistantSnapshot\(snapshot\.pending_assistant\)/);
+  assert.match(storeSource, /const pendingAssistant = mapPendingAssistantSnapshot\(\s*snapshot\.pending_assistant,\s*\)/);
   assert.match(storeSource, /status:\s*resolveSnapshotSessionStatus\(pendingAssistant\)/);
+  assert.match(storeSource, /existingSession\?\.threadId === threadId[\s\S]*?await get\(\)\.refreshSnapshot\(sessionId\)/);
 });
 
 test("thread pool store keeps the full authoritative runtime list", () => {
@@ -298,7 +300,7 @@ test("turn_failed refresh preserves the frontend error state", () => {
   );
   assert.match(
     storeSource,
-    /status:\s*options\?\.preserveError\s*\?\s*"error"\s*:\s*"idle"/,
+    /status:\s*options\?\.preserveError\s*\?\s*"error"\s*:\s*resolveSnapshotSessionStatus\(pendingAssistant\)/,
   );
 });
 

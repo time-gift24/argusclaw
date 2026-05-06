@@ -292,10 +292,24 @@ const mapPendingAssistantSnapshot = (
           is_error: toolCall.is_error,
           status: mapPendingToolStatus(toolCall.status),
         })),
-        plan: null,
+        plan: extractPlanFromPendingSnapshot(pending),
         retry: null,
       }
     : null;
+
+const extractPlanFromPendingSnapshot = (
+  pending: NonNullable<ThreadSnapshotPayload["pending_assistant"]>,
+): PlanItem[] | null => {
+  for (let index = pending.tool_calls.length - 1; index >= 0; index -= 1) {
+    const toolCall = pending.tool_calls[index];
+    if (toolCall.name !== "update_plan" || toolCall.is_error) continue;
+    const source =
+      toolCall.status === "completed" ? toolCall.result : toolCall.arguments;
+    const plan = (source as { plan?: unknown } | null)?.plan;
+    if (Array.isArray(plan)) return plan as PlanItem[];
+  }
+  return null;
+};
 
 const resolveSnapshotSessionStatus = (
   pendingAssistant: ChatSessionState["pendingAssistant"],
@@ -798,17 +812,23 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     const state = get();
     const existingSession = state.sessionsByKey[sessionId];
     if (existingSession?.threadId === threadId) {
-      set((currentState) => ({
-        activeSessionKey: sessionId,
-        errorMessage: null,
-        sessionsByKey: {
-          ...currentState.sessionsByKey,
-          [sessionId]: {
-            ...existingSession,
-            selectedJobDetailId: null,
+      try {
+        await get().refreshSnapshot(sessionId);
+        set((currentState) => ({
+          activeSessionKey: sessionId,
+          errorMessage: null,
+          sessionsByKey: {
+            ...currentState.sessionsByKey,
+            [sessionId]: {
+              ...currentState.sessionsByKey[sessionId],
+              selectedJobDetailId: null,
+            },
           },
-        },
-      }));
+        }));
+      } catch (error) {
+        set({ errorMessage: toErrorMessage(error) });
+        throw error;
+      }
       return;
     }
 
