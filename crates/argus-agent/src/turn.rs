@@ -596,19 +596,6 @@ async fn call_llm_streaming(
                             Ok(event) => event,
                             Err(error) => return Ok(StreamingCallOutcome::Failed(error)),
                         };
-                        if let Err(error) = ctx.thread_event_tx.send(ThreadEvent::Processing {
-                            thread_id: thread_id.to_string(),
-                            turn_number: ctx.turn_number,
-                            event: event.clone(),
-                        }) {
-                            tracing::warn!(
-                                thread_id = %thread_id,
-                                turn_number = %ctx.turn_number,
-                                error = %error,
-                                "Failed to send Processing event"
-                            );
-                        }
-                        let _ = ctx.stream_tx.send(TurnStreamEvent::LlmEvent(event.clone()));
                         match &event {
                             LlmStreamEvent::ReasoningDelta { delta } => {
                                 append_process_event(
@@ -640,6 +627,19 @@ async fn call_llm_streaming(
                             | LlmStreamEvent::Finished { .. }
                             | LlmStreamEvent::RetryAttempt { .. } => {}
                         }
+                        if let Err(error) = ctx.thread_event_tx.send(ThreadEvent::Processing {
+                            thread_id: thread_id.to_string(),
+                            turn_number: ctx.turn_number,
+                            event: event.clone(),
+                        }) {
+                            tracing::warn!(
+                                thread_id = %thread_id,
+                                turn_number = %ctx.turn_number,
+                                error = %error,
+                                "Failed to send Processing event"
+                            );
+                        }
+                        let _ = ctx.stream_tx.send(TurnStreamEvent::LlmEvent(event.clone()));
                         accumulator.process(event);
                     }
                 }
@@ -733,6 +733,15 @@ async fn execute_single_tool(
         };
     }
 
+    append_process_event(
+        ctx,
+        TurnTraceEventPayload::tool_started(
+            tool_call_id.clone(),
+            tool_name.clone(),
+            tool_input.clone(),
+        ),
+    )
+    .await;
     if let Err(error) = ctx.thread_event_tx.send(ThreadEvent::ToolStarted {
         thread_id: thread_id.clone(),
         turn_number: ctx.turn_number,
@@ -753,15 +762,6 @@ async fn execute_single_tool(
         tool_name: tool_name.clone(),
         arguments: tool_input.clone(),
     });
-    append_process_event(
-        ctx,
-        TurnTraceEventPayload::tool_started(
-            tool_call_id.clone(),
-            tool_name.clone(),
-            tool_input.clone(),
-        ),
-    )
-    .await;
 
     let timeout_duration = std::time::Duration::from_secs(tool_timeout_secs);
     set_current_agent_id(ctx.agent_record.id);
@@ -842,6 +842,20 @@ async fn execute_single_tool(
         Ok(value) => Ok(value.clone()),
         Err(error) => Err(error.clone()),
     };
+    let (trace_result, is_error) = match &result {
+        Ok(value) => (value.clone(), false),
+        Err(error) => (serde_json::json!({ "error": error }), true),
+    };
+    append_process_event(
+        ctx,
+        TurnTraceEventPayload::tool_completed(
+            tool_call_id.clone(),
+            tool_name.clone(),
+            trace_result,
+            is_error,
+        ),
+    )
+    .await;
     if let Err(error) = ctx.thread_event_tx.send(ThreadEvent::ToolCompleted {
         thread_id: thread_id.clone(),
         turn_number: ctx.turn_number,
@@ -862,20 +876,6 @@ async fn execute_single_tool(
         tool_name: tool_name.clone(),
         result: event_result,
     });
-    let (trace_result, is_error) = match &result {
-        Ok(value) => (value.clone(), false),
-        Err(error) => (serde_json::json!({ "error": error }), true),
-    };
-    append_process_event(
-        ctx,
-        TurnTraceEventPayload::tool_completed(
-            tool_call_id.clone(),
-            tool_name.clone(),
-            trace_result,
-            is_error,
-        ),
-    )
-    .await;
 
     let (tool_result, error) = match &result {
         Ok(value) => (Some(value.clone()), None),

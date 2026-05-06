@@ -137,4 +137,58 @@ describe("useChatThreadStream", () => {
       }),
     ]);
   });
+
+  it("hydrates pending assistant state from thread snapshots", async () => {
+    const activeSessionId = ref("session-1");
+    const activeThreadId = ref("thread-1");
+
+    setApiClient({
+      getHealth: vi.fn(),
+      getBootstrap: vi.fn(),
+      getRuntimeState: vi.fn(),
+      listProviders: vi.fn(),
+      saveProvider: vi.fn(),
+      listTemplates: vi.fn(),
+      saveTemplate: vi.fn(),
+      listMcpServers: vi.fn(),
+      saveMcpServer: vi.fn(),
+      getChatThreadSnapshot: vi.fn().mockResolvedValue({
+        ...snapshot("session-1", "thread-1", []),
+        pending_assistant: {
+          turn_number: 1,
+          content: "恢复中的回复",
+          reasoning: "恢复中的思考",
+          tool_calls: [
+            {
+              index: 0,
+              call_id: "call-1",
+              name: "search",
+              arguments_text: "{\"q\":\"trace\"}",
+              status: "completed",
+              arguments: { q: "trace" },
+              result: { ok: true },
+              is_error: false,
+            },
+          ],
+        },
+      }),
+      listChatMessages: vi.fn().mockResolvedValue([]),
+    } as ApiClient);
+
+    const stream = useChatThreadStream({ activeSessionId, activeThreadId });
+    await stream.refreshActiveThread();
+
+    expect(stream.streaming.value).toBe(true);
+    expect(stream.pendingAssistantContent.value).toBe("恢复中的回复");
+    expect(stream.pendingAssistantReasoning.value).toBe("恢复中的思考");
+    expect(stream.runtimeActivities.value).toEqual([
+      expect.objectContaining({
+        id: "call-1",
+        kind: "tool",
+        name: "search",
+        status: "success",
+        argumentsPreview: "{\"q\":\"trace\"}",
+      }),
+    ]);
+  });
 });
