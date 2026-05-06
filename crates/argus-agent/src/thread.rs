@@ -1263,7 +1263,7 @@ impl Thread {
         let committed_trace_persisted = if committed {
             let persisted = self.persist_committed_turns_if_needed().await;
             if persisted
-                && let Some(token_usage) = completed_usage
+                && let Some(token_usage) = completed_usage.clone()
             {
                 Self::append_terminal_turn_event(
                     turn_event_writer.as_ref(),
