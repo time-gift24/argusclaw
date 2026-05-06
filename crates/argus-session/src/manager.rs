@@ -3196,14 +3196,28 @@ mod tests {
 
     #[tokio::test]
     async fn pending_assistant_snapshot_recovers_turn_event_trace() {
-        let (manager, _temp_dir, session_id, thread_id) = test_session_manager().await;
+        let harness = test_session_manager_harness_with_provider(Arc::new(FixedProvider {
+            model_name: "routing-test".to_string(),
+        }))
+        .await;
+        let manager = harness.manager;
+        let session_id = harness.session_id;
+        let thread_id = harness.thread_id;
         let base_dir = chat_thread_base_dir(&manager.trace_dir, session_id, thread_id);
         persist_thread_metadata(
             &base_dir,
             &ThreadTraceMetadata {
-                session_id,
                 thread_id,
-                kind: ThreadTraceKind::Chat,
+                kind: ThreadTraceKind::ChatRoot,
+                root_session_id: Some(session_id),
+                parent_thread_id: None,
+                job_id: None,
+                agent_snapshot: harness
+                    .template_manager
+                    .get(harness.agent_id)
+                    .await
+                    .expect("template lookup should succeed")
+                    .expect("agent snapshot should exist"),
             },
         )
         .await
