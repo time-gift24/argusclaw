@@ -25,23 +25,27 @@ describe("ChatComposerBar", () => {
     };
   }
 
-  function mountComposerBar() {
+  function composerProps() {
     const activeProvider = provider();
+    return {
+      modelValue: "",
+      templates: [],
+      providers: [activeProvider],
+      selectedTemplateId: null,
+      selectedProviderId: 7,
+      selectedModel: "glm-4.7",
+      disabled: false,
+      loading: false,
+      placeholder: "请输入内容",
+      hasActiveThread: false,
+      activeProvider,
+      selectedTemplate: null,
+    };
+  }
+
+  function mountComposerBar() {
     return mount(ChatComposerBar, {
-      props: {
-        modelValue: "",
-        templates: [],
-        providers: [activeProvider],
-        selectedTemplateId: null,
-        selectedProviderId: 7,
-        selectedModel: "glm-4.7",
-        disabled: false,
-        loading: false,
-        placeholder: "请输入内容",
-        hasActiveThread: false,
-        activeProvider,
-        selectedTemplate: null,
-      },
+      props: composerProps(),
     });
   }
 
@@ -92,6 +96,20 @@ describe("ChatComposerBar", () => {
     expect(wrapper.find(".composer-bar__sender").exists()).toBe(true);
     expect(wrapper.find(".composer-bar__footer-row").exists()).toBe(true);
     expect(wrapper.findAll("button")).toHaveLength(3);
+  });
+
+  it("emits cancel from the sender while a response is running", async () => {
+    const wrapper = mount(ChatComposerBar, {
+      props: {
+        ...composerProps(),
+        loading: true,
+      },
+    });
+
+    await wrapper.get(".tr-sender-stub button").trigger("click");
+
+    expect(wrapper.emitted("cancel")).toHaveLength(1);
+    expect(wrapper.emitted("submit")).toBeUndefined();
   });
 
   it("renders the active provider models as options and emits the selected model", async () => {

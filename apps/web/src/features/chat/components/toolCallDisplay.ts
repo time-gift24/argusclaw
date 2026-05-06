@@ -6,6 +6,7 @@ export function toolIcon(kind: string) {
   if (kind === "search") return "⌕";
   if (kind === "http") return "⇄";
   if (kind === "file") return "F";
+  if (kind === "job") return "JOB";
   return "T";
 }
 
@@ -15,6 +16,7 @@ export function toolKindLabel(kind: string) {
   if (kind === "search") return "检索";
   if (kind === "http") return "网络请求";
   if (kind === "file") return "文件操作";
+  if (kind === "job") return "后台 Job";
   return "通用工具";
 }
 

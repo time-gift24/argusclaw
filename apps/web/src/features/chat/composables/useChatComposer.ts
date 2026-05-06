@@ -165,7 +165,9 @@ export function useChatComposer(options: UseChatComposerOptions) {
     try {
       closeThreadEvents();
       await api.cancelChatThread!(activeSessionId.value, activeThreadId.value);
-      actionMessage.value = "已请求取消当前线程。";
+      streaming.value = false;
+      clearPendingAssistant();
+      actionMessage.value = "已请求停止当前对话。";
     } catch (reason) {
       setError(reason);
     }

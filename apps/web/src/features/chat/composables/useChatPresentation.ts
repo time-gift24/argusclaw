@@ -13,7 +13,7 @@ export const TOOL_SUMMARY_CONTENT_TYPE = "argus-tool-summary";
 
 export interface ToolCallDetail {
   id: string;
-  kind: "shell" | "mcp" | "search" | "http" | "file" | "tool";
+  kind: "shell" | "mcp" | "search" | "http" | "file" | "job" | "tool";
   name: string;
   status: ToolActivityStatus;
   inputPreview: string;
@@ -285,7 +285,7 @@ function buildMessageToolDetails(
 function buildPendingToolDetails(runtimeActivities: ToolActivity[]): ToolCallDetail[] {
   return runtimeActivities.map((activity) => ({
     id: activity.id,
-    kind: toolKind(activity.name),
+    kind: activity.kind === "job" ? "job" : toolKind(activity.name),
     name: activity.name,
     status: activity.status,
     inputPreview: activity.argumentsPreview,

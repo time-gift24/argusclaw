@@ -34,6 +34,13 @@ const emit = defineEmits<Emits>();
 const stageRef = ref<HTMLDivElement | null>(null);
 const shouldStickToBottom = ref(true);
 const AUTO_SCROLL_THRESHOLD = 72;
+const bubbleStore = {
+  mdConfig: {
+    html: false,
+    linkify: true,
+    typographer: true,
+  },
+};
 const contentRendererMatches: BubbleContentRendererMatch[] = [
   {
     find: (_message: BubbleMessage, content: ChatMessageContentItem) =>
@@ -105,6 +112,7 @@ onMounted(async () => {
       class="message-stage__provider"
       :content-renderer-matches="contentRendererMatches"
       :fallback-content-renderer="BubbleRenderers.Markdown"
+      :store="bubbleStore"
     >
       <TrBubbleList
         class="bubble-list"
@@ -302,6 +310,81 @@ onMounted(async () => {
 :deep(.tr-bubble__box[data-role="assistant"] .tr-bubble__markdown > :last-child),
 :deep(.tr-bubble__box[data-role="assistant"] .detail-content:last-child) {
   margin-bottom: 0;
+}
+
+:deep(.tr-bubble__box[data-role="assistant"] .tr-bubble__markdown h1),
+:deep(.tr-bubble__box[data-role="assistant"] .tr-bubble__markdown h2),
+:deep(.tr-bubble__box[data-role="assistant"] .tr-bubble__markdown h3) {
+  margin: var(--space-4) 0 var(--space-2);
+  color: var(--text-primary);
+  font-weight: 650;
+  line-height: 1.35;
+}
+
+:deep(.tr-bubble__box[data-role="assistant"] .tr-bubble__markdown h1) {
+  font-size: var(--text-xl);
+}
+
+:deep(.tr-bubble__box[data-role="assistant"] .tr-bubble__markdown h2) {
+  font-size: var(--text-lg);
+}
+
+:deep(.tr-bubble__box[data-role="assistant"] .tr-bubble__markdown h3) {
+  font-size: var(--text-base);
+}
+
+:deep(.tr-bubble__box[data-role="assistant"] .tr-bubble__markdown blockquote) {
+  margin: var(--space-3) 0;
+  padding: var(--space-2) var(--space-4);
+  border-left: 3px solid color-mix(in srgb, var(--accent) 48%, var(--border-default));
+  background: color-mix(in srgb, var(--surface-muted) 70%, transparent);
+  color: var(--text-secondary);
+}
+
+:deep(.tr-bubble__box[data-role="assistant"] .tr-bubble__markdown pre) {
+  overflow: auto;
+  margin: var(--space-3) 0;
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  background: var(--surface-raised);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  line-height: 1.7;
+}
+
+:deep(.tr-bubble__box[data-role="assistant"] .tr-bubble__markdown :not(pre) > code) {
+  padding: 2px 5px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--surface-muted) 88%, transparent);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+}
+
+:deep(.tr-bubble__box[data-role="assistant"] .tr-bubble__markdown table) {
+  display: block;
+  width: 100%;
+  overflow-x: auto;
+  margin: var(--space-3) 0;
+  border-collapse: collapse;
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+}
+
+:deep(.tr-bubble__box[data-role="assistant"] .tr-bubble__markdown th),
+:deep(.tr-bubble__box[data-role="assistant"] .tr-bubble__markdown td) {
+  padding: 8px 12px;
+  border: 1px solid var(--border-subtle);
+  text-align: left;
+  vertical-align: top;
+}
+
+:deep(.tr-bubble__box[data-role="assistant"] .tr-bubble__markdown th) {
+  background: color-mix(in srgb, var(--surface-muted) 82%, transparent);
+  color: var(--text-secondary);
+  font-weight: 650;
 }
 
 :deep(.tr-bubble__box[data-role="assistant"] .tr-bubble__after) {

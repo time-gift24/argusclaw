@@ -98,4 +98,42 @@ describe("useChatThreadStream", () => {
 
     expect(stream.messages.value.map((item) => item.content)).toEqual(["新线程回复"]);
   });
+
+  it("surfaces background job events as runtime activities for the active chat", () => {
+    const activeSessionId = ref("session-1");
+    const activeThreadId = ref("thread-1");
+    const stream = useChatThreadStream({ activeSessionId, activeThreadId });
+
+    stream.handleThreadEvent({
+      session_id: "session-1",
+      thread_id: "thread-1",
+      turn_number: null,
+      payload: {
+        type: "job_runtime_started",
+        job_id: "job-42",
+      },
+    });
+    stream.handleThreadEvent({
+      session_id: "session-1",
+      thread_id: "thread-1",
+      turn_number: null,
+      payload: {
+        type: "job_result",
+        job_id: "job-42",
+        success: true,
+        cancelled: false,
+        message: "后台任务完成",
+      },
+    });
+
+    expect(stream.runtimeActivities.value).toEqual([
+      expect.objectContaining({
+        id: "job-42",
+        kind: "job",
+        name: "后台 Job job-42",
+        status: "success",
+        resultPreview: "后台任务完成",
+      }),
+    ]);
+  });
 });

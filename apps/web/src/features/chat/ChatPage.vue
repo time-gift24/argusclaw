@@ -238,7 +238,7 @@ function applyPrompt(_event: MouseEvent, item: PromptProps) {
           v-model:selected-provider-id="selectedProviderId"
           v-model:selected-model="selectedModel"
           :disabled="!chatComposer.canSendMessage.value"
-          :loading="chatComposer.sending.value"
+          :loading="chatComposer.sending.value || chatThreadStream.streaming.value"
           :placeholder="chatComposer.senderPlaceholder.value"
           :has-active-thread="hasActiveThread"
           :active-provider="activeProvider"
