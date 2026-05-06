@@ -703,7 +703,7 @@ describe("ChatPage", () => {
     expect(wrapper.text()).not.toContain("消息已提交，正在等待流式结果。");
   });
 
-  it("routes runtime tool activity into the assistant message instead of a standalone panel", async () => {
+  it("routes runtime tool activity into the right rail instead of the assistant message", async () => {
     let handlers: ChatThreadEventHandlers | undefined;
 
     setApiClient(
@@ -738,6 +738,8 @@ describe("ChatPage", () => {
     await flushPromises();
 
     expect(wrapper.text()).not.toContain("本轮运行活动");
+    expect(wrapper.find(".runtime-rail").exists()).toBe(true);
+    expect(wrapper.find(".runtime-rail").text()).toContain("shell");
 
     handlers!.onEvent({
       session_id: "session-1",
@@ -761,16 +763,72 @@ describe("ChatPage", () => {
     }>;
     const pendingAssistant = messages.find((item) => item.id === "pending-assistant");
     expect(pendingAssistant?.role).toBe("assistant");
-    expect(pendingAssistant?.state?.toolDetails).toEqual([
-      {
-        id: "call-shell",
-        kind: "shell",
-        name: "shell",
-        status: "success",
-        inputPreview: "{\n  \"cmd\": \"pwd\"\n}",
-        outputPreview: "/workspace/project",
+    expect(pendingAssistant?.state?.toolDetails).toBeUndefined();
+    expect(wrapper.find(".runtime-rail").text()).toContain("完成");
+  });
+
+  it("keeps runtime activity ordered from first started to latest while updating in place", async () => {
+    let handlers: ChatThreadEventHandlers | undefined;
+
+    setApiClient(
+      makeApiClient({
+        listChatSessions: vi.fn().mockResolvedValue([session()]),
+        listChatThreads: vi.fn().mockResolvedValue([thread()]),
+        listChatMessages: vi.fn().mockResolvedValue([]),
+        subscribeChatThread: vi.fn((_sessionId, _threadId, nextHandlers) => {
+          handlers = nextHandlers;
+          return { close: vi.fn() } as RuntimeEventSubscription;
+        }),
+      }),
+    );
+    const wrapper = mount(ChatPage);
+    await flushPromises();
+
+    await wrapper.get("[data-testid='chat-input']").setValue("继续");
+    await wrapper.get("[data-testid='chat-input']").trigger("keydown", { key: "Enter" });
+    await flushPromises();
+
+    handlers!.onEvent({
+      session_id: "session-1",
+      thread_id: "thread-1",
+      turn_number: null,
+      payload: {
+        type: "tool_started",
+        tool_call_id: "call-shell",
+        tool_name: "shell",
+        arguments: { cmd: "pwd" },
       },
-    ]);
+    });
+    handlers!.onEvent({
+      session_id: "session-1",
+      thread_id: "thread-1",
+      turn_number: null,
+      payload: {
+        type: "job_dispatched",
+        job_id: "job-2",
+        prompt: "后台分析",
+      },
+    });
+    handlers!.onEvent({
+      session_id: "session-1",
+      thread_id: "thread-1",
+      turn_number: null,
+      payload: {
+        type: "tool_completed",
+        tool_call_id: "call-shell",
+        tool_name: "shell",
+        result: "/workspace/project",
+        is_error: false,
+      },
+    });
+    await flushPromises();
+
+    const rows = wrapper.findAll(".runtime-rail__item");
+    expect(rows).toHaveLength(2);
+    expect(rows[0]!.text()).toContain("shell");
+    expect(rows[0]!.text()).toContain("完成");
+    expect(rows[1]!.text()).toContain("后台 Job job-2");
+    expect(rows[1]!.text()).toContain("运行中");
   });
 
   it("starts a new chat draft when clicking the new chat button", async () => {

@@ -21,6 +21,7 @@ import {
 import ChatComposerBar from "./components/ChatComposerBar.vue";
 import ChatConversationPanel from "./components/ChatConversationPanel.vue";
 import ChatHistoryDialog from "./components/ChatHistoryDialog.vue";
+import RuntimeActivityRail from "./components/RuntimeActivityRail.vue";
 
 const chatSessions = useChatSessions();
 const chatThreadStream = useChatThreadStream({
@@ -73,7 +74,7 @@ const robotMessages = computed(() => toRobotMessages({
   hasActiveThread: hasActiveThread.value,
   pendingAssistantContent: chatThreadStream.pendingAssistantContent.value,
   pendingAssistantReasoning: chatThreadStream.pendingAssistantReasoning.value,
-  runtimeActivities: chatThreadStream.runtimeActivities.value,
+  runtimeActivities: [],
 }));
 const bubbleRoles = createBubbleRoles();
 const starterPrompts = createStarterPrompts();
@@ -297,6 +298,7 @@ function applyPrompt(_event: MouseEvent, item: PromptProps) {
           @prompt="applyPrompt"
         />
       </div>
+      <RuntimeActivityRail :activities="chatThreadStream.runtimeActivities.value" />
     </div>
 
     <div class="chat-page__composer-dock">
@@ -339,7 +341,9 @@ function applyPrompt(_event: MouseEvent, item: PromptProps) {
 <style scoped>
 .chat-page {
   width: 100%;
-  --chat-main-width: 980px;
+  --chat-main-width: 1280px;
+  --chat-rail-width: 320px;
+  --chat-layout-gap: var(--space-5);
   --chat-dock-clearance: 212px;
   height: calc(100vh - (var(--space-6) * 2));
   min-height: calc(100vh - (var(--space-6) * 2));
@@ -360,11 +364,18 @@ function applyPrompt(_event: MouseEvent, item: PromptProps) {
   min-height: 0;
 }
 
+.chat-workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) var(--chat-rail-width);
+  gap: var(--chat-layout-gap);
+  width: min(100%, var(--chat-main-width));
+  margin-inline: auto;
+}
+
 .chat-main-column {
   display: flex;
   flex-direction: column;
-  width: min(100%, var(--chat-main-width));
-  margin-inline: auto;
+  min-width: 0;
 }
 
 .chat-page__composer-dock {
@@ -378,7 +389,7 @@ function applyPrompt(_event: MouseEvent, item: PromptProps) {
 }
 
 .chat-page__composer-shell {
-  width: min(100%, var(--chat-main-width));
+  width: min(100%, calc(var(--chat-main-width) - var(--chat-rail-width) - var(--chat-layout-gap)));
 }
 
 @media (max-width: 1180px) {
@@ -393,6 +404,18 @@ function applyPrompt(_event: MouseEvent, item: PromptProps) {
     left: var(--space-4);
     right: var(--space-4);
     bottom: var(--space-4);
+  }
+}
+
+@media (max-width: 1280px) {
+  .chat-workspace {
+    grid-template-columns: 1fr;
+    overflow: auto;
+    padding-bottom: calc(var(--chat-dock-clearance, 228px) + var(--space-4));
+  }
+
+  .chat-page__composer-shell {
+    width: min(100%, var(--chat-main-width));
   }
 }
 </style>

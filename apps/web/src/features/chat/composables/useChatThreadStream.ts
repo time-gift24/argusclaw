@@ -188,7 +188,7 @@ export function useChatThreadStream(options: UseChatThreadStreamOptions) {
   function upsertToolActivity(nextActivity: ToolActivity) {
     const existingIndex = runtimeActivities.value.findIndex((item) => item.id === nextActivity.id);
     if (existingIndex === -1) {
-      runtimeActivities.value = [nextActivity, ...runtimeActivities.value];
+      runtimeActivities.value = [...runtimeActivities.value, nextActivity];
       return;
     }
     const existing = runtimeActivities.value[existingIndex];
