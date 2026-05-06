@@ -1169,15 +1169,18 @@ impl Thread {
         }
     }
 
-    async fn persist_committed_turns_if_needed(&self) {
-        if let Some(base_dir) = self.trace_base_dir()
-            && let Err(error) = Self::persist_trace_turns(&base_dir, &self.turns).await
-        {
+    async fn persist_committed_turns_if_needed(&self) -> bool {
+        let Some(base_dir) = self.trace_base_dir() else {
+            return true;
+        };
+        if let Err(error) = Self::persist_trace_turns(&base_dir, &self.turns).await {
             tracing::warn!(
                 error = %error,
                 "failed to persist committed turn records"
             );
+            return false;
         }
+        true
     }
 
     async fn open_turn_event_writer(&self) -> Option<TurnEventTraceWriter> {
@@ -1248,9 +1251,11 @@ impl Thread {
             tracing::error!("turn failed: {}", error);
         }
 
-        if committed {
-            self.persist_committed_turns_if_needed().await;
-            if let Some(token_usage) = completed_usage {
+        let committed_trace_persisted = if committed {
+            let persisted = self.persist_committed_turns_if_needed().await;
+            if persisted
+                && let Some(token_usage) = completed_usage
+            {
                 Self::append_terminal_turn_event(
                     turn_event_writer.as_ref(),
                     settled_turn_number,
@@ -1258,18 +1263,25 @@ impl Thread {
                 )
                 .await;
             }
-        }
+            persisted
+        } else {
+            false
+        };
+
+        let append_settled_process_event = !committed || committed_trace_persisted;
 
         self.broadcast_to_self(ThreadEvent::TurnSettled {
             thread_id: thread_id.clone(),
             turn_number: settled_turn_number,
         });
-        Self::append_terminal_turn_event(
-            turn_event_writer.as_ref(),
-            settled_turn_number,
-            TurnTraceEventPayload::turn_settled(),
-        )
-        .await;
+        if append_settled_process_event {
+            Self::append_terminal_turn_event(
+                turn_event_writer.as_ref(),
+                settled_turn_number,
+                TurnTraceEventPayload::turn_settled(),
+            )
+            .await;
+        }
 
         if shutdown_requested {
             self.reset_runtime_loop_state();
@@ -1358,23 +1370,27 @@ impl Thread {
         match result {
             Ok(record) => {
                 self.finish_turn(Ok(record.clone()))?;
-                self.persist_committed_turns_if_needed().await;
-                Self::append_terminal_turn_event(
-                    turn_event_writer.as_ref(),
-                    turn_number,
-                    TurnTraceEventPayload::turn_completed(record.token_usage.clone()),
-                )
-                .await;
+                let committed_trace_persisted = self.persist_committed_turns_if_needed().await;
+                if committed_trace_persisted {
+                    Self::append_terminal_turn_event(
+                        turn_event_writer.as_ref(),
+                        turn_number,
+                        TurnTraceEventPayload::turn_completed(record.token_usage.clone()),
+                    )
+                    .await;
+                }
                 self.broadcast_to_self(ThreadEvent::TurnSettled {
                     thread_id: thread_id_for_events.clone(),
                     turn_number,
                 });
-                Self::append_terminal_turn_event(
-                    turn_event_writer.as_ref(),
-                    turn_number,
-                    TurnTraceEventPayload::turn_settled(),
-                )
-                .await;
+                if committed_trace_persisted {
+                    Self::append_terminal_turn_event(
+                        turn_event_writer.as_ref(),
+                        turn_number,
+                        TurnTraceEventPayload::turn_settled(),
+                    )
+                    .await;
+                }
                 self.broadcast_to_self(ThreadEvent::Idle {
                     thread_id: thread_id_for_events.clone(),
                 });

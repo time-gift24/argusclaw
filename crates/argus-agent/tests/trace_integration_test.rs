@@ -12,7 +12,7 @@ use argus_agent::trace::TraceConfig;
 use argus_agent::turn_event_store::{
     TurnTraceEvent, TurnTraceEventPayload, recover_pending_assistant, turn_events_jsonl_path,
 };
-use argus_agent::turn_log_store::recover_thread_log_state;
+use argus_agent::turn_log_store::{recover_thread_log_state, turns_jsonl_path};
 use argus_agent::{
     CompactError, CompactResult, Compactor, Thread, ThreadBuilder, ThreadConfig, ThreadError,
     ThreadHandle, TurnCancellation, TurnConfigBuilder, TurnError,
@@ -692,6 +692,64 @@ async fn turn_events_jsonl_persists_stream_and_tool_events_during_turn() {
         pending.is_none(),
         "settled turn events should not recover stale pending output"
     );
+}
+
+#[tokio::test]
+async fn successful_turn_does_not_write_terminal_events_when_turn_log_persist_fails() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let session_id = SessionId::new();
+    let thread_id = ThreadId::new();
+    let persisted_base_dir = chat_thread_base_dir(temp_dir.path(), session_id, thread_id);
+    tokio::fs::create_dir_all(&persisted_base_dir)
+        .await
+        .expect("trace dir should be creatable");
+    tokio::fs::write(turns_jsonl_path(&persisted_base_dir), "{not valid json}\n")
+        .await
+        .expect("poisoned turn log should be writable");
+
+    let trace_config = TraceConfig::new(true, persisted_base_dir.clone());
+    let provider = Arc::new(SimpleMockProvider::new("uncommitted answer"));
+    let thread_config = ThreadConfig {
+        turn_config: TurnConfigBuilder::default()
+            .trace_config(trace_config)
+            .build()
+            .unwrap(),
+    };
+    let mut thread = build_direct_thread(provider, session_id, thread_id, thread_config);
+
+    thread
+        .execute_turn("Hello".to_string(), None, TurnCancellation::new())
+        .await
+        .expect("turn execution should still complete in memory");
+
+    let content = tokio::fs::read_to_string(turn_events_jsonl_path(&persisted_base_dir))
+        .await
+        .expect("process events should still be best-effort writable");
+    let events = content
+        .lines()
+        .map(|line| serde_json::from_str::<TurnTraceEvent>(line).expect("valid event line"))
+        .collect::<Vec<_>>();
+    let payloads = events
+        .iter()
+        .map(|event| &event.payload)
+        .collect::<Vec<_>>();
+
+    assert!(payloads.iter().any(|payload| matches!(
+        payload,
+        TurnTraceEventPayload::ContentDelta { text } if text == "uncommitted answer"
+    )));
+    assert!(!payloads
+        .iter()
+        .any(|payload| matches!(payload, TurnTraceEventPayload::TurnCompleted { .. })));
+    assert!(!payloads
+        .iter()
+        .any(|payload| matches!(payload, TurnTraceEventPayload::TurnSettled)));
+
+    let pending = recover_pending_assistant(&persisted_base_dir, 0)
+        .await
+        .expect("pending assistant replay should work")
+        .expect("pending assistant trace should remain recoverable");
+    assert_eq!(pending.content, "uncommitted answer");
 }
 
 #[tokio::test]
