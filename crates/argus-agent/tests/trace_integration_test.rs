@@ -637,6 +637,10 @@ async fn turn_events_jsonl_persists_stream_and_tool_events_during_turn() {
         .map(|event| &event.payload)
         .collect::<Vec<_>>();
 
+    assert!(
+        events.windows(2).all(|window| window[0].cursor < window[1].cursor),
+        "turn event cursors should be strictly increasing"
+    );
     assert!(payloads.iter().any(|payload| matches!(
         payload,
         TurnTraceEventPayload::ContentDelta { text } if text == "looking"
@@ -651,18 +655,35 @@ async fn turn_events_jsonl_persists_stream_and_tool_events_during_turn() {
         payload,
         TurnTraceEventPayload::ToolStarted { name, .. } if name == "trace_echo"
     )));
-    assert!(payloads.iter().any(|payload| matches!(
-        payload,
-        TurnTraceEventPayload::ToolCompleted { name, is_error, .. }
-            if name == "trace_echo" && !is_error
-    )));
-    assert!(payloads.iter().any(|payload| matches!(
-        payload,
-        TurnTraceEventPayload::TurnCompleted { .. }
-    )));
-    assert!(payloads
+    let tool_completed = payloads
         .iter()
-        .any(|payload| matches!(payload, TurnTraceEventPayload::TurnSettled)));
+        .find_map(|payload| match payload {
+            TurnTraceEventPayload::ToolCompleted {
+                name,
+                result,
+                is_error,
+                ..
+            } if name == "trace_echo" && !is_error => Some(result),
+            _ => None,
+        })
+        .expect("tool completion should be persisted");
+    assert_eq!(
+        tool_completed,
+        &serde_json::json!({ "echo": { "text": "ping" } })
+    );
+
+    let completed_index = payloads
+        .iter()
+        .position(|payload| matches!(payload, TurnTraceEventPayload::TurnCompleted { .. }))
+        .expect("turn_completed should be persisted");
+    let settled_index = payloads
+        .iter()
+        .position(|payload| matches!(payload, TurnTraceEventPayload::TurnSettled))
+        .expect("turn_settled should be persisted");
+    assert!(
+        completed_index < settled_index,
+        "turn_completed should be persisted before turn_settled"
+    );
 
     let pending = recover_pending_assistant(&persisted_base_dir, 0)
         .await
