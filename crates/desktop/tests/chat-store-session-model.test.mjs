@@ -70,6 +70,10 @@ test("chat store keeps sessions keyed by template and provider preference", () =
   assert.match(storeSource, /chat\.getThreadSnapshot\(/);
   assert.match(storeSource, /catch \(error\)/);
   assert.match(storeSource, /errorMessage:/);
+  assert.match(typesSource, /export interface PendingAssistantSnapshotPayload/);
+  assert.match(typesSource, /pending_assistant:\s*PendingAssistantSnapshotPayload \| null/);
+  assert.match(storeSource, /const mapPendingAssistantSnapshot = \(/);
+  assert.match(storeSource, /pendingAssistant:\s*mapPendingAssistantSnapshot\(snapshot\.pending_assistant\)/);
 });
 
 test("thread pool store keeps the full authoritative runtime list", () => {

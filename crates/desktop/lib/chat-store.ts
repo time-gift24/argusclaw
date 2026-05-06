@@ -262,6 +262,41 @@ const ensurePendingAssistantSession = (
   pendingAssistant: session.pendingAssistant ?? createPendingAssistant(),
 });
 
+const mapPendingToolStatus = (
+  status: NonNullable<
+    ThreadSnapshotPayload["pending_assistant"]
+  >["tool_calls"][number]["status"],
+): PendingToolCall["status"] => {
+  switch (status) {
+    case "completed":
+      return "completed";
+    case "started":
+      return "running";
+    case "pending":
+      return "streaming";
+  }
+};
+
+const mapPendingAssistantSnapshot = (
+  pending: ThreadSnapshotPayload["pending_assistant"],
+): ChatSessionState["pendingAssistant"] =>
+  pending
+    ? {
+        content: pending.content,
+        reasoning: pending.reasoning,
+        toolCalls: pending.tool_calls.map((toolCall) => ({
+          tool_call_id: toolCall.call_id ?? `pending-${toolCall.index}`,
+          tool_name: toolCall.name ?? "",
+          arguments_text: toolCall.arguments_text,
+          result: toolCall.result ?? undefined,
+          is_error: toolCall.is_error,
+          status: mapPendingToolStatus(toolCall.status),
+        })),
+        plan: null,
+        retry: null,
+      }
+    : null;
+
 export interface ThreadPoolThreadState {
   threadId: string;
   kind: "chat" | "job";
@@ -685,7 +720,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         status: "idle",
         messages: snapshot.messages,
         pendingUserMessage: null,
-        pendingAssistant: null,
+        pendingAssistant: mapPendingAssistantSnapshot(snapshot.pending_assistant),
         jobStatuses: {},
         jobDetails: {},
         selectedJobDetailId: null,
@@ -784,7 +819,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         status: "idle",
         messages: snapshot.messages,
         pendingUserMessage: null,
-        pendingAssistant: null,
+        pendingAssistant: mapPendingAssistantSnapshot(snapshot.pending_assistant),
         jobStatuses: existingSession?.jobStatuses ?? {},
         jobDetails: existingSession?.jobDetails ?? {},
         selectedJobDetailId: null,
@@ -1177,7 +1212,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             ...state.sessionsByKey[sessionKey],
             messages: snapshot.messages,
             pendingUserMessage: null,
-            pendingAssistant: null,
+            pendingAssistant: mapPendingAssistantSnapshot(snapshot.pending_assistant),
             status: options?.preserveError ? "error" : "idle",
             error: options?.preserveError
               ? state.sessionsByKey[sessionKey].error
