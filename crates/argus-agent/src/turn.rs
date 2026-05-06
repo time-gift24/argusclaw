@@ -14,6 +14,7 @@ use tokio::time::{error::Elapsed, timeout};
 use super::compact::Compactor;
 use super::history::TurnRecord;
 use super::tool_context::{clear_current_agent_id, set_current_agent_id};
+use super::turn_event_store::{TurnEventTraceWriter, TurnTraceEventPayload};
 use super::{TurnConfig, TurnError, TurnStreamEvent};
 use argus_protocol::llm::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider, LlmStreamEvent,
@@ -121,11 +122,21 @@ struct TurnContext<'a> {
     stream_tx: &'a broadcast::Sender<TurnStreamEvent>,
     thread_event_tx: &'a broadcast::Sender<ThreadEvent>,
     cancellation: &'a TurnCancellation,
+    turn_event_writer: Option<TurnEventTraceWriter>,
 }
 
 impl TurnContext<'_> {
     fn thread_id_str(&self) -> String {
         self.thread_id.to_string()
+    }
+}
+
+async fn append_process_event(ctx: &TurnContext<'_>, payload: TurnTraceEventPayload) {
+    let Some(writer) = ctx.turn_event_writer.as_ref() else {
+        return;
+    };
+    if let Err(error) = writer.append(ctx.turn_number, payload).await {
+        tracing::warn!(error = %error, "failed to append turn process event");
     }
 }
 
@@ -552,26 +563,22 @@ fn process_finish_reason(
 }
 
 async fn call_llm_streaming(
-    provider: &dyn LlmProvider,
+    ctx: &TurnContext<'_>,
     request: CompletionRequest,
-    cancellation: &TurnCancellation,
-    stream_tx: &broadcast::Sender<TurnStreamEvent>,
-    thread_event_tx: &broadcast::Sender<ThreadEvent>,
     thread_id: &str,
-    turn_number: u32,
 ) -> Result<StreamingCallOutcome, TurnError> {
-    if cancellation.is_cancelled() {
+    if ctx.cancellation.is_cancelled() {
         return Err(TurnError::Cancelled);
     }
 
-    match provider.stream_complete(request.clone()).await {
+    match ctx.provider.stream_complete(request.clone()).await {
         Ok(mut stream) => {
             tracing::debug!(
                 thread_id = %thread_id,
-                turn_number = %turn_number,
+                turn_number = %ctx.turn_number,
                 "LLM stream started"
             );
-            let mut cancel_rx = cancellation.subscribe();
+            let mut cancel_rx = ctx.cancellation.subscribe();
             let mut accumulator = StreamingAccumulator::new();
             loop {
                 tokio::select! {
@@ -589,19 +596,50 @@ async fn call_llm_streaming(
                             Ok(event) => event,
                             Err(error) => return Ok(StreamingCallOutcome::Failed(error)),
                         };
-                        if let Err(error) = thread_event_tx.send(ThreadEvent::Processing {
+                        if let Err(error) = ctx.thread_event_tx.send(ThreadEvent::Processing {
                             thread_id: thread_id.to_string(),
-                            turn_number,
+                            turn_number: ctx.turn_number,
                             event: event.clone(),
                         }) {
                             tracing::warn!(
                                 thread_id = %thread_id,
-                                turn_number = %turn_number,
+                                turn_number = %ctx.turn_number,
                                 error = %error,
                                 "Failed to send Processing event"
                             );
                         }
-                        let _ = stream_tx.send(TurnStreamEvent::LlmEvent(event.clone()));
+                        let _ = ctx.stream_tx.send(TurnStreamEvent::LlmEvent(event.clone()));
+                        match &event {
+                            LlmStreamEvent::ReasoningDelta { delta } => {
+                                append_process_event(
+                                    ctx,
+                                    TurnTraceEventPayload::reasoning_delta(delta.as_str()),
+                                )
+                                .await;
+                            }
+                            LlmStreamEvent::ContentDelta { delta } => {
+                                append_process_event(
+                                    ctx,
+                                    TurnTraceEventPayload::content_delta(delta.as_str()),
+                                )
+                                .await;
+                            }
+                            LlmStreamEvent::ToolCallDelta(delta) => {
+                                append_process_event(
+                                    ctx,
+                                    TurnTraceEventPayload::tool_call_delta(
+                                        delta.index,
+                                        delta.id.as_deref(),
+                                        delta.name.as_deref(),
+                                        delta.arguments_delta.as_deref(),
+                                    ),
+                                )
+                                .await;
+                            }
+                            LlmStreamEvent::Usage { .. }
+                            | LlmStreamEvent::Finished { .. }
+                            | LlmStreamEvent::RetryAttempt { .. } => {}
+                        }
                         accumulator.process(event);
                     }
                 }
@@ -610,7 +648,7 @@ async fn call_llm_streaming(
             let response = accumulator.into_response();
             tracing::debug!(
                 thread_id = %thread_id,
-                turn_number = %turn_number,
+                turn_number = %ctx.turn_number,
                 finish_reason = ?response.finish_reason,
                 tool_call_count = %response.tool_calls.len(),
                 "LLM stream completed"
@@ -623,8 +661,8 @@ async fn call_llm_streaming(
         Err(argus_protocol::llm::LlmError::UnsupportedCapability { .. }) => {
             tracing::debug!("Provider doesn't support streaming, using non-streaming fallback");
             tokio::select! {
-                _ = cancellation.cancelled() => Err(TurnError::Cancelled),
-                result = provider.complete(request) => result.map(|response| StreamingCallOutcome::Completed {
+                _ = ctx.cancellation.cancelled() => Err(TurnError::Cancelled),
+                result = ctx.provider.complete(request) => result.map(|response| StreamingCallOutcome::Completed {
                     response,
                     usage_reported: false,
                 }).map_err(TurnError::LlmFailed),
@@ -715,6 +753,15 @@ async fn execute_single_tool(
         tool_name: tool_name.clone(),
         arguments: tool_input.clone(),
     });
+    append_process_event(
+        ctx,
+        TurnTraceEventPayload::tool_started(
+            tool_call_id.clone(),
+            tool_name.clone(),
+            tool_input.clone(),
+        ),
+    )
+    .await;
 
     let timeout_duration = std::time::Duration::from_secs(tool_timeout_secs);
     set_current_agent_id(ctx.agent_record.id);
@@ -815,6 +862,20 @@ async fn execute_single_tool(
         tool_name: tool_name.clone(),
         result: event_result,
     });
+    let (trace_result, is_error) = match &result {
+        Ok(value) => (value.clone(), false),
+        Err(error) => (serde_json::json!({ "error": error }), true),
+    };
+    append_process_event(
+        ctx,
+        TurnTraceEventPayload::tool_completed(
+            tool_call_id.clone(),
+            tool_name.clone(),
+            trace_result,
+            is_error,
+        ),
+    )
+    .await;
 
     let (tool_result, error) = match &result {
         Ok(value) => (Some(value.clone()), None),
@@ -943,15 +1004,7 @@ async fn execute_loop(
             tools_for_request,
             ctx.agent_record,
         );
-        let (response, usage_reported) = match call_llm_streaming(
-            ctx.provider,
-            request,
-            ctx.cancellation,
-            ctx.stream_tx,
-            ctx.thread_event_tx,
-            &thread_id,
-            ctx.turn_number,
-        )
+        let (response, usage_reported) = match call_llm_streaming(ctx, request, &thread_id)
         .await?
         {
             StreamingCallOutcome::Completed {
@@ -1164,6 +1217,7 @@ pub(crate) async fn execute_thread_turn(
     thread_event_tx: broadcast::Sender<ThreadEvent>,
     cancellation: TurnCancellation,
     compactor: Option<Arc<dyn Compactor>>,
+    turn_event_writer: Option<TurnEventTraceWriter>,
 ) -> Result<TurnRecord, TurnError> {
     let stream_tx = match stream_tx {
         Some(stream_tx) => stream_tx,
@@ -1187,6 +1241,7 @@ pub(crate) async fn execute_thread_turn(
         stream_tx: &stream_tx,
         thread_event_tx: &thread_event_tx,
         cancellation: &cancellation,
+        turn_event_writer,
     };
 
     tracing::info!(
@@ -1284,6 +1339,7 @@ impl Turn {
             thread_event_tx,
             cancellation,
             compactor,
+            None,
         )
         .await
     }

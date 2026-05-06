@@ -26,6 +26,7 @@ use super::history::{TurnRecord, TurnRecordKind, derive_next_user_turn_number};
 use super::plan_hook::PlanContinuationHook;
 use super::plan_store::FilePlanStore;
 use super::plan_tool::UpdatePlanTool;
+use super::turn_event_store::{TurnEventTraceWriter, TurnTraceEventPayload};
 use super::turn_log_store::{
     RecoveredThreadLogState, append_turn_record, recover_thread_log_state,
 };
@@ -207,6 +208,10 @@ pub struct Thread {
     #[builder(default)]
     active_turn_cancellation: Option<TurnCancellation>,
 
+    /// Best-effort process trace writer for the active turn, if tracing is enabled.
+    #[builder(default)]
+    active_turn_event_writer: Option<TurnEventTraceWriter>,
+
     /// Pipe for sending/receiving ThreadEvents.
     #[builder(default)]
     pipe_tx: broadcast::Sender<ThreadEvent>,
@@ -295,6 +300,7 @@ impl ThreadBuilder {
             config: self.config.unwrap_or_default(),
             runtime_state: ThreadRuntimeState::Idle,
             active_turn_cancellation: None,
+            active_turn_event_writer: None,
             pipe_tx,
             snapshot_tx: None,
             message_tx,
@@ -682,6 +688,7 @@ impl Thread {
     fn reset_runtime_loop_state(&mut self) {
         self.runtime_state = ThreadRuntimeState::Idle;
         self.active_turn_cancellation = None;
+        self.active_turn_event_writer = None;
         self.publish_runtime_snapshot();
     }
 
@@ -852,6 +859,7 @@ impl Thread {
     ) {
         self.turns = recovered.turns;
         self.active_turn_cancellation = None;
+        self.active_turn_event_writer = None;
         self.runtime_state = ThreadRuntimeState::Idle;
         self.updated_at = updated_at;
         self.publish_runtime_snapshot();
@@ -1078,10 +1086,13 @@ impl Thread {
             agent_record,
             thread_event_tx,
             compactor,
+            turn_event_writer,
         ) = {
             let effective_record = self
                 .prepare_turn_start(msg_override, cancellation.clone())
                 .await;
+            let turn_event_writer = self.open_turn_event_writer().await;
+            self.active_turn_event_writer = turn_event_writer.clone();
             let mcp_tools = self
                 .resolve_mcp_tools(&effective_record)
                 .await
@@ -1100,6 +1111,7 @@ impl Thread {
                 effective_record,
                 thread_event_tx,
                 compactor,
+                turn_event_writer,
             )
         };
 
@@ -1120,6 +1132,7 @@ impl Thread {
                 thread_event_tx,
                 cancellation,
                 Some(compactor),
+                turn_event_writer,
             )
             .await
             .map_err(ThreadError::TurnFailed)
@@ -1167,6 +1180,32 @@ impl Thread {
         }
     }
 
+    async fn open_turn_event_writer(&self) -> Option<TurnEventTraceWriter> {
+        let Some(base_dir) = self.trace_base_dir() else {
+            return None;
+        };
+        match TurnEventTraceWriter::open(&base_dir).await {
+            Ok(writer) => Some(writer),
+            Err(error) => {
+                tracing::warn!(error = %error, "failed to open turn event trace writer");
+                None
+            }
+        }
+    }
+
+    async fn append_terminal_turn_event(
+        writer: Option<&TurnEventTraceWriter>,
+        turn_number: u32,
+        payload: TurnTraceEventPayload,
+    ) {
+        let Some(writer) = writer else {
+            return;
+        };
+        if let Err(error) = writer.append(turn_number, payload).await {
+            tracing::warn!(error = %error, "failed to append turn terminal event");
+        }
+    }
+
     async fn settle_active_turn(
         &mut self,
         result: Result<TurnRecord, ThreadError>,
@@ -1181,10 +1220,31 @@ impl Thread {
         };
         let settled_turn_number = settled_turn_number.unwrap_or_default();
         let thread_id = self.id().inner().to_string();
+        let turn_event_writer = self.active_turn_event_writer.clone();
 
         self.broadcast_turn_terminal_event(settled_turn_number, &result);
+        match &result {
+            Ok(record) => {
+                Self::append_terminal_turn_event(
+                    turn_event_writer.as_ref(),
+                    settled_turn_number,
+                    TurnTraceEventPayload::turn_completed(record.token_usage.clone()),
+                )
+                .await;
+            }
+            Err(ThreadError::TurnFailed(crate::TurnError::Cancelled)) => {}
+            Err(_) => {
+                Self::append_terminal_turn_event(
+                    turn_event_writer.as_ref(),
+                    settled_turn_number,
+                    TurnTraceEventPayload::turn_failed(),
+                )
+                .await;
+            }
+        }
 
         self.active_turn_cancellation = None;
+        self.active_turn_event_writer = None;
         let finish_result = self.finish_turn(result);
 
         if let Err(error) = finish_result {
@@ -1199,6 +1259,12 @@ impl Thread {
             thread_id: thread_id.clone(),
             turn_number: settled_turn_number,
         });
+        Self::append_terminal_turn_event(
+            turn_event_writer.as_ref(),
+            settled_turn_number,
+            TurnTraceEventPayload::turn_settled(),
+        )
+        .await;
 
         if shutdown_requested {
             self.reset_runtime_loop_state();
@@ -1232,12 +1298,15 @@ impl Thread {
         let effective_record = self
             .prepare_turn_start(msg_override, cancellation.clone())
             .await;
+        let turn_event_writer = self.open_turn_event_writer().await;
+        self.active_turn_event_writer = turn_event_writer.clone();
         let mcp_tools = self
             .resolve_mcp_tools(&effective_record)
             .await
             .unwrap_or_default();
         let (thread_id, history, tools, hooks, provider, config, thread_event_tx, compactor) =
             self.build_turn_execution_parts(effective_record.clone(), mcp_tools);
+        let turn_event_writer_for_execution = turn_event_writer.clone();
 
         let result = match tokio::spawn(async move {
             turn::execute_thread_turn(
@@ -1256,6 +1325,7 @@ impl Thread {
                 thread_event_tx,
                 cancellation,
                 Some(compactor),
+                turn_event_writer_for_execution,
             )
             .await
             .map_err(ThreadError::TurnFailed)
@@ -1267,6 +1337,25 @@ impl Thread {
         };
 
         self.broadcast_turn_terminal_event(turn_number, &result);
+        match &result {
+            Ok(record) => {
+                Self::append_terminal_turn_event(
+                    turn_event_writer.as_ref(),
+                    turn_number,
+                    TurnTraceEventPayload::turn_completed(record.token_usage.clone()),
+                )
+                .await;
+            }
+            Err(ThreadError::TurnFailed(crate::TurnError::Cancelled)) => {}
+            Err(_) => {
+                Self::append_terminal_turn_event(
+                    turn_event_writer.as_ref(),
+                    turn_number,
+                    TurnTraceEventPayload::turn_failed(),
+                )
+                .await;
+            }
+        }
 
         match result {
             Ok(record) => {
@@ -1276,6 +1365,12 @@ impl Thread {
                     thread_id: thread_id_for_events.clone(),
                     turn_number,
                 });
+                Self::append_terminal_turn_event(
+                    turn_event_writer.as_ref(),
+                    turn_number,
+                    TurnTraceEventPayload::turn_settled(),
+                )
+                .await;
                 self.broadcast_to_self(ThreadEvent::Idle {
                     thread_id: thread_id_for_events.clone(),
                 });
@@ -1287,6 +1382,12 @@ impl Thread {
                     thread_id: thread_id_for_events.clone(),
                     turn_number,
                 });
+                Self::append_terminal_turn_event(
+                    turn_event_writer.as_ref(),
+                    turn_number,
+                    TurnTraceEventPayload::turn_settled(),
+                )
+                .await;
                 self.broadcast_to_self(ThreadEvent::Idle {
                     thread_id: thread_id_for_events.clone(),
                 });
@@ -1299,6 +1400,12 @@ impl Thread {
                         thread_id: thread_id_for_events.clone(),
                         turn_number,
                     });
+                    Self::append_terminal_turn_event(
+                        turn_event_writer.as_ref(),
+                        turn_number,
+                        TurnTraceEventPayload::turn_settled(),
+                    )
+                    .await;
                     self.broadcast_to_self(ThreadEvent::Idle {
                         thread_id: thread_id_for_events,
                     });
@@ -1365,6 +1472,7 @@ impl Thread {
         result: Result<TurnRecord, ThreadError>,
     ) -> Result<(), ThreadError> {
         self.active_turn_cancellation = None;
+        self.active_turn_event_writer = None;
 
         match result {
             Ok(record) => {
@@ -1443,6 +1551,7 @@ impl Thread {
         self.turns = turns;
         self.runtime_state = ThreadRuntimeState::Idle;
         self.active_turn_cancellation = None;
+        self.active_turn_event_writer = None;
     }
 }
 

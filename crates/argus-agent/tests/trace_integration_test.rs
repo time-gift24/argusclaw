@@ -9,6 +9,9 @@ use tokio::time::{Duration, sleep, timeout};
 
 use argus_agent::thread_trace_store::chat_thread_base_dir;
 use argus_agent::trace::TraceConfig;
+use argus_agent::turn_event_store::{
+    TurnTraceEvent, TurnTraceEventPayload, recover_pending_assistant, turn_events_jsonl_path,
+};
 use argus_agent::turn_log_store::recover_thread_log_state;
 use argus_agent::{
     CompactError, CompactResult, Compactor, Thread, ThreadBuilder, ThreadConfig, ThreadError,
@@ -16,9 +19,11 @@ use argus_agent::{
 };
 use argus_protocol::llm::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmEventStream,
-    LlmProvider, LlmStreamEvent,
+    LlmProvider, LlmStreamEvent, ToolCallDelta, ToolDefinition,
 };
+use argus_protocol::tool::{NamedTool, ToolError, ToolExecutionContext};
 use argus_protocol::{AgentRecord, SessionId, ThreadEvent, ThreadId, ThreadMessage};
+use argus_tool::ToolManager;
 use async_trait::async_trait;
 use rust_decimal::Decimal;
 
@@ -112,6 +117,103 @@ impl LlmProvider for PartialFailureMockProvider {
             }),
         ]);
         Ok(Box::pin(stream))
+    }
+}
+
+struct StreamingToolMockProvider {
+    calls: Mutex<u32>,
+}
+
+impl StreamingToolMockProvider {
+    fn new() -> Self {
+        Self {
+            calls: Mutex::new(0),
+        }
+    }
+}
+
+#[async_trait]
+impl LlmProvider for StreamingToolMockProvider {
+    fn model_name(&self) -> &str {
+        "streaming-tool"
+    }
+
+    fn cost_per_token(&self) -> (Decimal, Decimal) {
+        (Decimal::ZERO, Decimal::ZERO)
+    }
+
+    async fn complete(&self, _request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        Err(LlmError::UnsupportedCapability {
+            provider: "streaming-tool".to_string(),
+            capability: "complete".to_string(),
+        })
+    }
+
+    async fn stream_complete(
+        &self,
+        _request: CompletionRequest,
+    ) -> Result<LlmEventStream, LlmError> {
+        let call_number = {
+            let mut calls = self.calls.lock().unwrap();
+            *calls += 1;
+            *calls
+        };
+        let events = if call_number == 1 {
+            vec![
+                Ok(LlmStreamEvent::ContentDelta {
+                    delta: "looking".to_string(),
+                }),
+                Ok(LlmStreamEvent::ToolCallDelta(ToolCallDelta {
+                    index: 0,
+                    id: Some("call-1".to_string()),
+                    name: Some("trace_echo".to_string()),
+                    arguments_delta: Some("{\"text\":\"ping\"}".to_string()),
+                })),
+                Ok(LlmStreamEvent::Finished {
+                    finish_reason: FinishReason::ToolUse,
+                }),
+            ]
+        } else {
+            vec![
+                Ok(LlmStreamEvent::ContentDelta {
+                    delta: "done".to_string(),
+                }),
+                Ok(LlmStreamEvent::Finished {
+                    finish_reason: FinishReason::Stop,
+                }),
+            ]
+        };
+        Ok(Box::pin(futures_util::stream::iter(events)))
+    }
+}
+
+struct TraceEchoTool;
+
+#[async_trait]
+impl NamedTool for TraceEchoTool {
+    fn name(&self) -> &str {
+        "trace_echo"
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: self.name().to_string(),
+            description: "echoes trace test input".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "text": { "type": "string" }
+                }
+            }),
+        }
+    }
+
+    async fn execute(
+        &self,
+        input: serde_json::Value,
+        _ctx: Arc<ToolExecutionContext>,
+    ) -> Result<serde_json::Value, ToolError> {
+        Ok(serde_json::json!({ "echo": input }))
     }
 }
 
@@ -319,6 +421,30 @@ fn build_direct_thread(
         .unwrap()
 }
 
+fn build_direct_thread_with_tool(
+    provider: Arc<dyn LlmProvider>,
+    session_id: SessionId,
+    thread_id: ThreadId,
+    thread_config: ThreadConfig,
+) -> Thread {
+    let tool_manager = Arc::new(ToolManager::new());
+    tool_manager.register(Arc::new(TraceEchoTool));
+
+    ThreadBuilder::new()
+        .id(thread_id)
+        .provider(provider)
+        .compactor(Arc::new(NoopCompactor))
+        .tool_manager(tool_manager)
+        .agent_record(Arc::new(AgentRecord {
+            tool_names: vec!["trace_echo".to_string()],
+            ..AgentRecord::default()
+        }))
+        .session_id(session_id)
+        .config(thread_config)
+        .build()
+        .unwrap()
+}
+
 async fn wait_for_turn_settled_event(mut rx: broadcast::Receiver<ThreadEvent>) {
     timeout(Duration::from_secs(5), async {
         loop {
@@ -467,6 +593,83 @@ async fn test_failed_turn_does_not_write_legacy_partial_trace_file() {
         !legacy_trace_path.exists(),
         "failed turn should not leave a legacy partial trace at {:?}",
         legacy_trace_path
+    );
+}
+
+#[tokio::test]
+async fn turn_events_jsonl_persists_stream_and_tool_events_during_turn() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let session_id = SessionId::new();
+    let thread_id = ThreadId::new();
+    let persisted_base_dir = chat_thread_base_dir(temp_dir.path(), session_id, thread_id);
+    let trace_config = TraceConfig::new(true, persisted_base_dir.clone());
+
+    let provider = Arc::new(StreamingToolMockProvider::new());
+    let thread_config = ThreadConfig {
+        turn_config: TurnConfigBuilder::default()
+            .trace_config(trace_config)
+            .build()
+            .unwrap(),
+    };
+    let mut thread = build_direct_thread_with_tool(provider, session_id, thread_id, thread_config);
+
+    thread
+        .execute_turn("Hello".to_string(), None, TurnCancellation::new())
+        .await
+        .expect("turn should complete");
+
+    let event_path = turn_events_jsonl_path(&persisted_base_dir);
+    assert!(
+        event_path.exists(),
+        "turn event trace should be persisted at {:?}",
+        event_path
+    );
+
+    let content = tokio::fs::read_to_string(&event_path)
+        .await
+        .expect("turn event trace should be readable");
+    let events = content
+        .lines()
+        .map(|line| serde_json::from_str::<TurnTraceEvent>(line).expect("valid event line"))
+        .collect::<Vec<_>>();
+    let payloads = events
+        .iter()
+        .map(|event| &event.payload)
+        .collect::<Vec<_>>();
+
+    assert!(payloads.iter().any(|payload| matches!(
+        payload,
+        TurnTraceEventPayload::ContentDelta { text } if text == "looking"
+    )));
+    assert!(payloads.iter().any(|payload| matches!(
+        payload,
+        TurnTraceEventPayload::ToolCallDelta { name, arguments_delta, .. }
+            if name.as_deref() == Some("trace_echo")
+                && arguments_delta.as_deref() == Some("{\"text\":\"ping\"}")
+    )));
+    assert!(payloads.iter().any(|payload| matches!(
+        payload,
+        TurnTraceEventPayload::ToolStarted { name, .. } if name == "trace_echo"
+    )));
+    assert!(payloads.iter().any(|payload| matches!(
+        payload,
+        TurnTraceEventPayload::ToolCompleted { name, is_error, .. }
+            if name == "trace_echo" && !is_error
+    )));
+    assert!(payloads.iter().any(|payload| matches!(
+        payload,
+        TurnTraceEventPayload::TurnCompleted { .. }
+    )));
+    assert!(payloads
+        .iter()
+        .any(|payload| matches!(payload, TurnTraceEventPayload::TurnSettled)));
+
+    let pending = recover_pending_assistant(&persisted_base_dir, 0)
+        .await
+        .expect("turn event replay should work");
+    assert!(
+        pending.is_none(),
+        "settled turn events should not recover stale pending output"
     );
 }
 
