@@ -30,7 +30,19 @@ Add one process trace file per thread node:
 {thread_base_dir}/turn_events.jsonl
 ```
 
-This file is separate from `turns.jsonl`. It records UI-replayable process events, not committed conversation history. A single thread trace node should have at most one `turn_events.jsonl`; events for all turns in that thread are appended to it with `turn_number` and `sequence`.
+This file is separate from `turns.jsonl`. It records UI-replayable process events, not committed conversation history. A single thread trace node should have at most one `turn_events.jsonl`; events for all turns in that thread are appended to it with `turn_number` and a monotonic cursor owned by the trace store.
+
+## Durable Append Log Semantics
+
+`turn_events.jsonl` should behave like a narrow durable append log:
+
+- Appends are ordered by the store, not by call sites.
+- Each record receives a monotonic per-file `cursor`.
+- Readers replay records in cursor order.
+- A future replay API can support `read_after(cursor)` cleanly.
+- If a consumer asks for a cursor that predates retained data, the correct response is a snapshot/rebase path, not silent partial replay.
+
+The first implementation only needs snapshot-time replay to build `pending_assistant`. It should still model cursor ownership in the store so the file format can grow into replay-after semantics without changing every turn call site.
 
 ## Trace Event Model
 
@@ -39,7 +51,7 @@ Each line is one JSON event:
 ```json
 {
   "turn_number": 3,
-  "sequence": 42,
+  "cursor": 42,
   "created_at": "2026-05-06T10:15:30Z",
   "payload": {
     "type": "content_delta",
@@ -71,6 +83,10 @@ Terminal markers let the snapshot reader avoid returning stale pending state for
 
 The write path must be best-effort. If writing `turn_events.jsonl` fails, the turn continues and logs a warning. This matches the current trace behavior and keeps UI trace persistence from affecting runtime correctness.
 
+Call sites must not calculate cursor values. They pass `(turn_number, payload)` to a trace writer, and the writer appends the next ordered record.
+
+Because tool calls can run in parallel, cursor assignment must be serialized. The initial implementation should open one `TurnEventTraceWriter` per active turn/thread execution, initialize its next cursor from the current non-empty line count, and guard cursor increments plus file appends with an async mutex. The writer can be cloned into the LLM stream path, parallel tool tasks, and terminal settlement path while keeping ordering centralized.
+
 ## Snapshot Recovery
 
 `get_thread_snapshot` should continue returning committed messages from the live runtime or `turns.jsonl`.
@@ -96,7 +112,7 @@ pending_assistant: null | {
 Recovery logic:
 
 1. Read committed `turn_count`.
-2. Replay `turn_events.jsonl` for events with `turn_number > turn_count`.
+2. Replay `turn_events.jsonl` in cursor order for events with `turn_number > turn_count`.
 3. Pick the latest such turn.
 4. If it has `turn_failed` or `turn_settled`, return `pending_assistant: null`.
 5. Otherwise fold deltas into the same shape the frontend already uses for `pendingAssistant`.

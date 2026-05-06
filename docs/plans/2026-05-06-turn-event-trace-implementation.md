@@ -4,7 +4,7 @@
 
 **Goal:** Persist UI-replayable in-progress turn events so the desktop chat can restore pending assistant content, reasoning, and tool artifacts after switching sessions or threads.
 
-**Architecture:** Keep `turns.jsonl` as the committed transcript source and add a separate per-thread `turn_events.jsonl` process trace. Snapshot recovery folds uncommitted events into a `pending_assistant` payload, and the desktop store initializes its existing `pendingAssistant` state from that payload.
+**Architecture:** Keep `turns.jsonl` as the committed transcript source and add a separate per-thread `turn_events.jsonl` process trace. The process trace is a narrow durable append log: the store owns monotonic cursors, call sites append typed payloads, and snapshot recovery folds uncommitted events into a `pending_assistant` payload.
 
 **Tech Stack:** Rust workspace crates (`argus-agent`, `argus-session`, `argus-wing`, Tauri bridge), React/TypeScript desktop store, JSONL trace files, Tokio async file IO.
 
@@ -25,24 +25,60 @@ Add tests for append/replay and pending reconstruction:
 #[tokio::test]
 async fn recovers_pending_assistant_from_turn_events() {
     let dir = tempfile::tempdir().expect("temp dir");
-    append_turn_event(dir.path(), &TurnTraceEvent::content_delta(1, 1, "hello")).await.unwrap();
-    append_turn_event(dir.path(), &TurnTraceEvent::reasoning_delta(1, 2, "thinking")).await.unwrap();
-    append_turn_event(
-        dir.path(),
-        &TurnTraceEvent::tool_call_delta(1, 3, 0, Some("call-1"), Some("search"), Some("{\"q\"")),
-    ).await.unwrap();
-    append_turn_event(
-        dir.path(),
-        &TurnTraceEvent::tool_call_delta(1, 4, 0, None, None, Some(":\"rust\"}")),
-    ).await.unwrap();
-    append_turn_event(
-        dir.path(),
-        &TurnTraceEvent::tool_started(1, 5, "call-1", "search", serde_json::json!({"q":"rust"})),
-    ).await.unwrap();
-    append_turn_event(
-        dir.path(),
-        &TurnTraceEvent::tool_completed(1, 6, "call-1", "search", serde_json::json!({"ok":true}), false),
-    ).await.unwrap();
+    let writer = TurnEventTraceWriter::open(dir.path()).await.unwrap();
+    let first = writer
+        .append(1, TurnTraceEventPayload::content_delta("hello"))
+        .await
+        .unwrap();
+    let second = writer
+        .append(1, TurnTraceEventPayload::reasoning_delta("thinking"))
+        .await
+        .unwrap();
+    writer
+        .append(
+            1,
+            TurnTraceEventPayload::tool_call_delta(
+                0,
+                Some("call-1"),
+                Some("search"),
+                Some("{\"q\""),
+            ),
+        )
+        .await
+        .unwrap();
+    writer
+        .append(
+            1,
+            TurnTraceEventPayload::tool_call_delta(0, None, None, Some(":\"rust\"}")),
+        )
+        .await
+        .unwrap();
+    writer
+        .append(
+            1,
+            TurnTraceEventPayload::tool_started(
+                "call-1",
+                "search",
+                serde_json::json!({"q":"rust"}),
+            ),
+        )
+        .await
+        .unwrap();
+    writer
+        .append(
+            1,
+            TurnTraceEventPayload::tool_completed(
+                "call-1",
+                "search",
+                serde_json::json!({"ok":true}),
+                false,
+            ),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(first.cursor, TurnEventCursor::new(1));
+    assert_eq!(second.cursor, TurnEventCursor::new(2));
 
     let pending = recover_pending_assistant(dir.path(), 0).await.unwrap().unwrap();
     assert_eq!(pending.turn_number, 1);
@@ -55,11 +91,35 @@ async fn recovers_pending_assistant_from_turn_events() {
 #[tokio::test]
 async fn settled_turn_does_not_recover_pending_assistant() {
     let dir = tempfile::tempdir().expect("temp dir");
-    append_turn_event(dir.path(), &TurnTraceEvent::content_delta(1, 1, "done")).await.unwrap();
-    append_turn_event(dir.path(), &TurnTraceEvent::turn_settled(1, 2)).await.unwrap();
+    let writer = TurnEventTraceWriter::open(dir.path()).await.unwrap();
+    writer
+        .append(1, TurnTraceEventPayload::content_delta("done"))
+        .await
+        .unwrap();
+    writer
+        .append(1, TurnTraceEventPayload::turn_settled())
+        .await
+        .unwrap();
 
     let pending = recover_pending_assistant(dir.path(), 0).await.unwrap();
     assert!(pending.is_none());
+}
+
+#[tokio::test]
+async fn writer_assigns_unique_cursors_for_concurrent_appends() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let writer = TurnEventTraceWriter::open(dir.path()).await.unwrap();
+
+    let left = writer.clone();
+    let right = writer.clone();
+    let (left, right) = tokio::join!(
+        left.append(1, TurnTraceEventPayload::content_delta("a")),
+        right.append(1, TurnTraceEventPayload::content_delta("b")),
+    );
+
+    let mut cursors = vec![left.unwrap().cursor, right.unwrap().cursor];
+    cursors.sort();
+    assert_eq!(cursors, vec![TurnEventCursor::new(1), TurnEventCursor::new(2)]);
 }
 ```
 
@@ -77,8 +137,10 @@ Expected: FAIL because `turn_event_store` does not exist.
 
 Create serializable types:
 
-- `TurnTraceEvent { turn_number, sequence, created_at, payload }`
+- `TurnEventCursor(u64)`
+- `TurnTraceEvent { turn_number, cursor, created_at, payload }`
 - `TurnTraceEventPayload`
+- `TurnEventTraceWriter`
 - `PendingAssistantTrace`
 - `PendingToolCallTrace`
 - `PendingToolStatus`
@@ -86,10 +148,15 @@ Create serializable types:
 Implement:
 
 - `turn_events_jsonl_path(base_dir)`
-- `append_turn_event(base_dir, event)`
+- `TurnEventTraceWriter::open(base_dir) -> TurnEventTraceWriter`
+- `TurnEventTraceWriter::append(turn_number, payload) -> TurnTraceEvent`
 - `recover_pending_assistant(base_dir, committed_turn_count)`
 
-Use `tokio::fs::OpenOptions` append mode. Skip malformed JSONL lines with `tracing::warn!`.
+Use `tokio::fs::OpenOptions` append mode. The store owns ordering: the writer derives the initial next cursor from the current non-empty line count, guards cursor increments plus file appends with an async mutex, appends exactly one JSON line, and returns the event with its assigned cursor. Call sites must never provide cursor values.
+
+The writer must be cloneable so the same writer can be shared by the LLM stream path, parallel tool tasks, and terminal settlement path. This avoids duplicate cursor assignment when tool calls complete concurrently.
+
+Skip malformed JSONL lines with `tracing::warn!` for snapshot recovery. Keep the cursor type explicit so a future `read_after(cursor)` API can return a replay-gap error instead of silently losing events after retention.
 
 **Step 4: Export module**
 
@@ -141,20 +208,29 @@ Expected: FAIL because no process events are persisted.
 
 **Step 3: Add trace config to turn execution**
 
-Extend `execute_thread_turn` and `TurnContext` to receive the optional `TraceConfig` or resolved `thread_base_dir`.
+Extend `execute_thread_turn` and `TurnContext` to receive an optional `TurnEventTraceWriter`.
+
+Create the writer in the thread layer when trace config is enabled:
+
+- before spawning `execute_thread_turn` in `start_turn_execution`
+- before the direct `execute_turn` path
+
+Keep a clone available in `Thread` settlement so terminal events use the same cursor sequence as the turn body.
+
+Concretely, add an `active_turn_event_writer: Option<TurnEventTraceWriter>` runtime field to `Thread`. Set it when starting a turn, pass a clone into `execute_thread_turn`, use the stored clone in `settle_active_turn` for terminal markers, and clear it with `active_turn_cancellation`.
 
 Keep persistence best-effort:
 
 ```rust
 async fn append_process_event(ctx: &TurnContext<'_>, payload: TurnTraceEventPayload) {
-    let Some(base_dir) = ctx.trace_base_dir.as_deref() else { return; };
-    if let Err(error) = append_turn_event(base_dir, &TurnTraceEvent::new(ctx.turn_number, next_sequence, payload)).await {
+    let Some(writer) = ctx.turn_event_writer.as_ref() else { return; };
+    if let Err(error) = writer.append(ctx.turn_number, payload).await {
         tracing::warn!(error = %error, "failed to append turn process event");
     }
 }
 ```
 
-Prefer a small per-turn sequence counter local to `execute_loop`, passed into event writes, rather than adding thread-level cached state.
+Do not add a per-turn sequence counter in `execute_loop` or `Thread`. The durable append store owns ordering. This matters because LLM stream events, tool events, and terminal events are emitted from different functions; centralized cursor assignment avoids ordering conflicts.
 
 **Step 4: Persist live event equivalents**
 
@@ -165,6 +241,8 @@ Append events when existing frontend events are emitted:
 - In `settle_active_turn`: `turn_completed`, `turn_failed`, `turn_settled`
 
 Do not persist `LlmStreamEvent::Usage` for this first version.
+
+For terminal markers, append `turn_completed` before `turn_settled` on success, and `turn_failed` before `turn_settled` on failure. Cancelled turns should append `turn_settled` with no pending payload recovery, matching the UI need to clear stale in-flight state.
 
 **Step 5: Run tests**
 
