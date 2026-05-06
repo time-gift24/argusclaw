@@ -64,7 +64,7 @@ curl http://127.0.0.1:3010/api/v1/health
 - traces：`/opt/arguswing/traces`
 - 环境变量：`/etc/arguswing/arguswing.env`
 
-管理员白名单直接在 PostgreSQL `users` 表配置。用户第一次访问 `/api/v1/bootstrap`
+管理员权限直接在 PostgreSQL `users` 表配置。用户第一次访问 `/api/v1/bootstrap`
 后会创建/更新 `users` 记录，响应里的 `current_user.id` 即内部 UUID；授权管理员：
 
 ```sql

@@ -553,6 +553,19 @@ impl ServerCore {
         self.resolve_request_user(request_user).await
     }
 
+    pub async fn set_dev_user_admin(
+        &self,
+        external_id: &str,
+        display_name: Option<&str>,
+        is_admin: bool,
+    ) -> Result<()> {
+        self.user_repo
+            .set_user_admin(external_id, display_name, is_admin)
+            .await
+            .map_err(database_error)?;
+        Ok(())
+    }
+
     async fn cleanup_failed_chat_session_for_user(&self, user_id: UserId, session_id: SessionId) {
         if let Err(error) = self
             .session_manager

@@ -360,6 +360,32 @@ impl UserRepository for ArgusPostgres {
             is_admin: Self::get(&row, "is_admin")?,
         })
     }
+
+    async fn set_user_admin(
+        &self,
+        external_id: &str,
+        display_name: Option<&str>,
+        is_admin: bool,
+    ) -> DbResult<ResolvedUser> {
+        let id = UserId::new();
+        let row = sqlx::query(
+            "INSERT INTO users (id, external_id, display_name, is_admin, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP::TEXT, CURRENT_TIMESTAMP::TEXT)
+             ON CONFLICT(external_id) DO UPDATE SET display_name = COALESCE(EXCLUDED.display_name, users.display_name), is_admin = EXCLUDED.is_admin, updated_at = CURRENT_TIMESTAMP::TEXT
+             RETURNING id, is_admin",
+        )
+        .bind(*id.inner())
+        .bind(external_id)
+        .bind(display_name)
+        .bind(is_admin)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| DbError::QueryFailed { reason: e.to_string() })?;
+        Ok(ResolvedUser {
+            id: Self::parse_user_id(Self::get(&row, "id")?),
+            is_admin: Self::get(&row, "is_admin")?,
+        })
+    }
 }
 
 #[async_trait]

@@ -44,6 +44,8 @@ pub struct AuthConfig {
 pub enum AuthConfigError {
     #[error("{0} is required when ARGUS_OAUTH_ENABLED=true")]
     MissingEnv(&'static str),
+    #[error("ARGUS_DEV_AUTH_ENABLED and ARGUS_OAUTH_ENABLED cannot both be true")]
+    ConflictingDevAuth,
     #[error("{name} must be a valid URL: {source}")]
     InvalidUrl {
         name: &'static str,
@@ -74,6 +76,7 @@ pub struct AuthState {
 #[derive(Debug)]
 struct AuthStateInner {
     config: Option<AuthConfig>,
+    dev_auth_enabled: bool,
     http: reqwest::Client,
     login_states: RwLock<HashMap<String, OAuthLoginState>>,
     sessions: RwLock<HashMap<String, AuthSession>>,
@@ -322,22 +325,68 @@ impl AuthConfig {
 impl AuthState {
     #[must_use]
     pub fn disabled() -> Self {
-        Self::new(None)
+        Self::new(None, false)
     }
 
     pub fn from_env() -> Result<Self, AuthConfigError> {
-        Ok(Self::new(AuthConfig::from_env()?))
+        let dev_auth_enabled = std::env::var("ARGUS_DEV_AUTH_ENABLED").ok();
+        let oauth_enabled = std::env::var("ARGUS_OAUTH_ENABLED").ok();
+        let client_id = std::env::var("ARGUS_OAUTH_CLIENT_ID").ok();
+        let client_secret = std::env::var("ARGUS_OAUTH_CLIENT_SECRET").ok();
+        let base_url = std::env::var("ARGUS_OAUTH_BASE_URL").ok();
+        let authorize_url = std::env::var("ARGUS_OAUTH_AUTHORIZE_URL").ok();
+        let token_url = std::env::var("ARGUS_OAUTH_TOKEN_URL").ok();
+        let userinfo_url = std::env::var("ARGUS_OAUTH_USERINFO_URL").ok();
+        let logout_url = std::env::var("ARGUS_OAUTH_LOGOUT_URL").ok();
+        let redirect_uri = std::env::var("ARGUS_OAUTH_REDIRECT_URI").ok();
+        let scope = std::env::var("ARGUS_OAUTH_SCOPE").ok();
+        let cookie_secure = std::env::var("ARGUS_OAUTH_COOKIE_SECURE").ok();
+        Self::from_env_values(
+            dev_auth_enabled.as_deref(),
+            AuthEnvValues {
+                enabled: oauth_enabled.as_deref(),
+                client_id: client_id.as_deref(),
+                client_secret: client_secret.as_deref(),
+                base_url: base_url.as_deref(),
+                authorize_url: authorize_url.as_deref(),
+                token_url: token_url.as_deref(),
+                userinfo_url: userinfo_url.as_deref(),
+                logout_url: logout_url.as_deref(),
+                redirect_uri: redirect_uri.as_deref(),
+                scope: scope.as_deref(),
+                cookie_secure: cookie_secure.as_deref(),
+            },
+        )
     }
 
     #[doc(hidden)]
     pub fn enabled_for_test() -> Result<Self, AuthConfigError> {
-        Ok(Self::new(Some(AuthConfig::test_config()?)))
+        Ok(Self::new(Some(AuthConfig::test_config()?), false))
     }
 
-    fn new(config: Option<AuthConfig>) -> Self {
+    #[doc(hidden)]
+    #[must_use]
+    pub fn dev_enabled_for_test() -> Self {
+        Self::new(None, true)
+    }
+
+    fn from_env_values(
+        dev_auth_enabled: Option<&str>,
+        oauth_values: AuthEnvValues<'_>,
+    ) -> Result<Self, AuthConfigError> {
+        let dev_auth_enabled = env_bool_value(dev_auth_enabled);
+        let config = AuthConfig::from_env_values(oauth_values)?;
+        if dev_auth_enabled && config.is_some() {
+            return Err(AuthConfigError::ConflictingDevAuth);
+        }
+        Ok(Self::new(config, dev_auth_enabled))
+    }
+
+    fn new(config: Option<AuthConfig>, dev_auth_enabled: bool) -> Self {
         Self {
             inner: std::sync::Arc::new(AuthStateInner {
                 config,
+                dev_auth_enabled,
                 http: reqwest::Client::new(),
                 login_states: RwLock::new(HashMap::new()),
                 sessions: RwLock::new(HashMap::new()),
@@ -347,11 +396,18 @@ impl AuthState {
 
     #[must_use]
     pub fn is_enabled(&self) -> bool {
-        self.inner
-            .config
-            .as_ref()
-            .map(|config| config.enabled)
-            .unwrap_or(false)
+        self.inner.dev_auth_enabled
+            || self
+                .inner
+                .config
+                .as_ref()
+                .map(|config| config.enabled)
+                .unwrap_or(false)
+    }
+
+    #[must_use]
+    pub fn is_dev_enabled(&self) -> bool {
+        self.inner.dev_auth_enabled
     }
 
     #[doc(hidden)]
@@ -370,6 +426,29 @@ impl AuthState {
             .await
             .insert(session_id.clone(), session);
         format!("{SESSION_COOKIE_NAME}={session_id}")
+    }
+
+    pub async fn create_dev_session(
+        &self,
+        external_id: &str,
+        display_name: Option<&str>,
+    ) -> Result<String, ApiError> {
+        if !self.is_dev_enabled() {
+            return Err(ApiError::bad_request("dev auth is not enabled"));
+        }
+        let session_id = new_secret();
+        let session = AuthSession {
+            user: AuthenticatedUser::new(external_id.to_string(), display_name.map(str::to_string)),
+            access_token: None,
+            refresh_token: None,
+            expires_at: Some(Utc::now() + TimeDelta::seconds(SESSION_TTL_SECONDS)),
+        };
+        self.inner
+            .sessions
+            .write()
+            .await
+            .insert(session_id.clone(), session);
+        Ok(session_cookie(&session_id, false))
     }
 
     #[must_use]
@@ -833,5 +912,28 @@ mod tests {
         assert_eq!(sanitize_next(Some("/chat")), "/chat");
         assert_eq!(sanitize_next(Some("https://example.test")), "/");
         assert_eq!(sanitize_next(Some("//example.test")), "/");
+    }
+
+    #[test]
+    fn dev_auth_and_oauth_are_mutually_exclusive() {
+        let error = AuthState::from_env_values(
+            Some("true"),
+            AuthEnvValues {
+                enabled: Some("true"),
+                client_id: Some("client"),
+                client_secret: Some("secret"),
+                base_url: Some("https://auth.example.test"),
+                authorize_url: None,
+                token_url: None,
+                userinfo_url: None,
+                logout_url: None,
+                redirect_uri: Some("http://127.0.0.1:3010/auth/callback"),
+                scope: None,
+                cookie_secure: None,
+            },
+        )
+        .expect_err("dev auth and OAuth should not both be enabled");
+
+        assert!(matches!(error, AuthConfigError::ConflictingDevAuth));
     }
 }

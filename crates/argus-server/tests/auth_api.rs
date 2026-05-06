@@ -51,3 +51,60 @@ async fn oauth_login_redirects_to_authorization_endpoint() {
     assert!(location.contains("response_type=code"));
     assert!(location.contains("scope=base.profile"));
 }
+
+#[tokio::test]
+async fn dev_auth_login_sets_admin_role_for_local_testing() {
+    let auth = argus_server::auth::AuthState::dev_enabled_for_test();
+    let ctx = support::TestContext::new_with_auth(auth).await;
+
+    let anonymous = ctx
+        .get_without_default_user_header("/api/v1/bootstrap")
+        .await;
+    assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
+
+    let login = ctx
+        .get_without_default_user_header("/auth/dev-login?role=admin&next=/runtime")
+        .await;
+    assert_eq!(login.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        login
+            .headers()
+            .get("location")
+            .expect("dev login should redirect")
+            .to_str()
+            .expect("location should be utf8"),
+        "/runtime",
+    );
+    let cookie = login
+        .headers()
+        .get("set-cookie")
+        .expect("dev login should set a session cookie")
+        .to_str()
+        .expect("cookie should be utf8");
+
+    let runtime = ctx.get_with_cookie("/api/v1/runtime", cookie).await;
+    assert_eq!(runtime.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn dev_auth_login_sets_non_admin_role_for_local_testing() {
+    let auth = argus_server::auth::AuthState::dev_enabled_for_test();
+    let ctx = support::TestContext::new_with_auth(auth).await;
+
+    let login = ctx
+        .get_without_default_user_header("/auth/dev-login?role=user&next=/chat")
+        .await;
+    assert_eq!(login.status(), StatusCode::SEE_OTHER);
+    let cookie = login
+        .headers()
+        .get("set-cookie")
+        .expect("dev login should set a session cookie")
+        .to_str()
+        .expect("cookie should be utf8");
+
+    let runtime = ctx.get_with_cookie("/api/v1/runtime", cookie).await;
+    assert_eq!(runtime.status(), StatusCode::FORBIDDEN);
+
+    let chat = ctx.get_with_cookie("/api/v1/chat/sessions", cookie).await;
+    assert_eq!(chat.status(), StatusCode::OK);
+}

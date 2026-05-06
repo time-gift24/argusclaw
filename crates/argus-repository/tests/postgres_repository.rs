@@ -137,6 +137,44 @@ async fn postgres_migration_and_user_scoped_chat_records() {
 }
 
 #[tokio::test]
+async fn postgres_user_repository_can_set_admin_flag() {
+    let Some(database_url) = std::env::var(POSTGRES_TEST_URL_ENV).ok() else {
+        eprintln!("skipping PostgreSQL repository test: {POSTGRES_TEST_URL_ENV} is not set");
+        return;
+    };
+
+    let pool = connect_postgres(&database_url)
+        .await
+        .expect("postgres test database should connect");
+    migrate_postgres(&pool)
+        .await
+        .expect("postgres migrations should run on the test database");
+
+    let repo = ArgusPostgres::new(pool);
+    let external_id = format!("repo-admin-{}", Uuid::new_v4());
+
+    let admin = repo
+        .set_user_admin(&external_id, Some("Repository Admin"), true)
+        .await
+        .expect("admin flag should be set");
+    assert!(admin.is_admin);
+
+    let resolved = repo
+        .resolve_user(&external_id, Some("Repository Admin Renamed"))
+        .await
+        .expect("resolved user should keep admin flag");
+    assert_eq!(resolved.id, admin.id);
+    assert!(resolved.is_admin);
+
+    let ordinary = repo
+        .set_user_admin(&external_id, Some("Repository User"), false)
+        .await
+        .expect("admin flag should be removable");
+    assert_eq!(ordinary.id, admin.id);
+    assert!(!ordinary.is_admin);
+}
+
+#[tokio::test]
 async fn postgres_global_session_create_reuses_legacy_user() {
     let Some(database_url) = std::env::var(POSTGRES_TEST_URL_ENV).ok() else {
         eprintln!("skipping PostgreSQL repository test: {POSTGRES_TEST_URL_ENV} is not set");

@@ -19,4 +19,11 @@ pub trait UserRepository: Send + Sync {
         external_id: &str,
         display_name: Option<&str>,
     ) -> Result<ResolvedUser, DbError>;
+
+    async fn set_user_admin(
+        &self,
+        external_id: &str,
+        display_name: Option<&str>,
+        is_admin: bool,
+    ) -> Result<ResolvedUser, DbError>;
 }

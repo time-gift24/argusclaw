@@ -6,6 +6,19 @@ export function resolveApiProxyTarget(env: NodeJS.ProcessEnv = process.env): str
   return env.ARGUS_SERVER_URL ?? "http://127.0.0.1:3000";
 }
 
+export function createDevServerProxy(apiProxyTarget: string) {
+  return {
+    "/api/v1": {
+      target: apiProxyTarget,
+      changeOrigin: true,
+    },
+    "/auth": {
+      target: apiProxyTarget,
+      changeOrigin: true,
+    },
+  };
+}
+
 export default defineConfig(({ mode }) => {
   const isTest = mode === "test" || process.env.VITEST === "true";
   const apiProxyTarget = resolveApiProxyTarget();
@@ -38,12 +51,7 @@ export default defineConfig(({ mode }) => {
     server: {
       port: 4173,
       strictPort: true,
-      proxy: {
-        "/api/v1": {
-          target: apiProxyTarget,
-          changeOrigin: true,
-        },
-      },
+      proxy: createDevServerProxy(apiProxyTarget),
     },
     test: {
       environment: "jsdom",

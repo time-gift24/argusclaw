@@ -31,6 +31,7 @@ pub(crate) async fn require_admin(
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/auth/login", get(auth::login))
+        .route("/auth/dev-login", get(auth::dev_login))
         .route("/auth/callback", get(auth::callback))
         .route("/auth/logout", get(auth::logout))
         .route("/api/v1/health", get(health::get_health))
