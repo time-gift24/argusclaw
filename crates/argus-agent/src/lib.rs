@@ -35,6 +35,7 @@ pub mod plan_tool;
 pub mod thread;
 pub mod thread_bootstrap;
 pub mod thread_trace_store;
+pub mod turn_event_store;
 pub mod turn_log_store;
 
 pub mod tool_context;

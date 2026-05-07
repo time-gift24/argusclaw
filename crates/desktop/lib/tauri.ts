@@ -270,6 +270,24 @@ export interface ChatSessionPayload {
   effective_model: string | null;
 }
 
+export interface PendingAssistantPayload {
+  turn_number: number;
+  content: string;
+  reasoning: string;
+  tool_calls: PendingToolCallPayload[];
+}
+
+export interface PendingToolCallPayload {
+  index: number;
+  call_id: string | null;
+  name: string | null;
+  arguments_text: string;
+  status: "pending" | "started" | "completed";
+  arguments: unknown | null;
+  result: unknown | null;
+  is_error: boolean;
+}
+
 export interface ThreadSnapshotPayload {
   session_id: string;
   thread_id: string;
@@ -294,6 +312,7 @@ export interface ThreadSnapshotPayload {
   turn_count: number;
   token_count: number;
   plan_item_count: number;
+  pending_assistant: PendingAssistantPayload | null;
 }
 
 export type ThreadRuntimeStatus =

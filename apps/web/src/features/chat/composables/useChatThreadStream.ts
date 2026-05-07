@@ -4,6 +4,8 @@ import {
   type ChatMessageRecord,
   type ChatThreadEventEnvelope,
   type ChatThreadEventPayload,
+  type PendingAssistantSnapshot,
+  type PendingToolCallSnapshot,
   type RuntimeEventSubscription,
 } from "@/lib/api";
 
@@ -240,6 +242,38 @@ export function useChatThreadStream(options: UseChatThreadStreamOptions) {
     }
   }
 
+  function applyPendingAssistantSnapshot(pending: PendingAssistantSnapshot | null) {
+    if (!pending) {
+      streaming.value = false;
+      clearPendingAssistant();
+      resetRuntimeActivity();
+      return;
+    }
+
+    streaming.value = true;
+    pendingAssistantContent.value = pending.content;
+    pendingAssistantReasoning.value = pending.reasoning;
+    runtimeActivities.value = pending.tool_calls.map(mapPendingToolActivity);
+  }
+
+  function mapPendingToolActivity(toolCall: PendingToolCallSnapshot): ToolActivity {
+    return {
+      id: toolCall.call_id || `pending-${toolCall.index}`,
+      kind: "tool",
+      name: toolCall.name || "工具调用",
+      status: mapPendingToolStatus(toolCall),
+      argumentsPreview: toolCall.arguments_text || previewValue(toolCall.arguments),
+      resultPreview: previewValue(toolCall.result),
+    };
+  }
+
+  function mapPendingToolStatus(toolCall: PendingToolCallSnapshot): ToolActivityStatus {
+    if (toolCall.status === "completed") {
+      return toolCall.is_error ? "error" : "success";
+    }
+    return "running";
+  }
+
   async function settleThreadAfterStream() {
     await refreshActiveThread({ silent: true });
     if (countAssistantMessages() <= assistantCountAtStreamStart.value) {
@@ -313,6 +347,7 @@ export function useChatThreadStream(options: UseChatThreadStreamOptions) {
         return;
       }
       messages.value = nextMessages.length > 0 ? nextMessages : snapshot.messages;
+      applyPendingAssistantSnapshot(snapshot.pending_assistant);
     } catch (reason) {
       if (
         requestId !== refreshRequestId ||

@@ -8,7 +8,9 @@ use argus_protocol::{
     McpServerRecord, McpServerStatus, ProviderId, ProviderSecretStatus, ProviderTestResult, Role,
     SecretString, SessionId, ThreadId, ThreadPoolSnapshot, ThreadPoolState,
 };
-use argus_wing::ArgusWing;
+use argus_wing::{
+    ArgusWing, PendingAssistantTrace, PendingToolCallTrace, PendingToolStatus,
+};
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
@@ -466,6 +468,75 @@ impl From<&ChatMessage> for ChatMessagePayload {
     }
 }
 
+/// Serialized in-flight assistant snapshot recovered from turn event traces.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingAssistantPayload {
+    pub turn_number: u32,
+    pub content: String,
+    pub reasoning: String,
+    pub tool_calls: Vec<PendingToolCallPayload>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingToolCallPayload {
+    pub index: usize,
+    pub call_id: Option<String>,
+    pub name: Option<String>,
+    pub arguments_text: String,
+    pub status: PendingToolStatusPayload,
+    pub arguments: Option<serde_json::Value>,
+    pub result: Option<serde_json::Value>,
+    pub is_error: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PendingToolStatusPayload {
+    Pending,
+    Started,
+    Completed,
+}
+
+impl From<PendingAssistantTrace> for PendingAssistantPayload {
+    fn from(pending: PendingAssistantTrace) -> Self {
+        Self {
+            turn_number: pending.turn_number,
+            content: pending.content,
+            reasoning: pending.reasoning,
+            tool_calls: pending
+                .tool_calls
+                .into_iter()
+                .map(PendingToolCallPayload::from)
+                .collect(),
+        }
+    }
+}
+
+impl From<PendingToolCallTrace> for PendingToolCallPayload {
+    fn from(tool_call: PendingToolCallTrace) -> Self {
+        Self {
+            index: tool_call.index,
+            call_id: tool_call.call_id,
+            name: tool_call.name,
+            arguments_text: tool_call.arguments_text,
+            status: PendingToolStatusPayload::from(tool_call.status),
+            arguments: tool_call.arguments,
+            result: tool_call.result,
+            is_error: tool_call.is_error,
+        }
+    }
+}
+
+impl From<PendingToolStatus> for PendingToolStatusPayload {
+    fn from(status: PendingToolStatus) -> Self {
+        match status {
+            PendingToolStatus::Pending => Self::Pending,
+            PendingToolStatus::Started => Self::Started,
+            PendingToolStatus::Completed => Self::Completed,
+        }
+    }
+}
+
 /// Current snapshot of a chat thread.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThreadSnapshotPayload {
@@ -475,6 +546,7 @@ pub struct ThreadSnapshotPayload {
     pub turn_count: u32,
     pub token_count: u32,
     pub plan_item_count: usize,
+    pub pending_assistant: Option<PendingAssistantPayload>,
 }
 
 #[tauri::command]
@@ -657,7 +729,7 @@ pub async fn get_thread_snapshot(
     let session_id = SessionId::parse(&session_id).map_err(|e| e.to_string())?;
     let thread_id = ThreadId::parse(&thread_id).map_err(|e| e.to_string())?;
 
-    let (messages, turn_count, token_count, plan_item_count) = wing
+    let snapshot = wing
         .get_thread_snapshot(session_id, thread_id)
         .await
         .map_err(|e| e.to_string())?;
@@ -665,10 +737,15 @@ pub async fn get_thread_snapshot(
     Ok(ThreadSnapshotPayload {
         session_id: session_id.to_string(),
         thread_id: thread_id.to_string(),
-        messages: messages.iter().map(ChatMessagePayload::from).collect(),
-        turn_count,
-        token_count,
-        plan_item_count: plan_item_count as usize,
+        messages: snapshot
+            .messages
+            .iter()
+            .map(ChatMessagePayload::from)
+            .collect(),
+        turn_count: snapshot.turn_count,
+        token_count: snapshot.token_count,
+        plan_item_count: snapshot.plan_item_count as usize,
+        pending_assistant: snapshot.pending_assistant.map(PendingAssistantPayload::from),
     })
 }
 

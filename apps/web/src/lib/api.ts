@@ -310,6 +310,25 @@ export interface ChatThreadSnapshot {
   turn_count: number;
   token_count: number;
   plan_item_count: number;
+  pending_assistant: PendingAssistantSnapshot | null;
+}
+
+export interface PendingAssistantSnapshot {
+  turn_number: number;
+  content: string;
+  reasoning: string;
+  tool_calls: PendingToolCallSnapshot[];
+}
+
+export interface PendingToolCallSnapshot {
+  index: number;
+  call_id: string | null;
+  name: string | null;
+  arguments_text: string;
+  status: "pending" | "started" | "completed";
+  arguments: unknown | null;
+  result: unknown | null;
+  is_error: boolean;
 }
 
 export interface ChatThreadBinding {

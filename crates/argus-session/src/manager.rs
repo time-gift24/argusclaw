@@ -9,6 +9,7 @@ use argus_agent::thread_trace_store::{
     chat_thread_base_dir, persist_thread_metadata, ThreadTraceKind, ThreadTraceMetadata,
 };
 use argus_agent::tool_context::current_agent_id;
+use argus_agent::turn_event_store::{recover_pending_assistant, PendingAssistantTrace};
 use argus_agent::turn_log_store::{recover_thread_log_state, RecoveredThreadLogState};
 use argus_agent::{FilePlanStore, LlmThreadCompactor, Thread, ThreadBuilder, ThreadHandle};
 use argus_job::{JobLookup, JobManager};
@@ -45,6 +46,15 @@ struct RecoveredThreadState {
     messages: Vec<ChatMessage>,
     turn_count: u32,
     token_count: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct ThreadSnapshot {
+    pub messages: Vec<ChatMessage>,
+    pub turn_count: u32,
+    pub token_count: u32,
+    pub plan_item_count: u32,
+    pub pending_assistant: Option<PendingAssistantTrace>,
 }
 
 #[derive(Debug)]
@@ -1695,7 +1705,7 @@ impl SessionManager {
         &self,
         session_id: SessionId,
         thread_id: &ThreadId,
-    ) -> Result<(Vec<ChatMessage>, u32, u32, u32)> {
+    ) -> Result<ThreadSnapshot> {
         self.load(session_id).await?;
         if let Some(thread) = self.loaded_chat_thread(thread_id) {
             let (messages, turn_count, token_count) =
@@ -1715,12 +1725,20 @@ impl SessionManager {
                         (thread.history(), thread.turn_count(), thread.token_count())
                     }
                 };
-            return Ok((
+            let pending_assistant = recover_pending_assistant_for_snapshot(
+                &self.trace_dir,
+                session_id,
+                thread_id,
+                turn_count,
+            )
+            .await;
+            return Ok(ThreadSnapshot {
                 messages,
                 turn_count,
                 token_count,
-                thread.plan_item_count() as u32,
-            ));
+                plan_item_count: thread.plan_item_count() as u32,
+                pending_assistant,
+            });
         }
 
         let thread_record = self
@@ -1734,20 +1752,33 @@ impl SessionManager {
         let recovered =
             recover_thread_state_from_trace(&self.trace_dir, &session_id, thread_id).await?;
 
-        Ok(if recovered.turn_count > 0 {
+        let (messages, turn_count, token_count) = if recovered.turn_count > 0 {
             (
                 recovered.messages,
                 recovered.turn_count,
                 recovered.token_count,
-                0,
             )
         } else {
             (
                 recovered.messages,
                 thread_record.turn_count,
                 thread_record.token_count,
-                0,
             )
+        };
+        let pending_assistant = recover_pending_assistant_for_snapshot(
+            &self.trace_dir,
+            session_id,
+            thread_id,
+            turn_count,
+        )
+        .await;
+
+        Ok(ThreadSnapshot {
+            messages,
+            turn_count,
+            token_count,
+            plan_item_count: 0,
+            pending_assistant,
         })
     }
 
@@ -2123,7 +2154,7 @@ impl SessionManager {
         user_id: UserId,
         session_id: SessionId,
         thread_id: &ThreadId,
-    ) -> Result<(Vec<ChatMessage>, u32, u32, u32)> {
+    ) -> Result<ThreadSnapshot> {
         self.ensure_thread_in_session_for_user(user_id, session_id, thread_id)
             .await?;
         self.get_thread_snapshot(session_id, thread_id).await
@@ -2227,6 +2258,26 @@ async fn recover_thread_state_from_trace(
     Ok(flatten_recovered_thread_state(recovered))
 }
 
+async fn recover_pending_assistant_for_snapshot(
+    trace_dir: &std::path::Path,
+    session_id: SessionId,
+    thread_id: &ThreadId,
+    committed_turn_count: u32,
+) -> Option<PendingAssistantTrace> {
+    let base_dir = chat_thread_base_dir(trace_dir, session_id, *thread_id);
+    match recover_pending_assistant(&base_dir, committed_turn_count).await {
+        Ok(pending) => pending,
+        Err(error) => {
+            tracing::warn!(
+                thread_id = %thread_id,
+                error = %error,
+                "failed to recover pending assistant snapshot"
+            );
+            None
+        }
+    }
+}
+
 fn flatten_recovered_thread_state(recovered: RecoveredThreadLogState) -> RecoveredThreadState {
     RecoveredThreadState {
         messages: recovered.committed_messages(),
@@ -2285,6 +2336,7 @@ mod tests {
     use argus_agent::tool_context::{clear_current_agent_id, set_current_agent_id};
     use argus_agent::turn_log_store::append_turn_record;
     use argus_agent::turn_log_store::RecoveredThreadLogState;
+    use argus_agent::turn_event_store::{TurnEventTraceWriter, TurnTraceEventPayload};
     use argus_agent::ThreadHandle;
     use argus_protocol::llm::ChatMessage;
     use argus_protocol::llm::{
@@ -3140,6 +3192,89 @@ mod tests {
         assert_eq!(recovered.turn_count, 2);
         assert_eq!(recovered.token_count, 28);
         assert_eq!(recovered.messages.len(), 5);
+    }
+
+    #[tokio::test]
+    async fn pending_assistant_snapshot_recovers_turn_event_trace() {
+        let harness = test_session_manager_harness_with_provider(Arc::new(FixedProvider {
+            model_name: "routing-test".to_string(),
+        }))
+        .await;
+        let manager = harness.manager;
+        let session_id = harness.session_id;
+        let thread_id = harness.thread_id;
+        let base_dir = chat_thread_base_dir(&manager.trace_dir, session_id, thread_id);
+        persist_thread_metadata(
+            &base_dir,
+            &ThreadTraceMetadata {
+                thread_id,
+                kind: ThreadTraceKind::ChatRoot,
+                root_session_id: Some(session_id),
+                parent_thread_id: None,
+                job_id: None,
+                agent_snapshot: harness
+                    .template_manager
+                    .get(harness.agent_id)
+                    .await
+                    .expect("template lookup should succeed")
+                    .expect("agent snapshot should exist"),
+            },
+        )
+        .await
+        .expect("thread trace metadata should persist");
+
+        let writer = TurnEventTraceWriter::open(&base_dir)
+            .await
+            .expect("turn event writer should open");
+        writer
+            .append(1, TurnTraceEventPayload::content_delta("draft reply"))
+            .await
+            .expect("content delta should append");
+        writer
+            .append(1, TurnTraceEventPayload::reasoning_delta("checking facts"))
+            .await
+            .expect("reasoning delta should append");
+        writer
+            .append(
+                1,
+                TurnTraceEventPayload::tool_call_delta(
+                    0,
+                    Some("call-1"),
+                    Some("search"),
+                    Some("{\"q\""),
+                ),
+            )
+            .await
+            .expect("tool call delta should append");
+        writer
+            .append(
+                1,
+                TurnTraceEventPayload::tool_started(
+                    "call-1",
+                    "search",
+                    serde_json::json!({"q":"trace"}),
+                ),
+            )
+            .await
+            .expect("tool started should append");
+
+        let snapshot = manager
+            .get_thread_snapshot(session_id, &thread_id)
+            .await
+            .expect("snapshot should recover pending assistant");
+        let pending = snapshot
+            .pending_assistant
+            .expect("pending assistant should be present");
+
+        assert_eq!(snapshot.turn_count, 0);
+        assert_eq!(pending.turn_number, 1);
+        assert_eq!(pending.content, "draft reply");
+        assert_eq!(pending.reasoning, "checking facts");
+        assert_eq!(pending.tool_calls.len(), 1);
+        assert_eq!(pending.tool_calls[0].call_id.as_deref(), Some("call-1"));
+        assert_eq!(pending.tool_calls[0].name.as_deref(), Some("search"));
+        assert_eq!(pending.tool_calls[0].arguments_text, "{\"q\"");
+        assert_eq!(pending.tool_calls[0].arguments, Some(serde_json::json!({"q":"trace"})));
     }
 
     #[tokio::test]
