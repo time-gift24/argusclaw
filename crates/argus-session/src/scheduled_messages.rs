@@ -116,8 +116,12 @@ impl CronScheduler {
         let mut delivered = 0;
 
         for job in jobs {
-            if self.run_one_due_job(job, now).await? {
-                delivered += 1;
+            match self.run_one_due_job(job, now).await {
+                Ok(true) => delivered += 1,
+                Ok(false) => {}
+                Err(error) => {
+                    tracing::warn!(error = %error, "scheduled message run failed");
+                }
             }
         }
 
@@ -129,6 +133,14 @@ impl CronScheduler {
         job: JobRecord,
         now: DateTime<Utc>,
     ) -> Result<bool, ScheduledMessageError> {
+        if !self
+            .job_repository
+            .claim_cron_job(&job.id, &now.to_rfc3339())
+            .await?
+        {
+            return Ok(false);
+        }
+
         let mut context = match parse_context(&job) {
             Ok(context) if context.enabled => context,
             Ok(mut context) => {
@@ -158,36 +170,29 @@ impl CronScheduler {
             return Ok(false);
         };
 
-        if !self
-            .job_repository
-            .claim_cron_job(&job.id, &now.to_rfc3339())
-            .await?
-        {
-            return Ok(false);
-        }
-
         if let Err(error) = self
             .dispatcher
             .deliver_scheduled_message(session_id, thread_id, job.prompt)
             .await
         {
             context.last_error = Some(error.to_string());
-            self.update_job(&job.id, JobStatus::Failed, None, now, &context)
+            self.update_job(&job.id, JobStatus::Failed, None, Utc::now(), &context)
                 .await?;
             return Err(error);
         }
 
+        let completed_at = Utc::now();
         context.last_error = None;
         let next_scheduled_at = match job.cron_expr.as_deref() {
             Some(expr) if !expr.trim().is_empty() => match next_cron_run(
                 expr,
                 context.timezone.as_deref(),
-                now,
+                completed_at,
             ) {
                 Ok(next) => Some(next.to_rfc3339()),
                 Err(error) => {
                     context.last_error = Some(error.to_string());
-                    self.update_job(&job.id, JobStatus::Failed, None, now, &context)
+                    self.update_job(&job.id, JobStatus::Failed, None, completed_at, &context)
                         .await?;
                     return Err(error);
                 }
@@ -204,7 +209,7 @@ impl CronScheduler {
             &job.id,
             status,
             next_scheduled_at.as_deref(),
-            now,
+            completed_at,
             &context,
         )
         .await?;
@@ -465,10 +470,15 @@ mod scheduler_tests {
         assert_eq!(updates.len(), 1);
         assert_eq!(updates[0].id.as_ref(), "cron-deliver");
         assert_eq!(updates[0].status, JobStatus::Pending);
-        assert_eq!(
-            updates[0].scheduled_at.as_deref(),
-            Some("2026-05-07T01:00:00+00:00")
-        );
+        let next = DateTime::parse_from_rfc3339(
+            updates[0]
+                .scheduled_at
+                .as_deref()
+                .expect("recurring job should have a next schedule"),
+        )
+        .unwrap()
+        .with_timezone(&Utc);
+        assert!(next > now, "next schedule should be after the original due time");
         let context: ScheduledMessageContext =
             serde_json::from_str(updates[0].context.as_deref().unwrap()).unwrap();
         assert_eq!(context.target_session_id, session_id.to_string());
