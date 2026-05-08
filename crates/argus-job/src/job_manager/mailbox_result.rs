@@ -18,26 +18,6 @@ impl JobManager {
         *slot = Some(forwarder);
     }
 
-    pub fn claim_delivered_job_result(
-        &self,
-        thread_id: ThreadId,
-        job_id: &str,
-    ) -> Option<MailboxMessage> {
-        let mut store = self
-            .job_runtime_store
-            .lock()
-            .expect("job runtime mutex poisoned");
-        let messages = store.delivered_job_results.get_mut(&thread_id)?;
-        let index = messages
-            .iter()
-            .position(|message| message.job_id() == Some(job_id))?;
-        let claimed = messages.remove(index);
-        if messages.is_empty() {
-            store.delivered_job_results.remove(&thread_id);
-        }
-        Some(claimed)
-    }
-
     pub(super) async fn thread_display_label(&self, thread_id: &ThreadId) -> String {
         let Some(thread) = self.thread_pool.loaded_thread(thread_id) else {
             return format!("Thread {}", thread_id);
@@ -95,7 +75,6 @@ impl JobManager {
             read: false,
             summary: None,
         };
-        self.record_delivered_job_result(originating_thread_id, mailbox_message.clone());
         let forwarder = self
             .chat_mailbox_forwarder
             .lock()
@@ -132,15 +111,5 @@ impl JobManager {
             agent_display_name: result.agent_display_name,
             agent_description: result.agent_description,
         });
-    }
-
-    fn record_delivered_job_result(&self, thread_id: ThreadId, message: MailboxMessage) {
-        self.job_runtime_store
-            .lock()
-            .expect("job runtime mutex poisoned")
-            .delivered_job_results
-            .entry(thread_id)
-            .or_default()
-            .push(message);
     }
 }

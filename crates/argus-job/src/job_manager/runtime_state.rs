@@ -5,7 +5,6 @@ pub(super) struct JobRuntimeStore {
     pub(super) job_bindings: HashMap<String, ThreadId>,
     pub(super) parent_thread_by_child: HashMap<ThreadId, ThreadId>,
     pub(super) child_jobs_by_parent: HashMap<ThreadId, Vec<RecoveredChildJob>>,
-    pub(super) delivered_job_results: HashMap<ThreadId, Vec<MailboxMessage>>,
     pub(super) job_runtimes: HashMap<ThreadId, JobRuntimeSummary>,
     pub(super) peak_estimated_memory_bytes: u64,
 }
