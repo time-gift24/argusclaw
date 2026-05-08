@@ -58,6 +58,8 @@ pub enum JobStatus {
     Succeeded,
     /// Job failed.
     Failed,
+    /// Job is paused.
+    Paused,
     /// Job was cancelled.
     Cancelled,
 }
@@ -72,6 +74,7 @@ impl JobStatus {
             Self::Running => "running",
             Self::Succeeded => "succeeded",
             Self::Failed => "failed",
+            Self::Paused => "paused",
             Self::Cancelled => "cancelled",
         }
     }
@@ -84,6 +87,7 @@ impl JobStatus {
             "running" => Ok(Self::Running),
             "succeeded" => Ok(Self::Succeeded),
             "failed" => Ok(Self::Failed),
+            "paused" => Ok(Self::Paused),
             "cancelled" => Ok(Self::Cancelled),
             _ => Err(format!("invalid job status: {s}")),
         }
@@ -101,6 +105,34 @@ impl TryFrom<&str> for JobStatus {
 
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         Self::parse_str(value)
+    }
+}
+
+/// Context for a scheduled message job.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScheduledMessageContext {
+    pub target_session_id: String,
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+}
+
+fn default_enabled() -> bool {
+    true
+}
+
+impl ScheduledMessageContext {
+    #[must_use]
+    pub fn new(target_session_id: impl Into<String>) -> Self {
+        Self {
+            target_session_id: target_session_id.into(),
+            enabled: default_enabled(),
+            timezone: None,
+            last_error: None,
+        }
     }
 }
 
@@ -228,6 +260,7 @@ mod tests {
         assert_eq!(JobStatus::Running.as_str(), "running");
         assert_eq!(JobStatus::Succeeded.as_str(), "succeeded");
         assert_eq!(JobStatus::Failed.as_str(), "failed");
+        assert_eq!(JobStatus::Paused.as_str(), "paused");
         assert_eq!(JobStatus::Cancelled.as_str(), "cancelled");
     }
 
@@ -241,10 +274,34 @@ mod tests {
             JobStatus::Succeeded
         );
         assert_eq!(JobStatus::parse_str("failed").unwrap(), JobStatus::Failed);
+        assert_eq!(JobStatus::parse_str("paused").unwrap(), JobStatus::Paused);
         assert_eq!(
             JobStatus::parse_str("cancelled").unwrap(),
             JobStatus::Cancelled
         );
+    }
+
+    #[test]
+    fn job_status_parses_paused() {
+        assert_eq!(JobStatus::parse_str("paused").unwrap(), JobStatus::Paused);
+        assert_eq!(JobStatus::Paused.as_str(), "paused");
+    }
+
+    #[test]
+    fn scheduled_message_context_round_trips() {
+        let context = ScheduledMessageContext {
+            target_session_id: "session-1".to_string(),
+            enabled: true,
+            timezone: Some("Asia/Shanghai".to_string()),
+            last_error: None,
+        };
+
+        let json = serde_json::to_string(&context).unwrap();
+        let restored: ScheduledMessageContext = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(restored.target_session_id, "session-1");
+        assert!(restored.enabled);
+        assert_eq!(restored.timezone.as_deref(), Some("Asia/Shanghai"));
     }
 
     #[test]
