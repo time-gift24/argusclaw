@@ -1,9 +1,13 @@
 use argus_protocol::{AgentId, AgentRecord, LlmProviderId, SessionId, ThreadId};
 use argus_repository::traits::{
-    AgentRepository, JobRepository, SessionRepository, ThreadRepository,
+    AgentRepository, AgentRunRepository, JobRepository, SessionRepository, ThreadRepository,
 };
-use argus_repository::types::{JobId, JobRecord, JobStatus, JobType, ThreadRecord};
-use argus_repository::{ArgusSqlite, migrate};
+use argus_repository::types::{
+    AgentRunId, AgentRunRecord, AgentRunStatus, JobId, JobRecord, JobStatus, JobType, ThreadRecord,
+};
+use argus_repository::{ArgusPostgres, ArgusSqlite, connect_postgres, migrate, migrate_postgres};
+
+const POSTGRES_TEST_URL_ENV: &str = "ARGUS_TEST_POSTGRES_URL";
 
 async fn repository() -> ArgusSqlite {
     let pool = sqlx::SqlitePool::connect("sqlite::memory:")
@@ -66,6 +70,27 @@ fn thread(id: ThreadId, session_id: SessionId, template_id: AgentId, title: &str
     }
 }
 
+fn agent_run(
+    id: AgentRunId,
+    agent_id: AgentId,
+    session_id: SessionId,
+    thread_id: ThreadId,
+) -> AgentRunRecord {
+    AgentRunRecord {
+        id,
+        agent_id,
+        session_id,
+        thread_id,
+        prompt: "run prompt".to_string(),
+        status: AgentRunStatus::Queued,
+        result: None,
+        error: None,
+        created_at: "2026-05-06T00:00:00Z".to_string(),
+        updated_at: "2026-05-06T00:00:00Z".to_string(),
+        completed_at: None,
+    }
+}
+
 #[tokio::test]
 async fn cascade_delete_removes_agent_jobs_threads_and_empty_sessions() {
     let repo = repository().await;
@@ -97,6 +122,18 @@ async fn cascade_delete_removes_agent_jobs_threads_and_empty_sessions() {
     )
     .await
     .expect("matching thread should insert");
+    let deleted_run_id = AgentRunId::new();
+    AgentRunRepository::insert_agent_run(
+        &repo,
+        &agent_run(
+            deleted_run_id,
+            agent_id,
+            single_thread_session_id,
+            deleted_thread_id,
+        ),
+    )
+    .await
+    .expect("agent run should insert");
 
     let mixed_session_id = SessionId::new();
     SessionRepository::create(&repo, &mixed_session_id, "mixed threads")
@@ -133,6 +170,7 @@ async fn cascade_delete_removes_agent_jobs_threads_and_empty_sessions() {
 
     assert!(report.agent_deleted);
     assert_eq!(report.deleted_job_count, 1);
+    assert_eq!(report.deleted_run_count, 1);
     assert_eq!(report.deleted_thread_count, 2);
     assert_eq!(report.deleted_session_count, 1);
 
@@ -146,6 +184,12 @@ async fn cascade_delete_removes_agent_jobs_threads_and_empty_sessions() {
         JobRepository::get(&repo, &JobId::new("job-to-delete"))
             .await
             .expect("job lookup should succeed")
+            .is_none()
+    );
+    assert!(
+        AgentRunRepository::get_agent_run(&repo, &deleted_run_id)
+            .await
+            .expect("run lookup should succeed")
             .is_none()
     );
     assert!(
@@ -179,5 +223,57 @@ async fn cascade_delete_removes_agent_jobs_threads_and_empty_sessions() {
             .expect("kept thread should remain")
             .template_id,
         Some(unrelated_agent_id)
+    );
+}
+
+#[tokio::test]
+async fn postgres_cascade_delete_removes_agent_runs_before_agent() {
+    let Some(database_url) = std::env::var(POSTGRES_TEST_URL_ENV).ok() else {
+        eprintln!("skipping PostgreSQL cascade delete test: {POSTGRES_TEST_URL_ENV} is not set");
+        return;
+    };
+
+    let pool = connect_postgres(&database_url)
+        .await
+        .expect("postgres test database should connect");
+    migrate_postgres(&pool)
+        .await
+        .expect("postgres migrations should run on the test database");
+    let repo = ArgusPostgres::new(pool);
+
+    let agent_id = AgentRepository::upsert(&repo, &agent("Postgres Delete Me"))
+        .await
+        .expect("agent should upsert");
+
+    let session_id = SessionId::new();
+    SessionRepository::create(&repo, &session_id, "postgres cascade session")
+        .await
+        .expect("session should insert");
+    let thread_id = ThreadId::new();
+    ThreadRepository::upsert_thread(
+        &repo,
+        &thread(thread_id, session_id, agent_id, "postgres cascade thread"),
+    )
+    .await
+    .expect("thread should insert");
+    let run_id = AgentRunId::new();
+    AgentRunRepository::insert_agent_run(
+        &repo,
+        &agent_run(run_id, agent_id, session_id, thread_id),
+    )
+    .await
+    .expect("agent run should insert");
+
+    let report = AgentRepository::delete_with_associations(&repo, &agent_id)
+        .await
+        .expect("cascade delete should remove agent run before deleting agent");
+
+    assert!(report.agent_deleted);
+    assert_eq!(report.deleted_run_count, 1);
+    assert!(
+        AgentRunRepository::get_agent_run(&repo, &run_id)
+            .await
+            .expect("run lookup should succeed")
+            .is_none()
     );
 }

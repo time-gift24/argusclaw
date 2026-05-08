@@ -167,6 +167,7 @@ export interface DeleteResponse {
 export interface AgentDeleteReport extends DeleteResponse {
   agent_deleted: boolean;
   deleted_job_count: number;
+  deleted_run_count: number;
   deleted_thread_count: number;
   deleted_session_count: number;
 }

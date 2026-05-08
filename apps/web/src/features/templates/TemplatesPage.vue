@@ -47,6 +47,7 @@ function isReferenceBlockedError(reason: unknown): boolean {
 function formatDeleteMessage(report: AgentDeleteReport): string {
   const details = [
     report.deleted_job_count > 0 ? `${report.deleted_job_count} 个任务` : "",
+    report.deleted_run_count > 0 ? `${report.deleted_run_count} 条运行记录` : "",
     report.deleted_thread_count > 0 ? `${report.deleted_thread_count} 个线程` : "",
     report.deleted_session_count > 0 ? `${report.deleted_session_count} 个空会话` : "",
   ].filter(Boolean);

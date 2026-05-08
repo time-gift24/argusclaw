@@ -20,6 +20,7 @@ fn format_delete_blocked_reason(
     id: AgentId,
     thread_count: i64,
     job_count: i64,
+    run_count: i64,
     subagent_ref_count: usize,
 ) -> String {
     let mut blockers = Vec::new();
@@ -29,6 +30,9 @@ fn format_delete_blocked_reason(
     }
     if job_count > 0 {
         blockers.push(format!("{} 个任务", job_count));
+    }
+    if run_count > 0 {
+        blockers.push(format!("{} 条运行记录", run_count));
     }
     if subagent_ref_count > 0 {
         blockers.push(format!(
@@ -169,13 +173,13 @@ impl TemplateManager {
         options: TemplateDeleteOptions,
     ) -> Result<AgentDeleteReport> {
         let target_display_name = self.get(id).await?.map(|record| record.display_name);
-        let (thread_count, job_count) =
-            self.repository
-                .count_references(&id)
-                .await
-                .map_err(|e| ArgusError::DatabaseError {
-                    reason: e.to_string(),
-                })?;
+        let (thread_count, job_count, run_count) = self
+            .repository
+            .count_references(&id)
+            .await
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })?;
         let subagent_ref_count = if let Some(display_name) = target_display_name {
             self.list()
                 .await?
@@ -193,13 +197,14 @@ impl TemplateManager {
         };
 
         if !options.cascade_associations
-            && (thread_count > 0 || job_count > 0 || subagent_ref_count > 0)
+            && (thread_count > 0 || job_count > 0 || run_count > 0 || subagent_ref_count > 0)
         {
             return Err(ArgusError::DatabaseError {
                 reason: format_delete_blocked_reason(
                     id,
                     thread_count,
                     job_count,
+                    run_count,
                     subagent_ref_count,
                 ),
             });
@@ -212,6 +217,7 @@ impl TemplateManager {
                         id,
                         thread_count,
                         job_count,
+                        run_count,
                         subagent_ref_count,
                     ),
                 });

@@ -28,7 +28,7 @@ pub trait AgentRepository: Send + Sync {
     async fn list(&self) -> Result<Vec<AgentRecord>, DbError>;
 
     /// Count references to an agent (threads and jobs that reference it).
-    async fn count_references(&self, id: &AgentId) -> Result<(i64, i64), DbError>;
+    async fn count_references(&self, id: &AgentId) -> Result<(i64, i64, i64), DbError>;
 
     /// Delete an agent.
     async fn delete(&self, id: &AgentId) -> Result<bool, DbError>;

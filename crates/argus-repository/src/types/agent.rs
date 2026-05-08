@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 pub struct AgentDeleteReport {
     pub agent_deleted: bool,
     pub deleted_job_count: u64,
+    pub deleted_run_count: u64,
     pub deleted_thread_count: u64,
     pub deleted_session_count: u64,
 }
@@ -21,6 +22,7 @@ impl AgentDeleteReport {
         Self {
             agent_deleted,
             deleted_job_count: 0,
+            deleted_run_count: 0,
             deleted_thread_count: 0,
             deleted_session_count: 0,
         }

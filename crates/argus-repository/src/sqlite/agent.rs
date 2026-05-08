@@ -211,6 +211,15 @@ impl AgentRepository for ArgusSqlite {
             })?
             .rows_affected();
 
+        let deleted_run_count = sqlx::query("DELETE FROM agent_runs WHERE agent_id = ?1")
+            .bind(id.into_inner())
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| DbError::QueryFailed {
+                reason: e.to_string(),
+            })?
+            .rows_affected();
+
         let deleted_thread_count = sqlx::query("DELETE FROM threads WHERE template_id = ?1")
             .bind(id.into_inner())
             .execute(&mut *tx)
@@ -255,6 +264,7 @@ impl AgentRepository for ArgusSqlite {
         Ok(AgentDeleteReport {
             agent_deleted,
             deleted_job_count,
+            deleted_run_count,
             deleted_thread_count,
             deleted_session_count,
         })
@@ -273,7 +283,7 @@ impl AgentRepository for ArgusSqlite {
         Ok(id.map(AgentId::new))
     }
 
-    async fn count_references(&self, id: &AgentId) -> DbResult<(i64, i64)> {
+    async fn count_references(&self, id: &AgentId) -> DbResult<(i64, i64, i64)> {
         let thread_count: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM threads WHERE template_id = ?1")
                 .bind(id.into_inner())
@@ -291,7 +301,16 @@ impl AgentRepository for ArgusSqlite {
                 reason: e.to_string(),
             })?;
 
-        Ok((thread_count, job_count))
+        let run_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM agent_runs WHERE agent_id = ?1")
+                .bind(id.into_inner())
+                .fetch_one(&self.pool)
+                .await
+                .map_err(|e| DbError::QueryFailed {
+                    reason: e.to_string(),
+                })?;
+
+        Ok((thread_count, job_count, run_count))
     }
 }
 

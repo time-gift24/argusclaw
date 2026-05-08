@@ -59,6 +59,7 @@ pub struct TemplateDeleteResponse {
     pub deleted: bool,
     pub agent_deleted: bool,
     pub deleted_job_count: u64,
+    pub deleted_run_count: u64,
     pub deleted_thread_count: u64,
     pub deleted_session_count: u64,
 }
@@ -69,6 +70,7 @@ impl From<AgentDeleteReport> for TemplateDeleteResponse {
             deleted: report.agent_deleted,
             agent_deleted: report.agent_deleted,
             deleted_job_count: report.deleted_job_count,
+            deleted_run_count: report.deleted_run_count,
             deleted_thread_count: report.deleted_thread_count,
             deleted_session_count: report.deleted_session_count,
         }

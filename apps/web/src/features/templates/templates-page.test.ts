@@ -53,6 +53,7 @@ function makeApiClient(overrides: Partial<ApiClient> = {}): ApiClient {
       deleted: true,
       agent_deleted: true,
       deleted_job_count: 0,
+      deleted_run_count: 0,
       deleted_thread_count: 0,
       deleted_session_count: 0,
     }),
@@ -87,6 +88,7 @@ describe("TemplatesPage", () => {
       deleted: true,
       agent_deleted: true,
       deleted_job_count: 0,
+      deleted_run_count: 0,
       deleted_thread_count: 0,
       deleted_session_count: 0,
     }));
@@ -126,6 +128,7 @@ describe("TemplatesPage", () => {
         deleted: true,
         agent_deleted: true,
         deleted_job_count: 1,
+        deleted_run_count: 1,
         deleted_thread_count: 2,
         deleted_session_count: 1,
       });
@@ -155,7 +158,7 @@ describe("TemplatesPage", () => {
     expect(deleteTemplate).toHaveBeenNthCalledWith(1, 8);
     expect(deleteTemplate).toHaveBeenNthCalledWith(2, 8, { cascadeAssociations: true });
     expect(wrapper.text()).toContain(
-      "模板及关联的 1 个任务、2 个线程、1 个空会话 已删除。",
+      "模板及关联的 1 个任务、1 条运行记录、2 个线程、1 个空会话 已删除。",
     );
   });
 });

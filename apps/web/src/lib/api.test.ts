@@ -157,6 +157,7 @@ describe("HttpApiClient", () => {
           deleted: true,
           agent_deleted: true,
           deleted_job_count: 1,
+          deleted_run_count: 1,
           deleted_thread_count: 2,
           deleted_session_count: 1,
         },
