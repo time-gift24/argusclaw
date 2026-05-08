@@ -227,7 +227,7 @@ impl JobRepository for ArgusSqlite {
                 sqlx::query(
                     "SELECT id, job_type, name, status, agent_id, context, prompt, thread_id, group_id, depends_on, cron_expr, scheduled_at, started_at, finished_at, parent_job_id, result
                      FROM jobs
-                     WHERE job_type = 'cron' AND status IN ('pending', 'paused', 'running', 'failed')
+                     WHERE job_type = 'cron' AND status IN ('pending', 'paused', 'running', 'succeeded', 'failed', 'cancelled')
                      ORDER BY scheduled_at IS NULL ASC, scheduled_at ASC, id ASC",
                 )
                 .fetch_all(&self.pool)
@@ -237,7 +237,7 @@ impl JobRepository for ArgusSqlite {
                 sqlx::query(
                     "SELECT id, job_type, name, status, agent_id, context, prompt, thread_id, group_id, depends_on, cron_expr, scheduled_at, started_at, finished_at, parent_job_id, result
                      FROM jobs
-                     WHERE job_type = 'cron' AND status IN ('pending', 'paused', 'running', 'failed') AND thread_id = ?1
+                     WHERE job_type = 'cron' AND status IN ('pending', 'paused', 'running', 'succeeded', 'failed', 'cancelled') AND thread_id = ?1
                      ORDER BY scheduled_at IS NULL ASC, scheduled_at ASC, id ASC",
                 )
                 .bind(thread_id.to_string())

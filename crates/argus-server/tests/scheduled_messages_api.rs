@@ -54,6 +54,41 @@ async fn scheduled_message_routes_create_list_and_pause() {
     assert_eq!(paused.item["status"], "paused");
 }
 
+#[tokio::test]
+async fn scheduled_message_trigger_returns_completed_one_shot() {
+    let ctx = support::TestContext::new().await;
+    let (session_id, thread_id) = create_chat_session_with_thread(&ctx).await;
+
+    let create = ctx
+        .post_json(
+            "/api/v1/scheduled-messages",
+            &json!({
+                "session_id": session_id,
+                "thread_id": thread_id,
+                "name": "One shot",
+                "prompt": "Run once",
+                "scheduled_at": "2099-05-08T01:00:00Z"
+            }),
+        )
+        .await;
+    assert_eq!(create.status(), StatusCode::CREATED);
+    let created: MutationResponse<serde_json::Value> = support::json_body(create).await;
+    let id = created.item["id"]
+        .as_str()
+        .expect("scheduled message id should be a string");
+
+    let trigger = ctx
+        .post_json(
+            &format!("/api/v1/scheduled-messages/{id}/trigger"),
+            &json!({}),
+        )
+        .await;
+    assert_eq!(trigger.status(), StatusCode::OK);
+    let triggered: MutationResponse<serde_json::Value> = support::json_body(trigger).await;
+    assert_eq!(triggered.item["id"], id);
+    assert_eq!(triggered.item["status"], "succeeded");
+}
+
 async fn create_chat_session_with_thread(ctx: &support::TestContext) -> (String, String) {
     let provider = create_test_provider(ctx).await;
     let template = first_template(ctx).await;

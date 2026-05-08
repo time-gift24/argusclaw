@@ -228,3 +228,30 @@ async fn list_cron_jobs_orders_null_schedules_last_when_including_paused() {
         vec![&earlier.id, &later.id, &unscheduled.id]
     );
 }
+
+#[tokio::test]
+async fn list_cron_jobs_includes_terminal_statuses_for_history() {
+    let repo = repository().await;
+    let succeeded = cron_job("cron-succeeded", JobStatus::Succeeded, None);
+    let cancelled = cron_job("cron-cancelled", JobStatus::Cancelled, None);
+
+    JobRepository::create(&repo, &succeeded)
+        .await
+        .expect("succeeded cron should insert");
+    JobRepository::create(&repo, &cancelled)
+        .await
+        .expect("cancelled cron should insert");
+
+    let active = JobRepository::list_cron_jobs(&repo, false, None)
+        .await
+        .expect("active cron jobs should list");
+    assert!(active.is_empty());
+
+    let history = JobRepository::list_cron_jobs(&repo, true, None)
+        .await
+        .expect("cron job history should list");
+    assert_eq!(
+        history.iter().map(|job| &job.id).collect::<Vec<_>>(),
+        vec![&cancelled.id, &succeeded.id]
+    );
+}

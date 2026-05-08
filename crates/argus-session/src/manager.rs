@@ -1916,7 +1916,6 @@ impl SessionManager {
             .map_err(|error| ArgusError::DatabaseError {
                 reason: error.to_string(),
             })?;
-        self.notify_scheduled_messages_changed();
         if let Some(scheduler) = self.scheduled_message_scheduler() {
             return scheduler
                 .run_due_once(now)
@@ -1926,6 +1925,7 @@ impl SessionManager {
                     reason: error.to_string(),
                 });
         }
+        self.notify_scheduled_messages_changed();
         Ok(false)
     }
 
