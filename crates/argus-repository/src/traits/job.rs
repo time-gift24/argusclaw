@@ -36,6 +36,26 @@ pub trait JobRepository: Send + Sync {
     /// Find cron jobs that are due for execution.
     async fn find_due_cron_jobs(&self, now: &str) -> Result<Vec<JobRecord>, DbError>;
 
+    /// Atomically claim a pending cron job for execution.
+    async fn claim_cron_job(&self, id: &JobId, started_at: &str) -> Result<bool, DbError>;
+
+    /// Update a cron job after a run completes.
+    async fn update_cron_after_run(
+        &self,
+        id: &JobId,
+        status: JobStatus,
+        scheduled_at: Option<&str>,
+        finished_at: &str,
+        context: Option<&str>,
+    ) -> Result<(), DbError>;
+
+    /// List cron jobs, optionally including paused and in-flight records.
+    async fn list_cron_jobs(
+        &self,
+        include_paused: bool,
+        thread_id: Option<&ThreadId>,
+    ) -> Result<Vec<JobRecord>, DbError>;
+
     /// Update the next scheduled time for a cron job.
     async fn update_scheduled_at(&self, id: &JobId, next: &str) -> Result<(), DbError>;
 
