@@ -6,6 +6,7 @@ import {
   getApiClient,
   type AgentRecord,
   type ChatSessionSummary,
+  type ChatThreadBinding,
   type ChatThreadSummary,
   type LlmProviderRecord,
 } from "@/lib/api";
@@ -124,6 +125,11 @@ async function loadInitialState() {
     try {
       await chatSessions.loadInitialState();
       if (chatSessions.activeSessionId.value && chatSessions.activeThreadId.value) {
+        try {
+          await syncActiveThreadBinding();
+        } catch (reason) {
+          loadErrors.push(`对话线程激活失败：${formatErrorMessage(reason)}`);
+        }
         await chatThreadStream.refreshActiveThread({ silent: true });
       }
     } catch (reason) {
@@ -161,6 +167,7 @@ watch(
 async function handleSelectThreadFromDialog(sessionId: string, threadId: string) {
   chatThreadStream.closeThreadEvents();
   await chatSessions.selectSession(sessionId, threadId);
+  await syncActiveThreadBinding();
   await chatThreadStream.refreshActiveThread();
 }
 
@@ -189,6 +196,7 @@ async function handleDeleteSession(sessionId: string) {
     chatSessions.threads.value = [];
     if (chatSessions.sessions.value.length > 0) {
       await chatSessions.selectSession(chatSessions.sessions.value[0].id);
+      await syncActiveThreadBinding();
       await chatThreadStream.refreshActiveThread();
     }
   } catch (reason) {
@@ -271,6 +279,29 @@ function applyTemplateSelection(templateId: number | null) {
   };
 }
 
+async function syncActiveThreadBinding() {
+  if (!chatSessions.activeSessionId.value || !chatSessions.activeThreadId.value) return;
+  await chatSessions.activateThread();
+  applyThreadBindingSelection(chatSessions.activeBinding.value);
+}
+
+function applyThreadBindingSelection(binding: ChatThreadBinding | null) {
+  if (!binding) return;
+
+  selectedTemplateId.value = binding.template_id;
+  const template = templates.value.find((candidate) => candidate.id === binding.template_id) ?? null;
+  const templateProviderId = template?.provider_id ?? null;
+  const provider =
+    providers.value.find(
+      (candidate) => binding.effective_provider_id !== null && candidate.id === binding.effective_provider_id,
+    ) ??
+    providers.value.find((candidate) => templateProviderId !== null && candidate.id === templateProviderId) ??
+    defaultProvider.value;
+
+  selectedProviderId.value = provider?.id ?? null;
+  selectedModel.value = binding.effective_model || template?.model_id || provider?.default_model || "";
+}
+
 function hasActiveConversationMessages() {
   return Boolean(
     chatSessions.activeSessionId.value &&
@@ -298,6 +329,9 @@ function applyPrompt(_event: MouseEvent, item: PromptProps) {
           @prompt="applyPrompt"
         />
       </div>
+    </div>
+
+    <div class="chat-runtime-floating-layer">
       <RuntimeActivityRail :activities="chatThreadStream.runtimeActivities.value" />
     </div>
 
@@ -340,35 +374,45 @@ function applyPrompt(_event: MouseEvent, item: PromptProps) {
 
 <style scoped>
 .chat-page {
-  width: 100%;
-  --chat-main-width: 1280px;
+  --chat-message-width: 936px;
   --chat-rail-width: 320px;
   --chat-layout-gap: var(--space-5);
   --chat-dock-clearance: 212px;
-  height: calc(100vh - (var(--space-6) * 2));
-  min-height: calc(100vh - (var(--space-6) * 2));
-  max-height: calc(100vh - (var(--space-6) * 2));
+  padding: var(--space-6);
+  height: 100vh;
+  min-height: 100vh;
+  max-height: 100vh;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: none;
+}
+
+.chat-page::-webkit-scrollbar {
+  width: 0;
+  height: 0;
 }
 
 .chat-page--immersive {
   position: relative;
 }
 
+.chat-page.chat-page--immersive {
+  width: calc(100% + var(--space-6) + var(--space-6));
+  margin: calc(0px - var(--space-6));
+}
+
 .chat-page--single-scroll {
-  overflow: hidden;
+  scroll-behavior: smooth;
 }
 
 .chat-workspace,
 .chat-main-column {
-  height: 100%;
-  min-height: 0;
+  min-height: 100%;
 }
 
 .chat-workspace {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) var(--chat-rail-width);
-  gap: var(--chat-layout-gap);
-  width: min(100%, var(--chat-main-width));
+  width: min(100%, var(--chat-message-width));
   margin-inline: auto;
 }
 
@@ -376,6 +420,27 @@ function applyPrompt(_event: MouseEvent, item: PromptProps) {
   display: flex;
   flex-direction: column;
   min-width: 0;
+  min-height: 100%;
+}
+
+.chat-runtime-floating-layer {
+  position: fixed;
+  top: var(--space-6);
+  right: var(--space-6);
+  z-index: 25;
+  width: var(--chat-rail-width);
+  max-width: calc(100vw - 260px - var(--space-6) - var(--space-6));
+  pointer-events: none;
+}
+
+.chat-runtime-floating-layer :deep(.runtime-rail) {
+  width: 100%;
+  pointer-events: auto;
+}
+
+.chat-runtime-floating-layer :deep(.runtime-rail--collapsed) {
+  width: min(100%, 188px);
+  margin-left: auto;
 }
 
 .chat-page__composer-dock {
@@ -389,15 +454,18 @@ function applyPrompt(_event: MouseEvent, item: PromptProps) {
 }
 
 .chat-page__composer-shell {
-  width: min(100%, calc(var(--chat-main-width) - var(--chat-rail-width) - var(--chat-layout-gap)));
+  width: min(100%, var(--chat-message-width));
 }
 
 @media (max-width: 1180px) {
   .chat-page {
+    padding: var(--space-4);
     --chat-dock-clearance: 228px;
-    height: calc(100vh - (var(--space-4) * 2));
-    min-height: calc(100vh - (var(--space-4) * 2));
-    max-height: calc(100vh - (var(--space-4) * 2));
+  }
+
+  .chat-page.chat-page--immersive {
+    width: calc(100% + var(--space-4) + var(--space-4));
+    margin: calc(0px - var(--space-4));
   }
 
   .chat-page__composer-dock {
@@ -408,14 +476,20 @@ function applyPrompt(_event: MouseEvent, item: PromptProps) {
 }
 
 @media (max-width: 1280px) {
-  .chat-workspace {
-    grid-template-columns: 1fr;
-    overflow: auto;
-    padding-bottom: calc(var(--chat-dock-clearance, 228px) + var(--space-4));
+  .chat-runtime-floating-layer {
+    position: static;
+    width: min(100%, var(--chat-message-width));
+    max-width: none;
+    margin: var(--space-4) auto calc(var(--chat-dock-clearance, 228px) + var(--space-4));
+    pointer-events: auto;
+  }
+
+  .chat-runtime-floating-layer :deep(.runtime-rail--collapsed) {
+    width: 100%;
   }
 
   .chat-page__composer-shell {
-    width: min(100%, var(--chat-main-width));
+    width: min(100%, var(--chat-message-width));
   }
 }
 </style>

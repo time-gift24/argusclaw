@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
 
 import type { ToolActivity } from "../composables/useChatThreadStream";
 import type { ToolCallDetail } from "../composables/useChatPresentation";
@@ -16,8 +16,17 @@ const props = defineProps<{
 }>();
 
 const activeTool = ref<ToolCallDetail | null>(null);
+const collapsed = ref(false);
 
 const visibleActivities = computed(() => props.activities);
+const collapseLabel = computed(() => (collapsed.value ? "展开工具调用列表" : "折叠工具调用列表"));
+
+watch(
+  () => visibleActivities.value.length,
+  (count) => {
+    if (count === 0) collapsed.value = false;
+  },
+);
 
 function activityKind(activity: ToolActivity): ToolCallDetail["kind"] {
   return activity.kind === "job" ? "job" : toolKindFromName(activity.name);
@@ -38,16 +47,45 @@ function openActivity(activity: ToolActivity) {
 function closeActivity() {
   activeTool.value = null;
 }
+
+function toggleCollapsed() {
+  collapsed.value = !collapsed.value;
+}
 </script>
 
 <template>
-  <aside v-if="visibleActivities.length > 0" class="runtime-rail" aria-label="当前运行活动">
+  <aside
+    v-if="visibleActivities.length > 0"
+    class="runtime-rail"
+    :class="{ 'runtime-rail--collapsed': collapsed }"
+    aria-label="当前运行活动"
+  >
     <header class="runtime-rail__header">
-      <p>当前运行</p>
-      <span>{{ visibleActivities.length }}</span>
+      <div class="runtime-rail__summary">
+        <p>当前运行</p>
+        <span>{{ visibleActivities.length }}</span>
+      </div>
+      <button
+        type="button"
+        class="runtime-rail__toggle"
+        :aria-expanded="!collapsed"
+        aria-controls="runtime-rail-list"
+        :aria-label="collapseLabel"
+        :title="collapseLabel"
+        @click="toggleCollapsed"
+      >
+        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <path d="M7 10l5 5 5-5" />
+        </svg>
+      </button>
     </header>
 
-    <div class="runtime-rail__list">
+    <div
+      v-show="!collapsed"
+      id="runtime-rail-list"
+      class="runtime-rail__list"
+      :aria-hidden="collapsed"
+    >
       <button
         v-for="activity in visibleActivities"
         :key="activity.id"
@@ -73,19 +111,23 @@ function closeActivity() {
 
 <style scoped>
 .runtime-rail {
-  align-self: start;
-  position: sticky;
-  top: 0;
   display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
   gap: var(--space-3);
   width: 320px;
   max-height: calc(100vh - (var(--space-6) * 2) - var(--chat-dock-clearance, 212px));
-  overflow: auto;
+  overflow: hidden;
   padding: var(--space-4);
   border: 1px solid color-mix(in srgb, var(--border-default) 78%, transparent);
   border-radius: 18px;
   background: color-mix(in srgb, var(--surface-base) 92%, transparent);
   box-shadow: var(--shadow-xs);
+}
+
+.runtime-rail--collapsed {
+  grid-template-rows: auto;
+  gap: 0;
+  padding: var(--space-3);
 }
 
 .runtime-rail__header {
@@ -95,16 +137,24 @@ function closeActivity() {
   gap: var(--space-3);
 }
 
-.runtime-rail__header p {
+.runtime-rail__summary {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.runtime-rail__summary p {
   margin: 0;
   color: var(--text-secondary);
   font-size: var(--text-xs);
   font-weight: 700;
   letter-spacing: 0.06em;
   text-transform: uppercase;
+  white-space: nowrap;
 }
 
-.runtime-rail__header span {
+.runtime-rail__summary span {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -118,9 +168,52 @@ function closeActivity() {
   font-weight: 700;
 }
 
+.runtime-rail__toggle {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid color-mix(in srgb, var(--border-default) 80%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface-base) 86%, transparent);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition:
+    border-color 0.18s ease,
+    background-color 0.18s ease,
+    color 0.18s ease;
+}
+
+.runtime-rail__toggle:hover {
+  border-color: color-mix(in srgb, var(--accent) 38%, var(--border-default));
+  background: color-mix(in srgb, var(--accent) 9%, transparent);
+  color: var(--accent);
+}
+
+.runtime-rail__toggle svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2.2;
+  transition: transform 0.18s ease;
+}
+
+.runtime-rail--collapsed .runtime-rail__toggle svg {
+  transform: rotate(180deg);
+}
+
 .runtime-rail__list {
   display: grid;
+  min-height: 0;
+  overflow: auto;
   gap: var(--space-2);
+  padding-right: 2px;
 }
 
 .runtime-rail__item {
@@ -220,9 +313,8 @@ function closeActivity() {
 
 @media (max-width: 1280px) {
   .runtime-rail {
-    position: static;
     width: 100%;
-    max-height: none;
+    max-height: 240px;
   }
 }
 </style>
