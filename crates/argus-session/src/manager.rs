@@ -37,6 +37,7 @@ use rust_decimal::Decimal;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
+use crate::scheduled_messages::{ScheduledMessageDispatcher, ScheduledMessageError};
 use crate::session::{Session, SessionSummary, ThreadSummary};
 use argus_protocol::ProviderResolver;
 
@@ -2236,6 +2237,20 @@ impl SessionManager {
             return Err(ArgusError::ThreadNotFound(thread_id.inner().to_string()));
         }
         Ok(())
+    }
+}
+
+#[async_trait]
+impl ScheduledMessageDispatcher for SessionManager {
+    async fn deliver_scheduled_message(
+        &self,
+        session_id: SessionId,
+        thread_id: ThreadId,
+        prompt: String,
+    ) -> std::result::Result<(), ScheduledMessageError> {
+        self.send_message(session_id, &thread_id, prompt)
+            .await
+            .map_err(|error| ScheduledMessageError::Dispatch(error.to_string()))
     }
 }
 
