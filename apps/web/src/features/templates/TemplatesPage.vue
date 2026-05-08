@@ -2,7 +2,7 @@
 import { onMounted, ref } from "vue";
 import { useRouter } from "vue-router";
 
-import { getApiClient, type AgentRecord } from "@/lib/api";
+import { getApiClient, type AgentDeleteReport, type AgentRecord } from "@/lib/api";
 import { TinyButton, TinyTag } from "@/lib/opentiny";
 
 const api = getApiClient();
@@ -13,6 +13,7 @@ const loading = ref(true);
 const error = ref("");
 const actionMessage = ref("");
 const deletingTemplateId = ref<number | null>(null);
+const cascadeConfirmTemplate = ref<AgentRecord | null>(null);
 
 async function loadTemplates() {
   loading.value = true;
@@ -35,6 +36,27 @@ function editTemplate(template: AgentRecord) {
   router.push(`/templates/${template.id}/edit`);
 }
 
+function isReferenceBlockedError(reason: unknown): boolean {
+  if (!(reason instanceof Error)) {
+    return false;
+  }
+
+  return reason.message.includes("无法删除智能体") && reason.message.includes("引用");
+}
+
+function formatDeleteMessage(report: AgentDeleteReport): string {
+  const details = [
+    report.deleted_job_count > 0 ? `${report.deleted_job_count} 个任务` : "",
+    report.deleted_run_count > 0 ? `${report.deleted_run_count} 条运行记录` : "",
+    report.deleted_thread_count > 0 ? `${report.deleted_thread_count} 个线程` : "",
+    report.deleted_session_count > 0 ? `${report.deleted_session_count} 个空会话` : "",
+  ].filter(Boolean);
+
+  return details.length > 0
+    ? `模板及关联的 ${details.join("、")} 已删除。`
+    : "模板已删除。";
+}
+
 async function deleteTemplate(template: AgentRecord) {
   if (!api.deleteTemplate) {
     error.value = "当前 API 客户端不支持删除模板。";
@@ -44,16 +66,48 @@ async function deleteTemplate(template: AgentRecord) {
   deletingTemplateId.value = template.id;
   error.value = "";
   actionMessage.value = "";
+  cascadeConfirmTemplate.value = null;
 
   try {
-    await api.deleteTemplate(template.id);
-    actionMessage.value = "模板已删除。";
+    const report = await api.deleteTemplate(template.id);
+    actionMessage.value = formatDeleteMessage(report);
+    await loadTemplates();
+  } catch (reason) {
+    if (isReferenceBlockedError(reason)) {
+      cascadeConfirmTemplate.value = template;
+      error.value = "";
+    } else {
+      error.value = reason instanceof Error ? reason.message : "删除模板失败。";
+    }
+  } finally {
+    deletingTemplateId.value = null;
+  }
+}
+
+async function confirmCascadeDelete() {
+  if (!api.deleteTemplate || !cascadeConfirmTemplate.value) {
+    return;
+  }
+
+  const template = cascadeConfirmTemplate.value;
+  deletingTemplateId.value = template.id;
+  error.value = "";
+  actionMessage.value = "";
+
+  try {
+    const report = await api.deleteTemplate(template.id, { cascadeAssociations: true });
+    cascadeConfirmTemplate.value = null;
+    actionMessage.value = formatDeleteMessage(report);
     await loadTemplates();
   } catch (reason) {
     error.value = reason instanceof Error ? reason.message : "删除模板失败。";
   } finally {
     deletingTemplateId.value = null;
   }
+}
+
+function cancelCascadeDelete() {
+  cascadeConfirmTemplate.value = null;
 }
 
 onMounted(() => {
@@ -97,6 +151,41 @@ onMounted(() => {
     >
       {{ actionMessage }}
     </p>
+
+    <div
+      v-if="cascadeConfirmTemplate"
+      class="cascade-confirm"
+      data-testid="cascade-delete-confirmation"
+    >
+      <div>
+        <strong>{{ cascadeConfirmTemplate.display_name }}</strong>
+        <p>
+          该智能体仍有关联任务或会话线程。继续删除会同步清理关联任务、匹配线程，以及清理后为空的会话。
+        </p>
+      </div>
+      <div class="cascade-confirm-actions">
+        <TinyButton
+          data-testid="cancel-cascade-delete"
+          type="default"
+          :disabled="deletingTemplateId === cascadeConfirmTemplate.id"
+          @click="cancelCascadeDelete"
+        >
+          取消
+        </TinyButton>
+        <TinyButton
+          data-testid="confirm-cascade-delete"
+          type="danger"
+          :disabled="deletingTemplateId === cascadeConfirmTemplate.id"
+          @click="confirmCascadeDelete"
+        >
+          {{
+            deletingTemplateId === cascadeConfirmTemplate.id
+              ? "删除中"
+              : "同时删除关联数据"
+          }}
+        </TinyButton>
+      </div>
+    </div>
 
     <div
       v-if="!loading && templates.length === 0"
@@ -253,6 +342,38 @@ onMounted(() => {
   background: var(--success-bg);
   border: 1px solid var(--success-border);
   color: var(--success);
+}
+
+.cascade-confirm {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  padding: var(--space-4);
+  background: var(--status-warning-bg);
+  border: 1px solid var(--warning-border);
+  border-radius: var(--radius-md);
+}
+
+.cascade-confirm strong {
+  display: block;
+  margin-bottom: var(--space-1);
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+}
+
+.cascade-confirm p {
+  margin: 0;
+  font-size: var(--text-sm);
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+.cascade-confirm-actions {
+  display: flex;
+  flex-shrink: 0;
+  justify-content: flex-end;
+  gap: var(--space-2);
 }
 
 .loading-state,

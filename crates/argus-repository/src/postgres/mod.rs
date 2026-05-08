@@ -27,8 +27,8 @@ use crate::traits::{
     UserRepository,
 };
 use crate::types::{
-    AgentRunId, AgentRunRecord, AgentRunStatus, JobId, JobRecord, JobResult, JobStatus, JobType,
-    MessageId, MessageRecord, SessionRecord, ThreadRecord,
+    AgentDeleteReport, AgentRunId, AgentRunRecord, AgentRunStatus, JobId, JobRecord, JobResult,
+    JobStatus, JobType, MessageId, MessageRecord, SessionRecord, ThreadRecord,
 };
 
 type DbResult<T> = std::result::Result<T, DbError>;
@@ -820,7 +820,7 @@ impl AgentRepository for ArgusPostgres {
         let rows=sqlx::query("SELECT id,display_name,description,version,provider_id,model_id,system_prompt,tool_names,subagent_names,max_tokens,temperature,thinking_config FROM agents ORDER BY display_name ASC").fetch_all(&self.pool).await.map_err(|e| DbError::QueryFailed{reason:e.to_string()})?;
         rows.into_iter().map(|r| self.map_agent_record(r)).collect()
     }
-    async fn count_references(&self, id: &AgentId) -> DbResult<(i64, i64)> {
+    async fn count_references(&self, id: &AgentId) -> DbResult<(i64, i64, i64)> {
         let t: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM threads WHERE template_id=$1")
             .bind(id.inner())
             .fetch_one(&self.pool)
@@ -835,7 +835,14 @@ impl AgentRepository for ArgusPostgres {
             .map_err(|e| DbError::QueryFailed {
                 reason: e.to_string(),
             })?;
-        Ok((t, j))
+        let r: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_runs WHERE agent_id=$1")
+            .bind(id.inner())
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| DbError::QueryFailed {
+                reason: e.to_string(),
+            })?;
+        Ok((t, j, r))
     }
     async fn delete(&self, id: &AgentId) -> DbResult<bool> {
         let r = sqlx::query("DELETE FROM agents WHERE id=$1")
@@ -846,6 +853,93 @@ impl AgentRepository for ArgusPostgres {
                 reason: e.to_string(),
             })?;
         Ok(r.rows_affected() > 0)
+    }
+    async fn delete_with_associations(&self, id: &AgentId) -> DbResult<AgentDeleteReport> {
+        let mut tx = self.pool.begin().await.map_err(|e| DbError::QueryFailed {
+            reason: e.to_string(),
+        })?;
+
+        let session_rows = sqlx::query(
+            "SELECT DISTINCT session_id FROM threads
+             WHERE template_id=$1 AND session_id IS NOT NULL",
+        )
+        .bind(id.inner())
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(|e| DbError::QueryFailed {
+            reason: e.to_string(),
+        })?;
+        let touched_session_ids = session_rows
+            .into_iter()
+            .map(|row| Self::get::<Uuid>(&row, "session_id"))
+            .collect::<DbResult<Vec<_>>>()?;
+
+        let deleted_job_count = sqlx::query("DELETE FROM jobs WHERE agent_id=$1")
+            .bind(id.inner())
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| DbError::QueryFailed {
+                reason: e.to_string(),
+            })?
+            .rows_affected();
+
+        let deleted_run_count = sqlx::query("DELETE FROM agent_runs WHERE agent_id=$1")
+            .bind(id.inner())
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| DbError::QueryFailed {
+                reason: e.to_string(),
+            })?
+            .rows_affected();
+
+        let deleted_thread_count = sqlx::query("DELETE FROM threads WHERE template_id=$1")
+            .bind(id.inner())
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| DbError::QueryFailed {
+                reason: e.to_string(),
+            })?
+            .rows_affected();
+
+        let mut deleted_session_count = 0;
+        for session_id in touched_session_ids {
+            let result = sqlx::query(
+                "DELETE FROM sessions
+                 WHERE id=$1
+                   AND NOT EXISTS (
+                       SELECT 1 FROM threads WHERE threads.session_id = sessions.id
+                   )",
+            )
+            .bind(session_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| DbError::QueryFailed {
+                reason: e.to_string(),
+            })?;
+            deleted_session_count += result.rows_affected();
+        }
+
+        let agent_deleted = sqlx::query("DELETE FROM agents WHERE id=$1")
+            .bind(id.inner())
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| DbError::QueryFailed {
+                reason: e.to_string(),
+            })?
+            .rows_affected()
+            > 0;
+
+        tx.commit().await.map_err(|e| DbError::QueryFailed {
+            reason: e.to_string(),
+        })?;
+
+        Ok(AgentDeleteReport {
+            agent_deleted,
+            deleted_job_count,
+            deleted_run_count,
+            deleted_thread_count,
+            deleted_session_count,
+        })
     }
 }
 
