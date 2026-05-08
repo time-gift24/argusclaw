@@ -17,10 +17,10 @@ use argus_repository::traits::{
     McpRepository, ResolvedUser, SessionRepository, TemplateRepairRepository, ThreadRepository,
     UserRepository,
 };
-use argus_repository::types::{AgentRunId, AgentRunRecord, AgentRunStatus};
+use argus_repository::types::{AgentDeleteReport, AgentRunId, AgentRunRecord, AgentRunStatus};
 use argus_repository::{ArgusPostgres, ArgusSqlite, connect_postgres, migrate_postgres};
 use argus_session::{SessionManager, SessionSummary, ThreadSummary};
-use argus_template::TemplateManager;
+use argus_template::{TemplateDeleteOptions, TemplateManager};
 use argus_thread_pool::ThreadPool;
 use argus_tool::ToolManager;
 use chrono::Utc;
@@ -375,6 +375,14 @@ impl ServerCore {
 
     pub async fn delete_template(&self, id: AgentId) -> Result<()> {
         self.template_manager.delete(id).await
+    }
+
+    pub async fn delete_template_with_options(
+        &self,
+        id: AgentId,
+        options: TemplateDeleteOptions,
+    ) -> Result<AgentDeleteReport> {
+        self.template_manager.delete_with_options(id, options).await
     }
 
     pub async fn get_default_template(&self) -> Result<Option<AgentRecord>> {

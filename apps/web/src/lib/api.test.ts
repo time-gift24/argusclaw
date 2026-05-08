@@ -146,6 +146,36 @@ describe("HttpApiClient", () => {
     expect("password" in configured).toBe(false);
   });
 
+  it("deletes templates with the optional cascade query", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      headers: {
+        get: () => "application/json",
+      },
+      json: async () => ({
+        item: {
+          deleted: true,
+          agent_deleted: true,
+          deleted_job_count: 1,
+          deleted_thread_count: 2,
+          deleted_session_count: 1,
+        },
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await getApiClient().deleteTemplate!(8, { cascadeAssociations: true });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/agents/templates/8?cascade_associations=true",
+      {
+        credentials: "same-origin",
+        method: "DELETE",
+      },
+    );
+    expect(result.deleted_thread_count).toBe(2);
+  });
+
   it("redirects to OAuth login when the API returns unauthorized", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: false,

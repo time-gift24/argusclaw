@@ -1,13 +1,15 @@
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
 
 use argus_protocol::{AgentId, AgentMcpBinding, AgentMcpServerBinding, AgentRecord};
+use argus_repository::types::AgentDeleteReport;
+use argus_template::TemplateDeleteOptions;
 
 use crate::app_state::AppState;
 use crate::error::ApiError;
-use crate::response::{DeleteResponse, MutationResponse};
+use crate::response::MutationResponse;
 use crate::user_context::RequestUser;
 
 use super::require_admin;
@@ -44,6 +46,33 @@ pub struct TemplateRecordPayload {
     pub record: AgentRecord,
     #[serde(default)]
     pub mcp_bindings: Vec<AgentMcpBindingPayload>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DeleteTemplateQuery {
+    #[serde(default)]
+    pub cascade_associations: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TemplateDeleteResponse {
+    pub deleted: bool,
+    pub agent_deleted: bool,
+    pub deleted_job_count: u64,
+    pub deleted_thread_count: u64,
+    pub deleted_session_count: u64,
+}
+
+impl From<AgentDeleteReport> for TemplateDeleteResponse {
+    fn from(report: AgentDeleteReport) -> Self {
+        Self {
+            deleted: report.agent_deleted,
+            agent_deleted: report.agent_deleted,
+            deleted_job_count: report.deleted_job_count,
+            deleted_thread_count: report.deleted_thread_count,
+            deleted_session_count: report.deleted_session_count,
+        }
+    }
 }
 
 impl TemplateRecordPayload {
@@ -129,13 +158,17 @@ pub async fn delete_template(
     request_user: RequestUser,
     State(state): State<AppState>,
     Path(template_id): Path<i64>,
-) -> Result<Json<MutationResponse<DeleteResponse>>, ApiError> {
+    Query(query): Query<DeleteTemplateQuery>,
+) -> Result<Json<MutationResponse<TemplateDeleteResponse>>, ApiError> {
     require_admin(&state, &request_user).await?;
-    state
+    let report = state
         .core()
-        .delete_template(AgentId::new(template_id))
+        .delete_template_with_options(
+            AgentId::new(template_id),
+            TemplateDeleteOptions {
+                cascade_associations: query.cascade_associations,
+            },
+        )
         .await?;
-    Ok(Json(MutationResponse::new(DeleteResponse {
-        deleted: true,
-    })))
+    Ok(Json(MutationResponse::new(report.into())))
 }

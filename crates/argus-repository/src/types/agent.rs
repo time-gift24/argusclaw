@@ -4,9 +4,10 @@
 
 // Re-export AgentId and AgentRecord from argus-protocol
 pub use argus_protocol::{AgentId, AgentRecord};
+use serde::{Deserialize, Serialize};
 
 /// Summary of rows removed by an explicit agent cascade delete.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentDeleteReport {
     pub agent_deleted: bool,
     pub deleted_job_count: u64,

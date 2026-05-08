@@ -164,6 +164,17 @@ export interface DeleteResponse {
   deleted: boolean;
 }
 
+export interface AgentDeleteReport extends DeleteResponse {
+  agent_deleted: boolean;
+  deleted_job_count: number;
+  deleted_thread_count: number;
+  deleted_session_count: number;
+}
+
+export interface DeleteTemplateOptions {
+  cascadeAssociations?: boolean;
+}
+
 export interface AccountStatus {
   configured: boolean;
   username: string | null;
@@ -465,7 +476,10 @@ export interface ApiClient {
   getChatOptions?(): Promise<ChatOptionsResponse>;
   listTemplates(): Promise<AgentRecord[]>;
   saveTemplate(input: AgentRecord): Promise<AgentRecord>;
-  deleteTemplate?(templateId: number): Promise<DeleteResponse>;
+  deleteTemplate?(
+    templateId: number,
+    options?: DeleteTemplateOptions,
+  ): Promise<AgentDeleteReport>;
   listMcpServers(): Promise<McpServerRecord[]>;
   saveMcpServer(input: McpServerRecord): Promise<McpServerRecord>;
   deleteMcpServer?(serverId: number): Promise<DeleteResponse>;
@@ -615,10 +629,17 @@ class HttpApiClient implements ApiClient {
     return response.item;
   }
 
-  async deleteTemplate(templateId: number): Promise<DeleteResponse> {
-    const response = await this.request<MutationResponse<DeleteResponse>>(`/agents/templates/${templateId}`, {
-      method: "DELETE",
-    });
+  async deleteTemplate(
+    templateId: number,
+    options: DeleteTemplateOptions = {},
+  ): Promise<AgentDeleteReport> {
+    const query = options.cascadeAssociations ? "?cascade_associations=true" : "";
+    const response = await this.request<MutationResponse<AgentDeleteReport>>(
+      `/agents/templates/${templateId}${query}`,
+      {
+        method: "DELETE",
+      },
+    );
 
     return response.item;
   }

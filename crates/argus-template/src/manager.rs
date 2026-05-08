@@ -2,11 +2,18 @@ use std::sync::Arc;
 
 use argus_protocol::{AgentId, AgentRecord, ArgusError, Result};
 use argus_repository::traits::{AgentRepository, TemplateRepairRepository};
+use argus_repository::types::AgentDeleteReport;
 
 /// Manager for agent templates.
 pub struct TemplateManager {
     repository: Arc<dyn AgentRepository>,
     repair_repository: Arc<dyn TemplateRepairRepository>,
+}
+
+/// Options for deleting an agent template.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TemplateDeleteOptions {
+    pub cascade_associations: bool,
 }
 
 fn format_delete_blocked_reason(
@@ -149,6 +156,18 @@ impl TemplateManager {
 
     /// Delete a template.
     pub async fn delete(&self, id: AgentId) -> Result<()> {
+        self.delete_with_options(id, TemplateDeleteOptions::default())
+            .await?;
+
+        Ok(())
+    }
+
+    /// Delete a template, optionally removing associated jobs, threads, and empty sessions.
+    pub async fn delete_with_options(
+        &self,
+        id: AgentId,
+        options: TemplateDeleteOptions,
+    ) -> Result<AgentDeleteReport> {
         let target_display_name = self.get(id).await?.map(|record| record.display_name);
         let (thread_count, job_count) =
             self.repository
@@ -173,7 +192,9 @@ impl TemplateManager {
             0
         };
 
-        if thread_count > 0 || job_count > 0 || subagent_ref_count > 0 {
+        if !options.cascade_associations
+            && (thread_count > 0 || job_count > 0 || subagent_ref_count > 0)
+        {
             return Err(ArgusError::DatabaseError {
                 reason: format_delete_blocked_reason(
                     id,
@@ -184,14 +205,36 @@ impl TemplateManager {
             });
         }
 
-        self.repository
-            .delete(&id)
-            .await
-            .map_err(|e| ArgusError::DatabaseError {
-                reason: e.to_string(),
-            })?;
+        if options.cascade_associations {
+            if subagent_ref_count > 0 {
+                return Err(ArgusError::DatabaseError {
+                    reason: format_delete_blocked_reason(
+                        id,
+                        thread_count,
+                        job_count,
+                        subagent_ref_count,
+                    ),
+                });
+            }
 
-        Ok(())
+            return self
+                .repository
+                .delete_with_associations(&id)
+                .await
+                .map_err(|e| ArgusError::DatabaseError {
+                    reason: e.to_string(),
+                });
+        }
+
+        let agent_deleted =
+            self.repository
+                .delete(&id)
+                .await
+                .map_err(|e| ArgusError::DatabaseError {
+                    reason: e.to_string(),
+                })?;
+
+        Ok(AgentDeleteReport::empty(agent_deleted))
     }
 
     /// Resolve subagent records by display name, skipping missing entries.
