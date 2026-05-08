@@ -1,4 +1,5 @@
 import { flushPromises, mount } from "@vue/test-utils";
+import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@/lib/opentiny", async () => import("@/test/stubs/opentiny"));
@@ -260,6 +261,61 @@ describe("ChatPage", () => {
     expect(selects[0].props("modelValue")).toBe("9");
     expect(selects[1].props("modelValue")).toBe("8");
     expect(selects[2].props("modelValue")).toBe("kimi-k2");
+  });
+
+  it("syncs the selected agent to the activated thread binding on initial conversation load", async () => {
+    const activateChatThread = vi.fn().mockResolvedValue({
+      session_id: "session-1",
+      thread_id: "thread-1",
+      template_id: 9,
+      effective_provider_id: 8,
+      effective_model: "kimi-k2",
+    });
+
+    setApiClient(
+      makeApiClient({
+        listChatSessions: vi.fn().mockResolvedValue([session({ id: "session-1", name: "旧会话" })]),
+        listChatThreads: vi.fn().mockResolvedValue([thread({ id: "thread-1", title: "旧线程" })]),
+        listChatMessages: vi.fn().mockResolvedValue([message("assistant", "旧回复")]),
+        activateChatThread,
+        listTemplates: vi.fn().mockResolvedValue([
+          template({ id: 3, display_name: "通用助手", provider_id: 7, model_id: "glm-4.7" }),
+          template({ id: 9, display_name: "代码助手", provider_id: 8, model_id: "kimi-k2" }),
+        ]),
+        listProviders: vi.fn().mockResolvedValue([
+          provider({ id: 7, default_model: "glm-4.7", models: ["glm-4.7"] }),
+          provider({ id: 8, default_model: "kimi-default", models: ["kimi-default", "kimi-k2"] }),
+        ]),
+      }),
+    );
+    const wrapper = mount(ChatPage);
+    await flushPromises();
+
+    const selects = wrapper.findAllComponents({ name: "OpenTinySelectStub" });
+    expect(activateChatThread).toHaveBeenCalledWith("session-1", "thread-1");
+    expect(selects[0].props("modelValue")).toBe("9");
+    expect(selects[1].props("modelValue")).toBe("8");
+    expect(selects[2].props("modelValue")).toBe("kimi-k2");
+  });
+
+  it("centers the message column while floating runtime activity outside the text flow", () => {
+    const source = readFileSync("src/features/chat/ChatPage.vue", "utf8");
+    const railSource = readFileSync("src/features/chat/components/RuntimeActivityRail.vue", "utf8");
+
+    expect(source).toContain("chat-runtime-floating-layer");
+    expect(source).toContain(".chat-page.chat-page--immersive");
+    expect(source).toContain("overflow-y: auto;");
+    expect(source).toContain("scrollbar-width: none;");
+    expect(source).toContain("width: min(100%, var(--chat-message-width));");
+    expect(source).toContain("position: fixed;");
+    expect(source).not.toContain("--chat-sidecar-width");
+    expect(source).not.toContain("grid-template-columns: minmax(0, 1fr) minmax(0, var(--chat-message-width)) minmax(0, 1fr);");
+    expect(source).not.toContain(".chat-workspace :deep(.runtime-rail)");
+
+    expect(railSource).toContain("grid-template-rows: auto minmax(0, 1fr);");
+    expect(railSource).toContain(".runtime-rail__list");
+    expect(railSource).toContain("overflow: auto;");
+    expect(railSource).not.toContain("position: sticky;");
   });
 
   it("creates a new session and shows a notice when switching agents from an existing conversation", async () => {
@@ -765,6 +821,61 @@ describe("ChatPage", () => {
     expect(pendingAssistant?.role).toBe("assistant");
     expect(pendingAssistant?.state?.toolDetails).toBeUndefined();
     expect(wrapper.find(".runtime-rail").text()).toContain("完成");
+  });
+
+  it("collapses and expands the floating runtime activity list without removing its summary", async () => {
+    let handlers: ChatThreadEventHandlers | undefined;
+
+    setApiClient(
+      makeApiClient({
+        listChatSessions: vi.fn().mockResolvedValue([session()]),
+        listChatThreads: vi.fn().mockResolvedValue([thread()]),
+        listChatMessages: vi.fn().mockResolvedValue([]),
+        subscribeChatThread: vi.fn((_sessionId, _threadId, nextHandlers) => {
+          handlers = nextHandlers;
+          return { close: vi.fn() } as RuntimeEventSubscription;
+        }),
+      }),
+    );
+    const wrapper = mount(ChatPage);
+    await flushPromises();
+
+    await wrapper.get("[data-testid='chat-input']").setValue("继续");
+    await wrapper.get("[data-testid='chat-input']").trigger("keydown", { key: "Enter" });
+    await flushPromises();
+
+    handlers!.onEvent({
+      session_id: "session-1",
+      thread_id: "thread-1",
+      turn_number: null,
+      payload: {
+        type: "tool_started",
+        tool_call_id: "call-shell",
+        tool_name: "shell",
+        arguments: { cmd: "pwd" },
+      },
+    });
+    await flushPromises();
+
+    const toggle = wrapper.get(".runtime-rail__toggle");
+    expect(toggle.attributes("aria-expanded")).toBe("true");
+    expect(wrapper.findAll(".runtime-rail__item")).toHaveLength(1);
+
+    await toggle.trigger("click");
+    await flushPromises();
+
+    expect(wrapper.get(".runtime-rail").classes()).toContain("runtime-rail--collapsed");
+    expect(wrapper.get(".runtime-rail__toggle").attributes("aria-expanded")).toBe("false");
+    expect(wrapper.get(".runtime-rail__list").attributes("style")).toContain("display: none");
+    expect(wrapper.get(".runtime-rail").text()).toContain("当前运行");
+    expect(wrapper.get(".runtime-rail").text()).toContain("1");
+
+    await wrapper.get(".runtime-rail__toggle").trigger("click");
+    await flushPromises();
+
+    expect(wrapper.get(".runtime-rail__toggle").attributes("aria-expanded")).toBe("true");
+    expect(wrapper.get(".runtime-rail__list").attributes("style") ?? "").not.toContain("display: none");
+    expect(wrapper.findAll(".runtime-rail__item")).toHaveLength(1);
   });
 
   it("keeps runtime activity ordered from first started to latest while updating in place", async () => {
