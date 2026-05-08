@@ -39,7 +39,10 @@ use rust_decimal::Decimal;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
-use crate::scheduled_messages::{CronScheduler, ScheduledMessageDispatcher, ScheduledMessageError};
+use crate::scheduled_messages::{
+    next_cron_run, CreateScheduledMessageRequest, CronScheduler, ScheduledMessageDispatcher,
+    ScheduledMessageError, ScheduledMessageSummary,
+};
 use crate::session::{Session, SessionSummary, ThreadSummary};
 use argus_protocol::ProviderResolver;
 
@@ -612,6 +615,7 @@ pub struct SessionManager {
     trace_dir: PathBuf,
     thread_pool: Arc<ThreadPool>,
     job_manager: Arc<JobManager>,
+    job_repository: Option<Arc<dyn JobRepository>>,
     scheduled_message_scheduler: Arc<Mutex<Option<Arc<CronScheduler>>>>,
 }
 
@@ -647,6 +651,7 @@ impl SessionManager {
             trace_dir,
             thread_pool,
             job_manager: Arc::clone(&job_manager),
+            job_repository: job_repository.clone(),
             scheduled_message_scheduler: Arc::clone(&scheduled_message_scheduler),
         };
         let scheduler_backend = Arc::new(SessionSchedulerBackend::new(
@@ -677,6 +682,20 @@ impl SessionManager {
             .lock()
             .ok()
             .and_then(|slot| slot.clone())
+    }
+
+    fn job_repository(&self) -> Result<Arc<dyn JobRepository>> {
+        self.job_repository
+            .clone()
+            .ok_or_else(|| ArgusError::JobError {
+                reason: "job repository is not configured".to_string(),
+            })
+    }
+
+    fn notify_scheduled_messages_changed(&self) {
+        if let Some(scheduler) = self.scheduled_message_scheduler() {
+            scheduler.notify_changed();
+        }
     }
 
     fn remember_thread_session(&self, thread_id: ThreadId, session_id: SessionId) {
@@ -1701,6 +1720,176 @@ impl SessionManager {
             .map_err(Self::map_pool_error)
     }
 
+    pub async fn create_scheduled_message(
+        &self,
+        request: CreateScheduledMessageRequest,
+    ) -> Result<ScheduledMessageSummary> {
+        let repository = self.job_repository()?;
+        let prompt = request.prompt.trim();
+        if prompt.is_empty() {
+            return Err(ArgusError::JobError {
+                reason: "scheduled message prompt cannot be empty".to_string(),
+            });
+        }
+        self.ensure_thread_in_session(request.session_id, &request.thread_id)
+            .await?;
+        let thread_record = self.get_thread_record(&request.thread_id).await?;
+        let agent_id = thread_record
+            .template_id
+            .ok_or_else(|| ArgusError::JobError {
+                reason: "scheduled message thread has no template".to_string(),
+            })?;
+
+        let cron_expr = normalize_optional_string(request.cron_expr);
+        let scheduled_at = normalize_optional_string(request.scheduled_at);
+        match (cron_expr.as_deref(), scheduled_at.as_deref()) {
+            (Some(_), Some(_)) | (None, None) => {
+                return Err(ArgusError::JobError {
+                    reason: "scheduled message requires exactly one of cron_expr or scheduled_at"
+                        .to_string(),
+                });
+            }
+            _ => {}
+        }
+
+        let now = Utc::now();
+        let next_scheduled_at = if let Some(expr) = cron_expr.as_deref() {
+            next_cron_run(expr, request.timezone.as_deref(), now)
+                .map_err(|error| ArgusError::JobError {
+                    reason: error.to_string(),
+                })?
+                .to_rfc3339()
+        } else {
+            chrono::DateTime::parse_from_rfc3339(scheduled_at.as_deref().expect("checked above"))
+                .map_err(|error| ArgusError::JobError {
+                    reason: format!("invalid scheduled_at: {error}"),
+                })?
+                .with_timezone(&Utc)
+                .to_rfc3339()
+        };
+
+        let context = argus_repository::types::ScheduledMessageContext {
+            target_session_id: request.session_id.to_string(),
+            enabled: true,
+            timezone: normalize_optional_string(request.timezone),
+            last_error: None,
+        };
+        let job = argus_repository::types::JobRecord {
+            id: argus_repository::types::JobId::new(Uuid::new_v4().to_string()),
+            job_type: argus_repository::types::JobType::Cron,
+            name: if request.name.trim().is_empty() {
+                "Scheduled message".to_string()
+            } else {
+                request.name.trim().to_string()
+            },
+            status: argus_repository::types::JobStatus::Pending,
+            agent_id,
+            context: Some(serde_json::to_string(&context).map_err(|error| {
+                ArgusError::SerdeError {
+                    reason: error.to_string(),
+                }
+            })?),
+            prompt: prompt.to_string(),
+            thread_id: Some(request.thread_id),
+            group_id: None,
+            depends_on: vec![],
+            cron_expr,
+            scheduled_at: Some(next_scheduled_at),
+            started_at: None,
+            finished_at: None,
+            parent_job_id: None,
+            result: None,
+        };
+
+        repository
+            .create(&job)
+            .await
+            .map_err(|error| ArgusError::DatabaseError {
+                reason: error.to_string(),
+            })?;
+        self.notify_scheduled_messages_changed();
+        scheduled_message_summary(job)
+    }
+
+    pub async fn list_scheduled_messages(
+        &self,
+        thread_id: Option<&ThreadId>,
+    ) -> Result<Vec<ScheduledMessageSummary>> {
+        let jobs = self
+            .job_repository()?
+            .list_cron_jobs(true, thread_id)
+            .await
+            .map_err(|error| ArgusError::DatabaseError {
+                reason: error.to_string(),
+            })?;
+
+        jobs.into_iter().map(scheduled_message_summary).collect()
+    }
+
+    pub async fn pause_scheduled_message(&self, job_id: &str) -> Result<ScheduledMessageSummary> {
+        let repository = self.job_repository()?;
+        let id = argus_repository::types::JobId::new(job_id);
+        repository
+            .update_status(&id, argus_repository::types::JobStatus::Paused, None, None)
+            .await
+            .map_err(|error| ArgusError::DatabaseError {
+                reason: error.to_string(),
+            })?;
+        self.notify_scheduled_messages_changed();
+        let job = repository
+            .get(&id)
+            .await
+            .map_err(|error| ArgusError::DatabaseError {
+                reason: error.to_string(),
+            })?;
+        scheduled_message_summary(job.ok_or_else(|| ArgusError::JobError {
+            reason: format!("scheduled message not found: {job_id}"),
+        })?)
+    }
+
+    pub async fn delete_scheduled_message(&self, job_id: &str) -> Result<bool> {
+        let deleted = self
+            .job_repository()?
+            .delete(&argus_repository::types::JobId::new(job_id))
+            .await
+            .map_err(|error| ArgusError::DatabaseError {
+                reason: error.to_string(),
+            })?;
+        if deleted {
+            self.notify_scheduled_messages_changed();
+        }
+        Ok(deleted)
+    }
+
+    pub async fn trigger_scheduled_message_now(&self, job_id: &str) -> Result<bool> {
+        let repository = self.job_repository()?;
+        let id = argus_repository::types::JobId::new(job_id);
+        let now = Utc::now();
+        repository
+            .update_status(&id, argus_repository::types::JobStatus::Pending, None, None)
+            .await
+            .map_err(|error| ArgusError::DatabaseError {
+                reason: error.to_string(),
+            })?;
+        repository
+            .update_scheduled_at(&id, &now.to_rfc3339())
+            .await
+            .map_err(|error| ArgusError::DatabaseError {
+                reason: error.to_string(),
+            })?;
+        self.notify_scheduled_messages_changed();
+        if let Some(scheduler) = self.scheduled_message_scheduler() {
+            return scheduler
+                .run_due_once(now)
+                .await
+                .map(|count| count > 0)
+                .map_err(|error| ArgusError::JobError {
+                    reason: error.to_string(),
+                });
+        }
+        Ok(false)
+    }
+
     /// Send a cancel/interrupt signal to a specific thread's active turn.
     pub async fn cancel_thread(&self, session_id: SessionId, thread_id: &ThreadId) -> Result<()> {
         let session = self.load(session_id).await?;
@@ -2258,6 +2447,44 @@ impl SessionManager {
     }
 }
 
+fn normalize_optional_string(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn scheduled_message_summary(
+    job: argus_repository::types::JobRecord,
+) -> Result<ScheduledMessageSummary> {
+    let context_json = job.context.as_deref().ok_or_else(|| ArgusError::JobError {
+        reason: format!("scheduled message {} has no context", job.id),
+    })?;
+    let context: argus_repository::types::ScheduledMessageContext =
+        serde_json::from_str(context_json).map_err(|error| ArgusError::SerdeError {
+            reason: error.to_string(),
+        })?;
+    let session_id =
+        SessionId::parse(&context.target_session_id).map_err(|error| ArgusError::JobError {
+            reason: format!("invalid scheduled message target session id: {error}"),
+        })?;
+    let thread_id = job.thread_id.ok_or_else(|| ArgusError::JobError {
+        reason: format!("scheduled message {} has no thread", job.id),
+    })?;
+
+    Ok(ScheduledMessageSummary {
+        id: job.id.to_string(),
+        name: job.name,
+        status: job.status,
+        session_id,
+        thread_id,
+        prompt: job.prompt,
+        cron_expr: job.cron_expr,
+        scheduled_at: job.scheduled_at,
+        timezone: context.timezone,
+        last_error: context.last_error,
+    })
+}
+
 #[async_trait]
 impl ScheduledMessageDispatcher for SessionManager {
     async fn deliver_scheduled_message(
@@ -2351,6 +2578,7 @@ mod tests {
         recover_messages_from_trace, recover_thread_state_from_trace, SessionManager,
         SessionSchedulerBackend,
     };
+    use crate::scheduled_messages::CreateScheduledMessageRequest;
     use argus_agent::history::{TurnRecord, TurnRecordKind};
     use argus_agent::thread_trace_store::{
         chat_thread_base_dir, persist_thread_metadata, ThreadTraceKind, ThreadTraceMetadata,
@@ -2372,7 +2600,8 @@ mod tests {
     use argus_repository::traits::JobRepository;
     use argus_repository::traits::{AgentRepository, SessionRepository, ThreadRepository};
     use argus_repository::types::{
-        AgentId as RepoAgentId, JobRecord, JobResult, JobStatus, JobType,
+        AgentId as RepoAgentId, JobId, JobRecord, JobResult, JobStatus, JobType,
+        ScheduledMessageContext,
     };
     use argus_repository::ArgusSqlite;
     use argus_template::TemplateManager;
@@ -2701,6 +2930,63 @@ mod tests {
         .await;
 
         assert!(harness.manager.scheduled_message_scheduler().is_some());
+    }
+
+    #[tokio::test]
+    async fn create_scheduled_message_rejects_empty_prompt() {
+        let harness = test_session_manager_harness_with_provider(Arc::new(FixedProvider {
+            model_name: "routing-test".to_string(),
+        }))
+        .await;
+
+        let error = harness
+            .manager
+            .create_scheduled_message(CreateScheduledMessageRequest {
+                session_id: harness.session_id,
+                thread_id: harness.thread_id,
+                name: "empty".to_string(),
+                prompt: "   ".to_string(),
+                cron_expr: Some("0 9 * * *".to_string()),
+                scheduled_at: None,
+                timezone: None,
+            })
+            .await
+            .expect_err("empty prompt should fail");
+
+        assert!(error.to_string().contains("prompt"));
+    }
+
+    #[tokio::test]
+    async fn create_scheduled_message_persists_target_session_context() {
+        let harness = test_session_manager_harness_with_provider(Arc::new(FixedProvider {
+            model_name: "routing-test".to_string(),
+        }))
+        .await;
+
+        let created = harness
+            .manager
+            .create_scheduled_message(CreateScheduledMessageRequest {
+                session_id: harness.session_id,
+                thread_id: harness.thread_id,
+                name: "Daily check".to_string(),
+                prompt: "Run daily check".to_string(),
+                cron_expr: Some("0 9 * * *".to_string()),
+                scheduled_at: None,
+                timezone: Some("Asia/Shanghai".to_string()),
+            })
+            .await
+            .expect("scheduled message should create");
+
+        let stored = JobRepository::get(&*harness.sqlite, &JobId::new(created.id.clone()))
+            .await
+            .expect("job should load")
+            .expect("job should exist");
+        assert_eq!(stored.job_type, JobType::Cron);
+        assert_eq!(stored.thread_id, Some(harness.thread_id));
+        let context: ScheduledMessageContext =
+            serde_json::from_str(stored.context.as_deref().unwrap()).unwrap();
+        assert_eq!(context.target_session_id, harness.session_id.to_string());
+        assert_eq!(context.timezone.as_deref(), Some("Asia/Shanghai"));
     }
 
     #[tokio::test]

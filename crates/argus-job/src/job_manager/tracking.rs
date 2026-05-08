@@ -147,7 +147,9 @@ impl JobManager {
         }
 
         match job_record.status {
-            JobStatus::Pending | JobStatus::Queued | JobStatus::Running => Ok(JobLookup::Pending),
+            JobStatus::Pending | JobStatus::Queued | JobStatus::Running | JobStatus::Paused => {
+                Ok(JobLookup::Pending)
+            }
             JobStatus::Succeeded | JobStatus::Failed | JobStatus::Cancelled => {
                 let Some(result) = job_record.result else {
                     return Ok(JobLookup::NotFound);

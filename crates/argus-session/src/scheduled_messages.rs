@@ -9,6 +9,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
 use croner::{errors::CronError, Cron};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::Notify;
 
@@ -34,6 +35,31 @@ pub enum ScheduledMessageError {
 
     #[error("scheduled message repository operation failed: {0}")]
     Repository(String),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateScheduledMessageRequest {
+    pub session_id: SessionId,
+    pub thread_id: ThreadId,
+    pub name: String,
+    pub prompt: String,
+    pub cron_expr: Option<String>,
+    pub scheduled_at: Option<String>,
+    pub timezone: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScheduledMessageSummary {
+    pub id: String,
+    pub name: String,
+    pub status: JobStatus,
+    pub session_id: SessionId,
+    pub thread_id: ThreadId,
+    pub prompt: String,
+    pub cron_expr: Option<String>,
+    pub scheduled_at: Option<String>,
+    pub timezone: Option<String>,
+    pub last_error: Option<String>,
 }
 
 impl From<DbError> for ScheduledMessageError {
