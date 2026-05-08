@@ -1270,7 +1270,7 @@ impl JobRepository for ArgusPostgres {
         finished_at: &str,
         context: Option<&str>,
     ) -> DbResult<()> {
-        sqlx::query("UPDATE jobs SET status=$1,scheduled_at=$2,finished_at=$3,context=COALESCE($4,context),updated_at=CURRENT_TIMESTAMP::TEXT WHERE id=$5 AND job_type='cron'").bind(status.as_str()).bind(scheduled_at).bind(finished_at).bind(context).bind(id.to_string()).execute(&self.pool).await.map_err(|e|DbError::QueryFailed{reason:e.to_string()})?;
+        sqlx::query("UPDATE jobs SET status=$1,scheduled_at=COALESCE($2,scheduled_at),finished_at=$3,context=COALESCE($4,context),updated_at=CURRENT_TIMESTAMP::TEXT WHERE id=$5 AND job_type='cron'").bind(status.as_str()).bind(scheduled_at).bind(finished_at).bind(context).bind(id.to_string()).execute(&self.pool).await.map_err(|e|DbError::QueryFailed{reason:e.to_string()})?;
         Ok(())
     }
     async fn list_cron_jobs(
@@ -1279,10 +1279,10 @@ impl JobRepository for ArgusPostgres {
         thread_id: Option<&ThreadId>,
     ) -> DbResult<Vec<JobRecord>> {
         let rows = match (include_paused, thread_id) {
-            (false, None) => sqlx::query("SELECT id,job_type,name,status,agent_id,context,prompt,thread_id,group_id,depends_on,cron_expr,scheduled_at,started_at,finished_at,parent_job_id,result FROM jobs WHERE job_type='cron' AND status='pending' ORDER BY scheduled_at ASC").fetch_all(&self.pool).await,
-            (false, Some(thread_id)) => sqlx::query("SELECT id,job_type,name,status,agent_id,context,prompt,thread_id,group_id,depends_on,cron_expr,scheduled_at,started_at,finished_at,parent_job_id,result FROM jobs WHERE job_type='cron' AND status='pending' AND thread_id=$1 ORDER BY scheduled_at ASC").bind(*thread_id.inner()).fetch_all(&self.pool).await,
-            (true, None) => sqlx::query("SELECT id,job_type,name,status,agent_id,context,prompt,thread_id,group_id,depends_on,cron_expr,scheduled_at,started_at,finished_at,parent_job_id,result FROM jobs WHERE job_type='cron' AND status IN ('pending','paused','running','failed') ORDER BY scheduled_at ASC").fetch_all(&self.pool).await,
-            (true, Some(thread_id)) => sqlx::query("SELECT id,job_type,name,status,agent_id,context,prompt,thread_id,group_id,depends_on,cron_expr,scheduled_at,started_at,finished_at,parent_job_id,result FROM jobs WHERE job_type='cron' AND status IN ('pending','paused','running','failed') AND thread_id=$1 ORDER BY scheduled_at ASC").bind(*thread_id.inner()).fetch_all(&self.pool).await,
+            (false, None) => sqlx::query("SELECT id,job_type,name,status,agent_id,context,prompt,thread_id,group_id,depends_on,cron_expr,scheduled_at,started_at,finished_at,parent_job_id,result FROM jobs WHERE job_type='cron' AND status='pending' ORDER BY scheduled_at IS NULL ASC,scheduled_at ASC,id ASC").fetch_all(&self.pool).await,
+            (false, Some(thread_id)) => sqlx::query("SELECT id,job_type,name,status,agent_id,context,prompt,thread_id,group_id,depends_on,cron_expr,scheduled_at,started_at,finished_at,parent_job_id,result FROM jobs WHERE job_type='cron' AND status='pending' AND thread_id=$1 ORDER BY scheduled_at IS NULL ASC,scheduled_at ASC,id ASC").bind(*thread_id.inner()).fetch_all(&self.pool).await,
+            (true, None) => sqlx::query("SELECT id,job_type,name,status,agent_id,context,prompt,thread_id,group_id,depends_on,cron_expr,scheduled_at,started_at,finished_at,parent_job_id,result FROM jobs WHERE job_type='cron' AND status IN ('pending','paused','running','failed') ORDER BY scheduled_at IS NULL ASC,scheduled_at ASC,id ASC").fetch_all(&self.pool).await,
+            (true, Some(thread_id)) => sqlx::query("SELECT id,job_type,name,status,agent_id,context,prompt,thread_id,group_id,depends_on,cron_expr,scheduled_at,started_at,finished_at,parent_job_id,result FROM jobs WHERE job_type='cron' AND status IN ('pending','paused','running','failed') AND thread_id=$1 ORDER BY scheduled_at IS NULL ASC,scheduled_at ASC,id ASC").bind(*thread_id.inner()).fetch_all(&self.pool).await,
         }
         .map_err(|e|DbError::QueryFailed{reason:e.to_string()})?;
         rows.into_iter().map(|r| self.map_job_record(r)).collect()

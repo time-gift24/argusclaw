@@ -179,7 +179,7 @@ impl JobRepository for ArgusSqlite {
     ) -> DbResult<()> {
         sqlx::query(
             "UPDATE jobs
-             SET status = ?1, scheduled_at = ?2, finished_at = ?3, context = COALESCE(?4, context), updated_at = datetime('now')
+             SET status = ?1, scheduled_at = COALESCE(?2, scheduled_at), finished_at = ?3, context = COALESCE(?4, context), updated_at = datetime('now')
              WHERE id = ?5 AND job_type = 'cron'",
         )
         .bind(status.as_str())
@@ -207,7 +207,7 @@ impl JobRepository for ArgusSqlite {
                     "SELECT id, job_type, name, status, agent_id, context, prompt, thread_id, group_id, depends_on, cron_expr, scheduled_at, started_at, finished_at, parent_job_id, result
                      FROM jobs
                      WHERE job_type = 'cron' AND status = 'pending'
-                     ORDER BY scheduled_at ASC",
+                     ORDER BY scheduled_at IS NULL ASC, scheduled_at ASC, id ASC",
                 )
                 .fetch_all(&self.pool)
                 .await
@@ -217,7 +217,7 @@ impl JobRepository for ArgusSqlite {
                     "SELECT id, job_type, name, status, agent_id, context, prompt, thread_id, group_id, depends_on, cron_expr, scheduled_at, started_at, finished_at, parent_job_id, result
                      FROM jobs
                      WHERE job_type = 'cron' AND status = 'pending' AND thread_id = ?1
-                     ORDER BY scheduled_at ASC",
+                     ORDER BY scheduled_at IS NULL ASC, scheduled_at ASC, id ASC",
                 )
                 .bind(thread_id.to_string())
                 .fetch_all(&self.pool)
@@ -228,7 +228,7 @@ impl JobRepository for ArgusSqlite {
                     "SELECT id, job_type, name, status, agent_id, context, prompt, thread_id, group_id, depends_on, cron_expr, scheduled_at, started_at, finished_at, parent_job_id, result
                      FROM jobs
                      WHERE job_type = 'cron' AND status IN ('pending', 'paused', 'running', 'failed')
-                     ORDER BY scheduled_at ASC",
+                     ORDER BY scheduled_at IS NULL ASC, scheduled_at ASC, id ASC",
                 )
                 .fetch_all(&self.pool)
                 .await
@@ -238,7 +238,7 @@ impl JobRepository for ArgusSqlite {
                     "SELECT id, job_type, name, status, agent_id, context, prompt, thread_id, group_id, depends_on, cron_expr, scheduled_at, started_at, finished_at, parent_job_id, result
                      FROM jobs
                      WHERE job_type = 'cron' AND status IN ('pending', 'paused', 'running', 'failed') AND thread_id = ?1
-                     ORDER BY scheduled_at ASC",
+                     ORDER BY scheduled_at IS NULL ASC, scheduled_at ASC, id ASC",
                 )
                 .bind(thread_id.to_string())
                 .fetch_all(&self.pool)

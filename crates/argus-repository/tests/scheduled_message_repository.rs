@@ -4,9 +4,12 @@ use argus_repository::types::{
     JobId, JobRecord, JobStatus, JobType, ScheduledMessageContext,
 };
 use argus_repository::{ArgusSqlite, migrate};
+use sqlx::sqlite::SqlitePoolOptions;
 
 async fn repository() -> ArgusSqlite {
-    let pool = sqlx::SqlitePool::connect("sqlite::memory:")
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
         .await
         .expect("in-memory sqlite should connect");
     migrate(&pool).await.expect("migrations should run");
@@ -150,6 +153,34 @@ async fn update_cron_after_run_updates_next_schedule_and_context() {
 }
 
 #[tokio::test]
+async fn update_cron_after_run_preserves_schedule_when_next_schedule_absent() {
+    let repo = repository().await;
+    let job = cron_job("cron-preserve-schedule", JobStatus::Pending, None);
+
+    JobRepository::create(&repo, &job)
+        .await
+        .expect("cron should insert");
+    JobRepository::update_cron_after_run(
+        &repo,
+        &job.id,
+        JobStatus::Failed,
+        None,
+        "2026-05-08T01:00:30Z",
+        None,
+    )
+    .await
+    .expect("cron should update after run");
+
+    let stored = JobRepository::get(&repo, &job.id)
+        .await
+        .expect("job should load")
+        .expect("job should exist");
+    assert_eq!(stored.status, JobStatus::Failed);
+    assert_eq!(stored.scheduled_at, job.scheduled_at);
+    assert_eq!(stored.context, job.context);
+}
+
+#[tokio::test]
 async fn list_cron_jobs_filters_by_thread() {
     let repo = repository().await;
     let thread_a = ThreadId::new();
@@ -171,4 +202,34 @@ async fn list_cron_jobs_filters_by_thread() {
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].id, job_a.id);
     assert_eq!(listed[0].thread_id, Some(thread_a));
+}
+
+#[tokio::test]
+async fn list_cron_jobs_orders_null_schedules_last_when_including_paused() {
+    let repo = repository().await;
+    let mut unscheduled = cron_job("cron-unscheduled", JobStatus::Paused, None);
+    unscheduled.scheduled_at = None;
+    let mut later = cron_job("cron-later", JobStatus::Pending, None);
+    later.scheduled_at = Some("2026-05-08T03:00:00Z".to_string());
+    let mut earlier = cron_job("cron-earlier", JobStatus::Pending, None);
+    earlier.scheduled_at = Some("2026-05-08T02:00:00Z".to_string());
+
+    JobRepository::create(&repo, &unscheduled)
+        .await
+        .expect("unscheduled cron should insert");
+    JobRepository::create(&repo, &later)
+        .await
+        .expect("later cron should insert");
+    JobRepository::create(&repo, &earlier)
+        .await
+        .expect("earlier cron should insert");
+
+    let listed = JobRepository::list_cron_jobs(&repo, true, None)
+        .await
+        .expect("cron jobs should list");
+
+    assert_eq!(
+        listed.iter().map(|job| &job.id).collect::<Vec<_>>(),
+        vec![&earlier.id, &later.id, &unscheduled.id]
+    );
 }
