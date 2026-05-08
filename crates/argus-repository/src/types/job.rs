@@ -47,6 +47,7 @@ impl FromStr for JobId {
 
 /// The execution status of a job.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum JobStatus {
     /// Job is pending execution.
     Pending,
