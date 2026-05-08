@@ -59,6 +59,8 @@ pub enum JobStatus {
     Succeeded,
     /// Job failed.
     Failed,
+    /// Job is paused.
+    Paused,
     /// Job was cancelled.
     Cancelled,
     /// Job is paused.
