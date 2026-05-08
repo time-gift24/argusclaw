@@ -3018,6 +3018,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_scheduled_message_rejects_empty_prompt() {
+        let harness = test_session_manager_harness_with_provider(Arc::new(FixedProvider {
+            model_name: "routing-test".to_string(),
+        }))
+        .await;
+
+        let error = harness
+            .manager
+            .create_scheduled_message(CreateScheduledMessageRequest {
+                session_id: harness.session_id,
+                thread_id: harness.thread_id,
+                name: "empty".to_string(),
+                prompt: "   ".to_string(),
+                cron_expr: Some("0 9 * * *".to_string()),
+                scheduled_at: None,
+                timezone: None,
+            })
+            .await
+            .expect_err("empty prompt should fail");
+
+        assert!(error.to_string().contains("prompt"));
+    }
+
+    #[tokio::test]
+    async fn create_scheduled_message_persists_target_session_context() {
+        let harness = test_session_manager_harness_with_provider(Arc::new(FixedProvider {
+            model_name: "routing-test".to_string(),
+        }))
+        .await;
+
+        let created = harness
+            .manager
+            .create_scheduled_message(CreateScheduledMessageRequest {
+                session_id: harness.session_id,
+                thread_id: harness.thread_id,
+                name: "Daily check".to_string(),
+                prompt: "Run daily check".to_string(),
+                cron_expr: Some("0 9 * * *".to_string()),
+                scheduled_at: None,
+                timezone: Some("Asia/Shanghai".to_string()),
+            })
+            .await
+            .expect("scheduled message should create");
+
+        let stored = JobRepository::get(&*harness.sqlite, &JobId::new(created.id.clone()))
+            .await
+            .expect("job should load")
+            .expect("job should exist");
+        assert_eq!(stored.job_type, JobType::Cron);
+        assert_eq!(stored.thread_id, Some(harness.thread_id));
+        let context: ScheduledMessageContext =
+            serde_json::from_str(stored.context.as_deref().unwrap()).unwrap();
+        assert_eq!(context.target_session_id, harness.session_id.to_string());
+        assert_eq!(context.timezone.as_deref(), Some("Asia/Shanghai"));
+    }
+
+    #[tokio::test]
     async fn cancel_thread_when_chat_runtime_is_evicted_is_a_successful_noop() {
         let (manager, _temp_dir, session_id, thread_id) = test_session_manager().await;
 
