@@ -1,5 +1,6 @@
 pub mod manager;
 pub mod provider_resolver;
+pub mod scheduled_messages;
 pub mod session;
 
 pub use argus_protocol::ProviderResolver;
