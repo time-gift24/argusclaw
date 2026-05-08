@@ -670,6 +670,7 @@ impl SessionManager {
                 job_repository,
                 Arc::new(manager.clone()),
             ));
+            scheduler.start_background_loop();
             if let Ok(mut slot) = scheduled_message_scheduler.lock() {
                 *slot = Some(scheduler);
             }
@@ -3009,7 +3010,11 @@ mod tests {
         }))
         .await;
 
-        assert!(harness.manager.scheduled_message_scheduler().is_some());
+        let scheduler = harness
+            .manager
+            .scheduled_message_scheduler()
+            .expect("scheduler should be installed");
+        assert!(scheduler.is_background_loop_started());
     }
 
     #[tokio::test]

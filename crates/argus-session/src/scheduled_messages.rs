@@ -1,5 +1,7 @@
 use std::str::FromStr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use argus_protocol::{SessionId, ThreadId};
 use argus_repository::error::DbError;
@@ -12,6 +14,7 @@ use croner::{errors::CronError, Cron};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::Notify;
+use tokio::time::MissedTickBehavior;
 
 #[derive(Debug, Error)]
 pub enum ScheduledMessageError {
@@ -119,6 +122,7 @@ pub struct CronScheduler {
     job_repository: Arc<dyn JobRepository>,
     dispatcher: Arc<dyn ScheduledMessageDispatcher>,
     notify: Arc<Notify>,
+    background_loop_started: AtomicBool,
 }
 
 impl CronScheduler {
@@ -130,7 +134,39 @@ impl CronScheduler {
             job_repository,
             dispatcher,
             notify: Arc::new(Notify::new()),
+            background_loop_started: AtomicBool::new(false),
         }
+    }
+
+    pub fn start_background_loop(self: &Arc<Self>) {
+        self.start_background_loop_with_interval(Duration::from_secs(30));
+    }
+
+    pub fn is_background_loop_started(&self) -> bool {
+        self.background_loop_started.load(Ordering::SeqCst)
+    }
+
+    fn start_background_loop_with_interval(self: &Arc<Self>, poll_interval: Duration) {
+        if self.background_loop_started.swap(true, Ordering::SeqCst) {
+            return;
+        }
+
+        let scheduler = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(poll_interval);
+            interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {}
+                    _ = scheduler.notify.notified() => {}
+                }
+
+                if let Err(error) = scheduler.run_due_once(Utc::now()).await {
+                    tracing::warn!(error = %error, "scheduled message scheduler tick failed");
+                }
+            }
+        });
     }
 
     pub fn notify_changed(&self) {
