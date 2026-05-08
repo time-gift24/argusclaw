@@ -57,7 +57,10 @@ pub fn next_cron_run(
 }
 
 fn parse_timezone(timezone: Option<&str>) -> Result<Tz, ScheduledMessageError> {
-    match timezone.map(str::trim).filter(|timezone| !timezone.is_empty()) {
+    match timezone
+        .map(str::trim)
+        .filter(|timezone| !timezone.is_empty())
+    {
         Some(timezone) => timezone
             .parse()
             .map_err(|_| ScheduledMessageError::InvalidTimezone(timezone.to_owned())),
@@ -184,19 +187,17 @@ impl CronScheduler {
         let completed_at = Utc::now();
         context.last_error = None;
         let next_scheduled_at = match job.cron_expr.as_deref() {
-            Some(expr) if !expr.trim().is_empty() => match next_cron_run(
-                expr,
-                context.timezone.as_deref(),
-                completed_at,
-            ) {
-                Ok(next) => Some(next.to_rfc3339()),
-                Err(error) => {
-                    context.last_error = Some(error.to_string());
-                    self.update_job(&job.id, JobStatus::Failed, None, completed_at, &context)
-                        .await?;
-                    return Err(error);
+            Some(expr) if !expr.trim().is_empty() => {
+                match next_cron_run(expr, context.timezone.as_deref(), completed_at) {
+                    Ok(next) => Some(next.to_rfc3339()),
+                    Err(error) => {
+                        context.last_error = Some(error.to_string());
+                        self.update_job(&job.id, JobStatus::Failed, None, completed_at, &context)
+                            .await?;
+                        return Err(error);
+                    }
                 }
-            },
+            }
             _ => None,
         };
         let status = if next_scheduled_at.is_some() {
@@ -384,7 +385,11 @@ mod scheduler_tests {
             unimplemented!("not needed by scheduler tests")
         }
 
-        async fn update_thread_id(&self, _id: &JobId, _thread_id: &ThreadId) -> Result<(), DbError> {
+        async fn update_thread_id(
+            &self,
+            _id: &JobId,
+            _thread_id: &ThreadId,
+        ) -> Result<(), DbError> {
             unimplemented!("not needed by scheduler tests")
         }
 
@@ -478,7 +483,10 @@ mod scheduler_tests {
         )
         .unwrap()
         .with_timezone(&Utc);
-        assert!(next > now, "next schedule should be after the original due time");
+        assert!(
+            next > now,
+            "next schedule should be after the original due time"
+        );
         let context: ScheduledMessageContext =
             serde_json::from_str(updates[0].context.as_deref().unwrap()).unwrap();
         assert_eq!(context.target_session_id, session_id.to_string());

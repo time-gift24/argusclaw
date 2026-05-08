@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use argus_agent::thread_bootstrap::{
     build_thread_config, hydrate_turn_log_state, recover_and_validate_metadata,
@@ -19,7 +19,9 @@ use argus_protocol::{
     ThreadMessage, ThreadPoolEventReason, ThreadPoolRuntimeSummary, ThreadPoolSnapshot,
     ThreadPoolState, ThreadRuntimeStatus, ToolError, UserId,
 };
-use argus_repository::traits::{LlmProviderRepository, SessionRepository, ThreadRepository};
+use argus_repository::traits::{
+    JobRepository, LlmProviderRepository, SessionRepository, ThreadRepository,
+};
 use argus_template::TemplateManager;
 use argus_thread_pool::{
     PoolState as CoreThreadPoolState, RuntimeIdleObserver, RuntimeLifecycleChange,
@@ -37,7 +39,7 @@ use rust_decimal::Decimal;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
-use crate::scheduled_messages::{ScheduledMessageDispatcher, ScheduledMessageError};
+use crate::scheduled_messages::{CronScheduler, ScheduledMessageDispatcher, ScheduledMessageError};
 use crate::session::{Session, SessionSummary, ThreadSummary};
 use argus_protocol::ProviderResolver;
 
@@ -548,11 +550,7 @@ impl SchedulerBackend for SessionSchedulerBackend {
     ) -> std::result::Result<SchedulerJobLookup, ToolError> {
         let lookup = self
             .job_manager
-            .get_job_result_status_persisted(
-                request.thread_id,
-                &request.job_id,
-                request.consume,
-            )
+            .get_job_result_status_persisted(request.thread_id, &request.job_id, request.consume)
             .await
             .map_err(|error| Self::scheduler_error(error.to_string()))?;
 
@@ -614,6 +612,7 @@ pub struct SessionManager {
     trace_dir: PathBuf,
     thread_pool: Arc<ThreadPool>,
     job_manager: Arc<JobManager>,
+    scheduled_message_scheduler: Arc<Mutex<Option<Arc<CronScheduler>>>>,
 }
 
 impl SessionManager {
@@ -630,9 +629,11 @@ impl SessionManager {
         trace_dir: PathBuf,
         thread_pool: Arc<ThreadPool>,
         job_manager: Arc<JobManager>,
+        job_repository: Option<Arc<dyn JobRepository>>,
     ) -> Self {
         let sessions = Arc::new(DashMap::new());
         let thread_sessions = Arc::new(DashMap::new());
+        let scheduled_message_scheduler = Arc::new(Mutex::new(None));
         let manager = Self {
             session_repo,
             thread_repo,
@@ -646,6 +647,7 @@ impl SessionManager {
             trace_dir,
             thread_pool,
             job_manager: Arc::clone(&job_manager),
+            scheduled_message_scheduler: Arc::clone(&scheduled_message_scheduler),
         };
         let scheduler_backend = Arc::new(SessionSchedulerBackend::new(
             Arc::clone(&manager.template_manager),
@@ -658,7 +660,23 @@ impl SessionManager {
         tool_manager.register(Arc::new(SchedulerTool::new(scheduler_backend.clone())));
         manager.install_chat_mailbox_forwarder(&job_manager);
         manager.install_thread_pool_lifecycle_bridge();
+        if let Some(job_repository) = job_repository {
+            let scheduler = Arc::new(CronScheduler::new(
+                job_repository,
+                Arc::new(manager.clone()),
+            ));
+            if let Ok(mut slot) = scheduled_message_scheduler.lock() {
+                *slot = Some(scheduler);
+            }
+        }
         manager
+    }
+
+    pub fn scheduled_message_scheduler(&self) -> Option<Arc<CronScheduler>> {
+        self.scheduled_message_scheduler
+            .lock()
+            .ok()
+            .and_then(|slot| slot.clone())
     }
 
     fn remember_thread_session(&self, thread_id: ThreadId, session_id: SessionId) {
@@ -2543,6 +2561,7 @@ mod tests {
             temp_dir.path().join("trace"),
             thread_pool,
             Arc::clone(&job_manager),
+            Some(sqlite.clone() as Arc<dyn JobRepository>),
         );
 
         let session_id: SessionId = session_manager
@@ -2672,6 +2691,16 @@ mod tests {
             "cancel_thread should leave an idle thread idle"
         );
         assert_eq!(thread.turn_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn session_manager_installs_cron_scheduler_when_job_repo_is_available() {
+        let harness = test_session_manager_harness_with_provider(Arc::new(FixedProvider {
+            model_name: "routing-test".to_string(),
+        }))
+        .await;
+
+        assert!(harness.manager.scheduled_message_scheduler().is_some());
     }
 
     #[tokio::test]

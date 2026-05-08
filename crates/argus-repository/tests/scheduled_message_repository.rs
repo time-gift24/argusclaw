@@ -1,8 +1,6 @@
 use argus_protocol::{AgentId, AgentRecord, ThreadId};
 use argus_repository::traits::{AgentRepository, JobRepository};
-use argus_repository::types::{
-    JobId, JobRecord, JobStatus, JobType, ScheduledMessageContext,
-};
+use argus_repository::types::{JobId, JobRecord, JobStatus, JobType, ScheduledMessageContext};
 use argus_repository::{ArgusSqlite, migrate};
 use sqlx::sqlite::SqlitePoolOptions;
 
@@ -144,10 +142,7 @@ async fn update_cron_after_run_updates_next_schedule_and_context() {
         .expect("job should load")
         .expect("job should exist");
     assert_eq!(stored.status, JobStatus::Pending);
-    assert_eq!(
-        stored.scheduled_at.as_deref(),
-        Some("2026-05-08T02:00:00Z")
-    );
+    assert_eq!(stored.scheduled_at.as_deref(), Some("2026-05-08T02:00:00Z"));
     assert_eq!(stored.finished_at.as_deref(), Some("2026-05-08T01:00:30Z"));
     assert_eq!(stored.context.as_deref(), Some(next_context.as_str()));
 }

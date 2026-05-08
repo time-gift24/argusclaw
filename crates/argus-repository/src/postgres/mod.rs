@@ -1260,7 +1260,7 @@ impl JobRepository for ArgusPostgres {
     }
     async fn claim_cron_job(&self, id: &JobId, started_at: &str) -> DbResult<bool> {
         let r=sqlx::query("UPDATE jobs SET status='running',started_at=$1,updated_at=CURRENT_TIMESTAMP::TEXT WHERE id=$2 AND job_type='cron' AND status='pending'").bind(started_at).bind(id.to_string()).execute(&self.pool).await.map_err(|e|DbError::QueryFailed{reason:e.to_string()})?;
-        Ok(r.rows_affected()==1)
+        Ok(r.rows_affected() == 1)
     }
     async fn update_cron_after_run(
         &self,

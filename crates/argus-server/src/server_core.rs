@@ -251,6 +251,7 @@ impl ServerCore {
             trace_dir,
             thread_pool,
             Arc::clone(&job_manager),
+            Some(Arc::clone(&job_repository)),
         ));
 
         Ok(Arc::new(Self {
