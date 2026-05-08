@@ -6,4 +6,4 @@ pub mod manager;
 mod generated_agents;
 
 pub use argus_protocol::AgentRecord;
-pub use manager::TemplateManager;
+pub use manager::{TemplateDeleteOptions, TemplateManager};
