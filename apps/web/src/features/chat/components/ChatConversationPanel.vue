@@ -44,8 +44,7 @@ function handlePrompt(event: MouseEvent, item: PromptProps) {
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
-  height: 100%;
-  min-height: 0;
+  min-height: 100%;
   --tr-bubble-list-padding: 0;
   --tr-bubble-list-gap: var(--space-4);
   --tr-bubble-box-bg: var(--surface-overlay);

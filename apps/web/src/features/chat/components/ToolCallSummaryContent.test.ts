@@ -1,4 +1,5 @@
 import { mount } from "@vue/test-utils";
+import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
 
 import ToolCallSummaryContent from "./ToolCallSummaryContent.vue";
@@ -8,6 +9,28 @@ afterEach(() => {
 });
 
 describe("ToolCallSummaryContent", () => {
+  it("marks summary content so the message stage can remove the outer bubble chrome", () => {
+    const wrapper = mount(ToolCallSummaryContent, {
+      props: {
+        message: {
+          role: "assistant",
+          content: [
+            {
+              type: "argus-tool-summary",
+              toolDetails: [],
+            },
+          ],
+        },
+        contentIndex: 0,
+      },
+    });
+    const stageSource = readFileSync("src/features/chat/components/ChatMessageStage.vue", "utf8");
+
+    expect(wrapper.find("[data-tool-summary-content]").exists()).toBe(true);
+    expect(stageSource).toContain(":has([data-tool-summary-content])");
+    expect(stageSource).toContain("border-radius: 0 !important;");
+  });
+
   it("opens a detail dialog with tool input and output when a tool row is clicked", async () => {
     const wrapper = mount(ToolCallSummaryContent, {
       attachTo: document.body,

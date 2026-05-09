@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import { TinyButton, TinyInput } from "@/lib/opentiny";
+import { IconDelete, IconEditPen } from "@opentiny/tiny-robot-svgs/dist/tiny-robot-svgs.js";
 import { getApiClient, type ChatSessionSummary, type ChatThreadSummary } from "@/lib/api";
 import { formatSessionName, formatThreadTitle } from "../composables/useChatSessions";
 
@@ -184,12 +185,40 @@ function closeDialog() {
 
                   <!-- Delete confirm -->
                   <div v-if="deleteConfirmSessionId === session.id" class="history-dialog__inline-actions">
-                    <TinyButton size="small" @click.stop="handleDeleteConfirm(session.id)">删除</TinyButton>
-                    <TinyButton size="small" @click.stop="deleteConfirmSessionId = null">取消</TinyButton>
+                    <button
+                      type="button"
+                      class="history-dialog__inline-btn history-dialog__inline-btn--danger"
+                      data-testid="confirm-delete-session"
+                      @click.stop="handleDeleteConfirm(session.id)"
+                    >
+                      删除
+                    </button>
+                    <button
+                      type="button"
+                      class="history-dialog__inline-btn"
+                      data-testid="cancel-delete-session"
+                      @click.stop="deleteConfirmSessionId = null"
+                    >
+                      取消
+                    </button>
                   </div>
                   <div v-else class="history-dialog__item-actions">
-                    <button class="history-dialog__action-btn" title="重命名" @click.stop="handleRenameClick(session, $event)">✎</button>
-                    <button class="history-dialog__action-btn history-dialog__action-btn--danger" title="删除" @click.stop="handleDeleteClick(session.id, $event)">✕</button>
+                    <button
+                      class="history-dialog__action-btn"
+                      title="重命名"
+                      aria-label="重命名"
+                      @click.stop="handleRenameClick(session, $event)"
+                    >
+                      <IconEditPen class="history-dialog__action-icon" aria-hidden="true" />
+                    </button>
+                    <button
+                      class="history-dialog__action-btn history-dialog__action-btn--danger"
+                      title="删除"
+                      aria-label="删除"
+                      @click.stop="handleDeleteClick(session.id, $event)"
+                    >
+                      <IconDelete class="history-dialog__action-icon" aria-hidden="true" />
+                    </button>
                   </div>
                 </div>
               </div>
@@ -506,6 +535,19 @@ function closeDialog() {
   color: var(--text-primary, #1a1d23);
 }
 
+.history-dialog__action-icon {
+  width: 14px;
+  height: 14px;
+  display: block;
+}
+
+.history-dialog__action-icon :deep(svg),
+.history-dialog__action-btn :deep(svg) {
+  width: 14px;
+  height: 14px;
+  display: block;
+}
+
 .history-dialog__action-btn--danger:hover {
   background: var(--status-danger-bg, rgba(239, 68, 68, 0.1));
   color: var(--status-danger, #ef4444);
@@ -515,6 +557,35 @@ function closeDialog() {
   display: flex;
   gap: var(--space-2, 8px);
   margin-top: var(--space-2, 8px);
+}
+
+.history-dialog__inline-btn {
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--border-default, #e2e5eb);
+  border-radius: var(--radius-sm, 4px);
+  background: var(--surface-base, #fff);
+  color: var(--text-secondary, #5c6370);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  transition: background 0.1s, border-color 0.1s, color 0.1s;
+}
+
+.history-dialog__inline-btn:hover {
+  background: var(--surface-overlay, #f0f1f5);
+  color: var(--text-primary, #1a1d23);
+}
+
+.history-dialog__inline-btn--danger {
+  border-color: color-mix(in srgb, var(--status-danger, #ef4444) 45%, var(--border-default, #e2e5eb));
+  color: var(--status-danger, #ef4444);
+}
+
+.history-dialog__inline-btn--danger:hover {
+  background: var(--status-danger-bg, rgba(239, 68, 68, 0.1));
+  border-color: var(--status-danger, #ef4444);
+  color: var(--status-danger, #ef4444);
 }
 
 .history-dialog__footer {
