@@ -652,10 +652,11 @@ describe("ChatPage", () => {
       return [];
     });
 
+    const deleteChatSession = vi.fn().mockResolvedValue({ deleted: true });
     setApiClient(
       makeApiClient({
         listChatSessions,
-        deleteChatSession: vi.fn().mockResolvedValue({ deleted: true }),
+        deleteChatSession,
         listChatThreads,
         listChatMessages,
       }),
@@ -679,6 +680,7 @@ describe("ChatPage", () => {
     confirmDelete!.click();
     await flushPromises();
 
+    expect(deleteChatSession).toHaveBeenCalledWith("session-1");
     expect(wrapper.text()).toContain("二号回复");
     expect(listChatMessages).toHaveBeenLastCalledWith("session-2", "thread-2");
   });
