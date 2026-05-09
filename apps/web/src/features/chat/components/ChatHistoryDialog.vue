@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import { TinyButton, TinyInput } from "@/lib/opentiny";
+import { IconDelete, IconEditPen } from "@opentiny/tiny-robot-svgs/dist/tiny-robot-svgs.js";
 import { getApiClient, type ChatSessionSummary, type ChatThreadSummary } from "@/lib/api";
 import { formatSessionName, formatThreadTitle } from "../composables/useChatSessions";
 
@@ -202,8 +203,22 @@ function closeDialog() {
                     </button>
                   </div>
                   <div v-else class="history-dialog__item-actions">
-                    <button class="history-dialog__action-btn" title="重命名" @click.stop="handleRenameClick(session, $event)">✎</button>
-                    <button class="history-dialog__action-btn history-dialog__action-btn--danger" title="删除" @click.stop="handleDeleteClick(session.id, $event)">✕</button>
+                    <button
+                      class="history-dialog__action-btn"
+                      title="重命名"
+                      aria-label="重命名"
+                      @click.stop="handleRenameClick(session, $event)"
+                    >
+                      <IconEditPen class="history-dialog__action-icon" aria-hidden="true" />
+                    </button>
+                    <button
+                      class="history-dialog__action-btn history-dialog__action-btn--danger"
+                      title="删除"
+                      aria-label="删除"
+                      @click.stop="handleDeleteClick(session.id, $event)"
+                    >
+                      <IconDelete class="history-dialog__action-icon" aria-hidden="true" />
+                    </button>
                   </div>
                 </div>
               </div>
@@ -518,6 +533,19 @@ function closeDialog() {
 .history-dialog__action-btn:hover {
   background: var(--border-default, #e2e5eb);
   color: var(--text-primary, #1a1d23);
+}
+
+.history-dialog__action-icon {
+  width: 14px;
+  height: 14px;
+  display: block;
+}
+
+.history-dialog__action-icon :deep(svg),
+.history-dialog__action-btn :deep(svg) {
+  width: 14px;
+  height: 14px;
+  display: block;
 }
 
 .history-dialog__action-btn--danger:hover {

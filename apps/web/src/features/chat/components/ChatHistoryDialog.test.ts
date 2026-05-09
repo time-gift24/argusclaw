@@ -43,6 +43,21 @@ vi.mock("@/lib/api", () => ({
   }),
 }));
 
+vi.mock("@opentiny/tiny-robot-svgs/dist/tiny-robot-svgs.js", () => ({
+  IconDelete: defineComponent({
+    name: "IconDelete",
+    setup() {
+      return () => h("svg", { "data-testid": "tiny-icon-delete" });
+    },
+  }),
+  IconEditPen: defineComponent({
+    name: "IconEditPen",
+    setup() {
+      return () => h("svg", { "data-testid": "tiny-icon-edit" });
+    },
+  }),
+}));
+
 import ChatHistoryDialog from "./ChatHistoryDialog.vue";
 
 afterEach(() => {
@@ -50,6 +65,31 @@ afterEach(() => {
 });
 
 describe("ChatHistoryDialog", () => {
+  it("uses Tiny icons for rename and delete action buttons", async () => {
+    mount(ChatHistoryDialog, {
+      attachTo: document.body,
+      props: {
+        modelValue: true,
+        sessions: [
+          {
+            id: "session-1",
+            name: "旧会话",
+            thread_count: 1,
+            updated_at: "2026-04-24T10:00:00Z",
+          },
+        ],
+        activeSessionId: "session-1",
+        activeThreadId: "thread-1",
+        sessionListLoading: false,
+      },
+    });
+
+    expect(document.querySelector("[data-testid='tiny-icon-edit']")).toBeTruthy();
+    expect(document.querySelector("[data-testid='tiny-icon-delete']")).toBeTruthy();
+    expect(document.querySelector(".history-dialog__item-actions")?.textContent ?? "").not.toContain("✎");
+    expect(document.querySelector(".history-dialog__item-actions")?.textContent ?? "").not.toContain("✕");
+  });
+
   it("emits deleteSession from the inline confirmation even when TinyButton does not pass a native event", async () => {
     const wrapper = mount(ChatHistoryDialog, {
       attachTo: document.body,
