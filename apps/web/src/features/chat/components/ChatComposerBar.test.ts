@@ -12,10 +12,10 @@ vi.mock("@opentiny/tiny-robot-svgs/dist/tiny-robot-svgs.js", () => ({
       return () => h("svg", { "data-testid": "tiny-icon-ai" });
     },
   }),
-  IconUser: defineComponent({
-    name: "IconUser",
+  IconThink: defineComponent({
+    name: "IconThink",
     setup() {
-      return () => h("svg", { "data-testid": "tiny-icon-user" });
+      return () => h("svg", { "data-testid": "tiny-icon-think" });
     },
   }),
 }));
@@ -116,11 +116,11 @@ describe("ChatComposerBar", () => {
     expect(wrapper.find(".composer-bar__control-label").exists()).toBe(false);
   });
 
-  it("uses Tiny icons in the Agent and LLM chooser buttons", () => {
+  it("uses a colorful Tiny icon for Agent and a distinct Tiny icon for LLM", () => {
     const wrapper = mountComposerBar();
 
-    expect(wrapper.get("[data-testid='agent-picker-trigger']").find("[data-testid='tiny-icon-user']").exists()).toBe(true);
-    expect(wrapper.get("[data-testid='llm-picker-trigger']").find("[data-testid='tiny-icon-ai']").exists()).toBe(true);
+    expect(wrapper.get("[data-testid='agent-picker-trigger']").find("[data-testid='tiny-icon-ai']").exists()).toBe(true);
+    expect(wrapper.get("[data-testid='llm-picker-trigger']").find("[data-testid='tiny-icon-think']").exists()).toBe(true);
   });
 
   it("centers the single-line Agent chooser label vertically", () => {
