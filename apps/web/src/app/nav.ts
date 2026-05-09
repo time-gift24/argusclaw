@@ -25,6 +25,12 @@ export const adminNavItems: AdminNavItem[] = [
     to: "/runtime",
   },
   {
+    key: "scheduler",
+    label: "Scheduler",
+    description: "定时消息、一次性触发与循环唤醒管理",
+    to: "/scheduler",
+  },
+  {
     key: "providers",
     label: "模型提供方",
     description: "模型接入凭证与默认项管理",
