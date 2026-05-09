@@ -159,10 +159,12 @@ describe("ChatComposerBar", () => {
     expect(wrapper.emitted("update:selectedModel")).toEqual([["glm-4.7-air"]]);
   });
 
-  it("shows an input border treatment while typing or focusing", () => {
+  it("shows the typing border on the whole dock instead of only the input area", () => {
     const source = readFileSync("src/features/chat/components/ChatComposerBar.vue", "utf8");
 
-    expect(source).toContain(".composer-bar__input-shell:focus-within");
-    expect(source).toContain("border: 1px solid");
+    expect(source).toContain(".composer-bar--dock:focus-within");
+    expect(source).toContain("border-color: color-mix(in srgb, var(--accent) 62%, var(--border-default));");
+    expect(source).not.toContain(".composer-bar__input-shell:focus-within");
+    expect(source).not.toContain(".composer-bar__input-shell {\n  display: flex;\n  align-items: stretch;\n  min-width: 0;\n  padding: 8px 10px;\n  border: 1px solid");
   });
 });

@@ -246,11 +246,24 @@ function togglePicker(picker: "agent" | "llm") {
   background: rgba(255, 255, 255, 0.88);
   backdrop-filter: blur(20px) saturate(180%);
   -webkit-backdrop-filter: blur(20px) saturate(180%);
+  border: 1px solid color-mix(in srgb, var(--border-default) 76%, rgba(255, 255, 255, 0.6));
   box-shadow:
     0 8px 32px rgba(15, 23, 42, 0.08),
     0 2px 8px rgba(15, 23, 42, 0.05),
     inset 0 1px 0 rgba(255, 255, 255, 0.8);
-  border: 1px solid rgba(255, 255, 255, 0.6);
+  transition:
+    border-color 0.16s ease,
+    box-shadow 0.16s ease,
+    background-color 0.16s ease;
+}
+
+.composer-bar--dock:focus-within {
+  border-color: color-mix(in srgb, var(--accent) 62%, var(--border-default));
+  background: var(--surface-base);
+  box-shadow:
+    0 10px 34px rgba(15, 23, 42, 0.1),
+    0 0 0 3px color-mix(in srgb, var(--accent) 12%, transparent),
+    inset 0 1px 0 rgba(255, 255, 255, 0.75);
 }
 
 /* ── 输入区 ── */
@@ -259,21 +272,8 @@ function togglePicker(picker: "agent" | "llm") {
   align-items: stretch;
   min-width: 0;
   padding: 8px 10px;
-  border: 1px solid color-mix(in srgb, var(--border-default) 82%, transparent);
   border-radius: 14px;
-  background: color-mix(in srgb, var(--surface-base) 78%, transparent);
-  transition:
-    border-color 0.16s ease,
-    box-shadow 0.16s ease,
-    background-color 0.16s ease;
-}
-
-.composer-bar__input-shell:focus-within {
-  border-color: color-mix(in srgb, var(--accent) 62%, var(--border-default));
-  background: var(--surface-base);
-  box-shadow:
-    0 0 0 3px color-mix(in srgb, var(--accent) 12%, transparent),
-    inset 0 1px 0 rgba(255, 255, 255, 0.75);
+  background: color-mix(in srgb, var(--surface-base) 62%, transparent);
 }
 
 .composer-bar__sender {
