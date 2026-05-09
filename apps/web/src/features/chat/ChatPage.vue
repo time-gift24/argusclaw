@@ -411,7 +411,7 @@ function applyPrompt(_event: MouseEvent, item: PromptProps) {
 
 <style scoped>
 .chat-page {
-  --chat-message-width: 936px;
+  --chat-message-width: 1120px;
   --chat-rail-width: 320px;
   --chat-layout-gap: var(--space-5);
   --chat-dock-clearance: 132px;

@@ -138,7 +138,7 @@ onMounted(async () => {
   overflow: visible;
   padding: var(--space-2) 0 calc(var(--chat-dock-clearance, 132px) + var(--space-5));
   overscroll-behavior: contain;
-  --assistant-readable-width: var(--chat-message-width, 936px);
+  --assistant-readable-width: var(--chat-message-width, 1120px);
 }
 
 .message-stage--flat {

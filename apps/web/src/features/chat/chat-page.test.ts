@@ -374,7 +374,7 @@ describe("ChatPage", () => {
     expect(source).toContain(".chat-body-stream {");
     expect(source).toContain("overflow-y: auto;");
     expect(source).toContain("scrollbar-width: none;");
-    expect(source).toContain("--chat-message-width: 936px;");
+    expect(source).toContain("--chat-message-width: 1120px;");
     expect(source).toContain("--chat-dock-clearance: 132px;");
     expect(source).toContain("--chat-dock-clearance: 160px;");
     expect(source).toContain(".chat-body-stream::after");
