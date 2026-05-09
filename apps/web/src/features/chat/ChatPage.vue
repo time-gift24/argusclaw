@@ -415,7 +415,7 @@ function applyPrompt(_event: MouseEvent, item: PromptProps) {
 
 <style scoped>
 .chat-page {
-  --chat-message-width: 1120px;
+  --chat-composer-width: 1120px;
   --chat-rail-width: 320px;
   --chat-layout-gap: var(--space-5);
   --chat-dock-clearance: 132px;
@@ -450,7 +450,7 @@ function applyPrompt(_event: MouseEvent, item: PromptProps) {
   min-height: 100%;
   overflow-x: hidden;
   overflow-y: visible;
-  padding: var(--space-6) max(var(--space-6), calc((100% - var(--chat-message-width)) / 2)) 0;
+  padding: var(--space-6) var(--space-6) 0;
   overscroll-behavior: contain;
 }
 
@@ -490,7 +490,7 @@ function applyPrompt(_event: MouseEvent, item: PromptProps) {
 }
 
 .chat-page__composer-shell {
-  width: min(100%, var(--chat-message-width));
+  width: min(100%, var(--chat-composer-width));
 }
 
 @media (max-width: 1180px) {
@@ -504,7 +504,7 @@ function applyPrompt(_event: MouseEvent, item: PromptProps) {
   }
 
   .chat-body-stream {
-    padding: var(--space-4) max(var(--space-4), calc((100% - var(--chat-message-width)) / 2)) 0;
+    padding: var(--space-4) var(--space-4) 0;
   }
 
   .chat-page__composer-dock {
@@ -519,7 +519,7 @@ function applyPrompt(_event: MouseEvent, item: PromptProps) {
     position: absolute;
     top: var(--space-4);
     right: var(--space-4);
-    width: min(100%, var(--chat-message-width));
+    width: min(100%, var(--chat-composer-width));
     max-width: none;
     pointer-events: auto;
   }
@@ -529,7 +529,7 @@ function applyPrompt(_event: MouseEvent, item: PromptProps) {
   }
 
   .chat-page__composer-shell {
-    width: min(100%, var(--chat-message-width));
+    width: min(100%, var(--chat-composer-width));
   }
 }
 </style>

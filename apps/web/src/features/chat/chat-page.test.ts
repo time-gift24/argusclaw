@@ -379,12 +379,15 @@ describe("ChatPage", () => {
     expect(source).toContain("overflow-y: visible;");
     expect(source).not.toContain("scrollbar-width: none;");
     expect(source).not.toContain(".chat-body-stream::-webkit-scrollbar");
-    expect(source).toContain("--chat-message-width: 1120px;");
+    expect(source).toContain("--chat-composer-width: 1120px;");
+    expect(source).not.toContain("--chat-message-width:");
     expect(source).toContain("--chat-dock-clearance: 132px;");
     expect(source).toContain("--chat-dock-clearance: 160px;");
     expect(source).toContain(".chat-body-stream::after");
     expect(source).toContain("flex: 0 0 calc(var(--chat-dock-clearance, 132px) + var(--space-6));");
-    expect(source).toContain("width: min(100%, var(--chat-message-width));");
+    expect(source).toContain("padding: var(--space-6) var(--space-6) 0;");
+    expect(source).toContain("width: min(100%, var(--chat-composer-width));");
+    expect(source).not.toContain("calc((100% - var(--chat-message-width)) / 2)");
     expect(source).toContain("position: absolute;");
     expect(source).not.toContain("chat-workspace");
     expect(source).not.toContain("chat-main-column");
