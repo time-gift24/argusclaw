@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
 import { TrSender } from "@opentiny/tiny-robot";
+import { IconAi, IconUser } from "@opentiny/tiny-robot-svgs/dist/tiny-robot-svgs.js";
 import type { AgentRecord, LlmProviderRecord } from "@/lib/api";
 
 interface Props {
@@ -142,7 +143,10 @@ function togglePicker(picker: "agent" | "llm") {
           :aria-expanded="activePicker === 'agent'"
           @click="togglePicker('agent')"
         >
-          <span class="composer-bar__picker-kicker">Agent</span>
+          <span class="composer-bar__picker-kicker">
+            <IconUser class="composer-bar__picker-icon" aria-hidden="true" />
+            Agent
+          </span>
           <strong>{{ selectedTemplateLabel }}</strong>
         </button>
         <div
@@ -173,7 +177,10 @@ function togglePicker(picker: "agent" | "llm") {
           :aria-expanded="activePicker === 'llm'"
           @click="togglePicker('llm')"
         >
-          <span class="composer-bar__picker-kicker">LLM</span>
+          <span class="composer-bar__picker-kicker">
+            <IconAi class="composer-bar__picker-icon" aria-hidden="true" />
+            LLM
+          </span>
           <strong>{{ selectedProviderLabel }}</strong>
           <small>{{ selectedModelLabel }}</small>
         </button>
@@ -413,6 +420,7 @@ function togglePicker(picker: "agent" | "llm") {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  gap: 4px;
   height: 20px;
   padding: 0 7px;
   border-radius: 999px;
@@ -422,6 +430,20 @@ function togglePicker(picker: "agent" | "llm") {
   font-weight: 700;
   letter-spacing: 0;
   text-transform: uppercase;
+}
+
+.composer-bar__picker-icon {
+  width: 12px;
+  height: 12px;
+  display: block;
+  flex: 0 0 auto;
+}
+
+.composer-bar__picker-icon :deep(svg),
+.composer-bar__picker-kicker :deep(svg) {
+  width: 12px;
+  height: 12px;
+  display: block;
 }
 
 .composer-bar__popover {

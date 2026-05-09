@@ -1,9 +1,24 @@
 import { mount } from "@vue/test-utils";
 import { readFileSync } from "node:fs";
+import { defineComponent, h } from "vue";
 import { describe, expect, it, vi } from "vitest";
 
 vi.mock("@/lib/opentiny", async () => import("@/test/stubs/opentiny"));
 vi.mock("@opentiny/tiny-robot", async () => import("@/test/stubs/tiny-robot"));
+vi.mock("@opentiny/tiny-robot-svgs/dist/tiny-robot-svgs.js", () => ({
+  IconAi: defineComponent({
+    name: "IconAi",
+    setup() {
+      return () => h("svg", { "data-testid": "tiny-icon-ai" });
+    },
+  }),
+  IconUser: defineComponent({
+    name: "IconUser",
+    setup() {
+      return () => h("svg", { "data-testid": "tiny-icon-user" });
+    },
+  }),
+}));
 
 import type { AgentRecord, LlmProviderRecord } from "@/lib/api";
 import ChatComposerBar from "./ChatComposerBar.vue";
@@ -99,6 +114,13 @@ describe("ChatComposerBar", () => {
     expect(footerRow.text()).toContain("新对话");
     expect(footerRow.text()).toContain("历史");
     expect(wrapper.find(".composer-bar__control-label").exists()).toBe(false);
+  });
+
+  it("uses Tiny icons in the Agent and LLM chooser buttons", () => {
+    const wrapper = mountComposerBar();
+
+    expect(wrapper.get("[data-testid='agent-picker-trigger']").find("[data-testid='tiny-icon-user']").exists()).toBe(true);
+    expect(wrapper.get("[data-testid='llm-picker-trigger']").find("[data-testid='tiny-icon-ai']").exists()).toBe(true);
   });
 
   it("provides explicit sender theme variables for background and font sizing", () => {
