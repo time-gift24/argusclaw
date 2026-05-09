@@ -123,6 +123,15 @@ describe("ChatComposerBar", () => {
     expect(wrapper.get("[data-testid='llm-picker-trigger']").find("[data-testid='tiny-icon-ai']").exists()).toBe(true);
   });
 
+  it("centers the single-line Agent chooser label vertically", () => {
+    const source = readFileSync("src/features/chat/components/ChatComposerBar.vue", "utf8");
+
+    expect(source).toContain("composer-bar__picker-trigger--single");
+    expect(source).toContain(".composer-bar__picker-trigger--single strong");
+    expect(source).toContain("grid-row: 1 / span 2;");
+    expect(source).toContain("align-self: center;");
+  });
+
   it("provides explicit sender theme variables for background and font sizing", () => {
     const wrapper = mountComposerBar();
 

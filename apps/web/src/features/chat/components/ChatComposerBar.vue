@@ -138,7 +138,7 @@ function togglePicker(picker: "agent" | "llm") {
       <div class="composer-bar__picker">
         <button
           type="button"
-          class="composer-bar__picker-trigger"
+          class="composer-bar__picker-trigger composer-bar__picker-trigger--single"
           data-testid="agent-picker-trigger"
           :aria-expanded="activePicker === 'agent'"
           @click="togglePicker('agent')"
@@ -406,6 +406,11 @@ function togglePicker(picker: "agent" | "llm") {
   font-size: 12px;
   font-weight: 650;
   line-height: 1.2;
+}
+
+.composer-bar__picker-trigger--single strong {
+  grid-row: 1 / span 2;
+  align-self: center;
 }
 
 .composer-bar__picker-trigger small {
