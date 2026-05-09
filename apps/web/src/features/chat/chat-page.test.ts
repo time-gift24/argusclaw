@@ -320,7 +320,7 @@ describe("ChatPage", () => {
       }),
     );
     const wrapper = mount(ChatPage);
-    const stream = wrapper.get(".chat-body-stream").element as HTMLDivElement;
+    const stream = wrapper.get(".chat-page").element as HTMLDivElement;
     const scrollTo = vi.fn();
     Object.defineProperty(stream, "clientHeight", { configurable: true, value: 540 });
     Object.defineProperty(stream, "scrollHeight", { configurable: true, value: 1200 });
@@ -346,14 +346,14 @@ describe("ChatPage", () => {
       }),
     );
     const wrapper = mount(ChatPage);
-    const stream = wrapper.get(".chat-body-stream").element as HTMLDivElement;
+    const stream = wrapper.get(".chat-page").element as HTMLDivElement;
     const scrollTo = vi.fn();
     Object.defineProperty(stream, "clientHeight", { configurable: true, value: 540 });
     Object.defineProperty(stream, "scrollHeight", { configurable: true, value: 1200 });
     Object.defineProperty(stream, "scrollTop", { configurable: true, writable: true, value: 120 });
     stream.scrollTo = scrollTo;
 
-    await wrapper.get(".chat-body-stream").trigger("scroll");
+    await wrapper.get(".chat-page").trigger("scroll");
     messagesDeferred.resolve([
       message("user", "旧消息"),
       message("assistant", "很长的旧回复"),
@@ -371,9 +371,14 @@ describe("ChatPage", () => {
     expect(source).toContain("chat-body-stream");
     expect(source).toContain("chat-runtime-floating-layer");
     expect(source).toContain(".chat-page.chat-page--immersive");
-    expect(source).toContain(".chat-body-stream {");
+    expect(source).toContain("ref=\"chatBodyStreamRef\"");
+    expect(source).toContain("@scroll.passive=\"handleChatBodyScroll\"");
+    expect(source).toContain(".chat-page {");
     expect(source).toContain("overflow-y: auto;");
-    expect(source).toContain("scrollbar-width: none;");
+    expect(source).toContain(".chat-body-stream {");
+    expect(source).toContain("overflow-y: visible;");
+    expect(source).not.toContain("scrollbar-width: none;");
+    expect(source).not.toContain(".chat-body-stream::-webkit-scrollbar");
     expect(source).toContain("--chat-message-width: 1120px;");
     expect(source).toContain("--chat-dock-clearance: 132px;");
     expect(source).toContain("--chat-dock-clearance: 160px;");
