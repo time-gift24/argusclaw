@@ -454,6 +454,7 @@ function closeDialog() {
   flex-direction: column;
   gap: var(--space-1, 4px);
   padding: var(--space-3, 12px);
+  padding-right: 128px;
   background: transparent;
   border: 1px solid var(--border-default, #e2e5eb);
   border-radius: var(--radius-md, 6px);
@@ -554,9 +555,11 @@ function closeDialog() {
 }
 
 .history-dialog__inline-actions {
+  position: absolute;
+  top: var(--space-2, 8px);
+  right: var(--space-2, 8px);
   display: flex;
   gap: var(--space-2, 8px);
-  margin-top: var(--space-2, 8px);
 }
 
 .history-dialog__inline-btn {

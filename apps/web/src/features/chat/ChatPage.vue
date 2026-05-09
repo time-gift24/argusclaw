@@ -35,7 +35,7 @@ const templates = ref<AgentRecord[]>([]);
 const selectedTemplateId = ref<number | null>(null);
 const selectedProviderId = ref<number | null>(null);
 const selectedModel = ref("");
-const chatBodyStreamRef = ref<HTMLDivElement | null>(null);
+const chatBodyStreamRef = ref<HTMLElement | null>(null);
 const shouldStickToBottom = ref(true);
 const AUTO_SCROLL_THRESHOLD = 72;
 
@@ -83,7 +83,7 @@ const robotMessages = computed(() => toRobotMessages({
 const bubbleRoles = createBubbleRoles();
 const starterPrompts = createStarterPrompts();
 
-function getDistanceFromBottom(element: HTMLDivElement) {
+function getDistanceFromBottom(element: HTMLElement) {
   return element.scrollHeight - element.clientHeight - element.scrollTop;
 }
 
@@ -355,8 +355,12 @@ function applyPrompt(_event: MouseEvent, item: PromptProps) {
 </script>
 
 <template>
-  <section class="chat-page chat-page--immersive chat-page--single-scroll">
-    <div ref="chatBodyStreamRef" class="chat-body-stream" @scroll.passive="handleChatBodyScroll">
+  <section
+    ref="chatBodyStreamRef"
+    class="chat-page chat-page--immersive chat-page--single-scroll"
+    @scroll.passive="handleChatBodyScroll"
+  >
+    <div class="chat-body-stream">
       <ChatConversationPanel
         :error="chatComposer.error.value"
         :notice="chatComposer.actionMessage.value"
@@ -411,7 +415,7 @@ function applyPrompt(_event: MouseEvent, item: PromptProps) {
 
 <style scoped>
 .chat-page {
-  --chat-message-width: 936px;
+  --chat-message-width: 1120px;
   --chat-rail-width: 320px;
   --chat-layout-gap: var(--space-5);
   --chat-dock-clearance: 132px;
@@ -420,7 +424,7 @@ function applyPrompt(_event: MouseEvent, item: PromptProps) {
   max-height: 100vh;
   padding: 0;
   overflow-x: hidden;
-  overflow-y: hidden;
+  overflow-y: auto;
   overscroll-behavior: contain;
 }
 
@@ -441,19 +445,13 @@ function applyPrompt(_event: MouseEvent, item: PromptProps) {
   display: flex;
   flex-direction: column;
   width: 100%;
-  height: 100%;
+  height: auto;
   min-width: 0;
-  min-height: 0;
+  min-height: 100%;
   overflow-x: hidden;
-  overflow-y: auto;
+  overflow-y: visible;
   padding: var(--space-6) max(var(--space-6), calc((100% - var(--chat-message-width)) / 2)) 0;
   overscroll-behavior: contain;
-  scrollbar-width: none;
-}
-
-.chat-body-stream::-webkit-scrollbar {
-  width: 0;
-  height: 0;
 }
 
 .chat-body-stream::after {
@@ -482,7 +480,7 @@ function applyPrompt(_event: MouseEvent, item: PromptProps) {
 }
 
 .chat-page__composer-dock {
-  position: absolute;
+  position: sticky;
   left: var(--space-6);
   right: var(--space-6);
   bottom: var(--space-6);

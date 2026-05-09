@@ -83,7 +83,7 @@ describe("ChatMessageStage", () => {
 
     expect(source).toContain("flex: 1 0 auto;");
     expect(source).not.toMatch(/(^|\n)\s*flex: 1;/);
-    expect(source).toContain("--assistant-readable-width: var(--chat-message-width, 936px);");
+    expect(source).toContain("--assistant-readable-width: var(--chat-message-width, 1120px);");
     expect(source).toContain("padding: var(--space-2) 0 calc(var(--chat-dock-clearance, 132px) + var(--space-5));");
     expect(source).toContain("position: relative;");
     expect(source).toContain("left: calc(0px - 44px);");

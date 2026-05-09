@@ -1,5 +1,6 @@
 import { mount } from "@vue/test-utils";
 import { defineComponent, h } from "vue";
+import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@/lib/opentiny", () => ({
@@ -120,5 +121,15 @@ describe("ChatHistoryDialog", () => {
     await wrapper.vm.$nextTick();
 
     expect(wrapper.emitted("deleteSession")).toEqual([["session-1"]]);
+  });
+
+  it("anchors the delete confirmation actions to the right side of the session row", () => {
+    const source = readFileSync("src/features/chat/components/ChatHistoryDialog.vue", "utf8");
+
+    expect(source).toContain(".history-dialog__inline-actions {");
+    expect(source).toContain("padding-right: 128px;");
+    expect(source).toContain("position: absolute;");
+    expect(source).toContain("right: var(--space-2, 8px);");
+    expect(source).not.toContain("margin-top: var(--space-2, 8px);");
   });
 });
