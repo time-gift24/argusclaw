@@ -158,6 +158,22 @@ function makeApiClient(overrides: Partial<ApiClient> = {}): ApiClient {
   } as ApiClient;
 }
 
+function createDeferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((promiseResolve, promiseReject) => {
+    resolve = promiseResolve;
+    reject = promiseReject;
+  });
+  return { promise, resolve, reject };
+}
+
+async function chooseAgent(wrapper: ReturnType<typeof mount>, templateId: number) {
+  await wrapper.get("[data-testid='agent-picker-trigger']").trigger("click");
+  await wrapper.get(`[data-testid='agent-option-${templateId}']`).trigger("click");
+  await flushPromises();
+}
+
 afterEach(() => {
   resetApiClient();
   document.body.innerHTML = "";
@@ -223,7 +239,7 @@ describe("ChatPage", () => {
     expect(wrapper.find(".composer-bar").exists()).toBe(true);
   });
 
-  it("passes string values to OpenTiny selects in the composer", async () => {
+  it("renders selected agent and LLM values in composer chooser buttons", async () => {
     setApiClient(
       makeApiClient({
         listChatSessions: vi.fn().mockResolvedValue([]),
@@ -234,11 +250,10 @@ describe("ChatPage", () => {
     const wrapper = mount(ChatPage);
     await flushPromises();
 
-    const selects = wrapper.findAllComponents({ name: "OpenTinySelectStub" });
-    expect(selects).toHaveLength(3);
-    expect(selects[0].props("modelValue")).toBe("3");
-    expect(selects[1].props("modelValue")).toBe("7");
-    expect(selects[2].props("modelValue")).toBe("glm-4.7");
+    expect(wrapper.findAllComponents({ name: "OpenTinySelectStub" })).toHaveLength(0);
+    expect(wrapper.get("[data-testid='agent-picker-trigger']").text()).toContain("通用助手");
+    expect(wrapper.get("[data-testid='llm-picker-trigger']").text()).toContain("Z.ai");
+    expect(wrapper.get("[data-testid='llm-picker-trigger']").text()).toContain("glm-4.7");
   });
 
   it("renders the provider and model configured by the selected template on initial load", async () => {
@@ -257,10 +272,9 @@ describe("ChatPage", () => {
     const wrapper = mount(ChatPage);
     await flushPromises();
 
-    const selects = wrapper.findAllComponents({ name: "OpenTinySelectStub" });
-    expect(selects[0].props("modelValue")).toBe("9");
-    expect(selects[1].props("modelValue")).toBe("8");
-    expect(selects[2].props("modelValue")).toBe("kimi-k2");
+    expect(wrapper.get("[data-testid='agent-picker-trigger']").text()).toContain("代码助手");
+    expect(wrapper.get("[data-testid='llm-picker-trigger']").text()).toContain("模板提供方");
+    expect(wrapper.get("[data-testid='llm-picker-trigger']").text()).toContain("kimi-k2");
   });
 
   it("syncs the selected agent to the activated thread binding on initial conversation load", async () => {
@@ -291,26 +305,90 @@ describe("ChatPage", () => {
     const wrapper = mount(ChatPage);
     await flushPromises();
 
-    const selects = wrapper.findAllComponents({ name: "OpenTinySelectStub" });
     expect(activateChatThread).toHaveBeenCalledWith("session-1", "thread-1");
-    expect(selects[0].props("modelValue")).toBe("9");
-    expect(selects[1].props("modelValue")).toBe("8");
-    expect(selects[2].props("modelValue")).toBe("kimi-k2");
+    expect(wrapper.get("[data-testid='agent-picker-trigger']").text()).toContain("代码助手");
+    expect(wrapper.get("[data-testid='llm-picker-trigger']").text()).toContain("kimi-k2");
   });
 
-  it("centers the message column while floating runtime activity outside the text flow", () => {
+  it("scrolls the primary chat stream to the bottom when messages render", async () => {
+    const messagesDeferred = createDeferred<ChatMessageRecord[]>();
+    setApiClient(
+      makeApiClient({
+        listChatSessions: vi.fn().mockResolvedValue([session({ id: "session-1", name: "旧会话" })]),
+        listChatThreads: vi.fn().mockResolvedValue([thread({ id: "thread-1", title: "旧线程" })]),
+        listChatMessages: vi.fn().mockReturnValue(messagesDeferred.promise),
+      }),
+    );
+    const wrapper = mount(ChatPage);
+    const stream = wrapper.get(".chat-body-stream").element as HTMLDivElement;
+    const scrollTo = vi.fn();
+    Object.defineProperty(stream, "clientHeight", { configurable: true, value: 540 });
+    Object.defineProperty(stream, "scrollHeight", { configurable: true, value: 1200 });
+    Object.defineProperty(stream, "scrollTop", { configurable: true, writable: true, value: 660 });
+    stream.scrollTo = scrollTo;
+
+    messagesDeferred.resolve([
+      message("user", "旧消息"),
+      message("assistant", "很长的旧回复"),
+    ]);
+    await flushPromises();
+
+    expect(scrollTo).toHaveBeenCalledWith({ top: 1200, behavior: "auto" });
+  });
+
+  it("does not force the primary chat stream down when the user is reading earlier messages", async () => {
+    const messagesDeferred = createDeferred<ChatMessageRecord[]>();
+    setApiClient(
+      makeApiClient({
+        listChatSessions: vi.fn().mockResolvedValue([session({ id: "session-1", name: "旧会话" })]),
+        listChatThreads: vi.fn().mockResolvedValue([thread({ id: "thread-1", title: "旧线程" })]),
+        listChatMessages: vi.fn().mockReturnValue(messagesDeferred.promise),
+      }),
+    );
+    const wrapper = mount(ChatPage);
+    const stream = wrapper.get(".chat-body-stream").element as HTMLDivElement;
+    const scrollTo = vi.fn();
+    Object.defineProperty(stream, "clientHeight", { configurable: true, value: 540 });
+    Object.defineProperty(stream, "scrollHeight", { configurable: true, value: 1200 });
+    Object.defineProperty(stream, "scrollTop", { configurable: true, writable: true, value: 120 });
+    stream.scrollTo = scrollTo;
+
+    await wrapper.get(".chat-body-stream").trigger("scroll");
+    messagesDeferred.resolve([
+      message("user", "旧消息"),
+      message("assistant", "很长的旧回复"),
+    ]);
+    await flushPromises();
+
+    expect(scrollTo).not.toHaveBeenCalled();
+  });
+
+  it("uses one primary chat stream with composer and runtime activity as overlays", () => {
     const source = readFileSync("src/features/chat/ChatPage.vue", "utf8");
+    const panelSource = readFileSync("src/features/chat/components/ChatConversationPanel.vue", "utf8");
     const railSource = readFileSync("src/features/chat/components/RuntimeActivityRail.vue", "utf8");
 
+    expect(source).toContain("chat-body-stream");
     expect(source).toContain("chat-runtime-floating-layer");
     expect(source).toContain(".chat-page.chat-page--immersive");
+    expect(source).toContain(".chat-body-stream {");
     expect(source).toContain("overflow-y: auto;");
     expect(source).toContain("scrollbar-width: none;");
+    expect(source).toContain("--chat-message-width: 936px;");
+    expect(source).toContain("--chat-dock-clearance: 132px;");
+    expect(source).toContain("--chat-dock-clearance: 160px;");
+    expect(source).toContain(".chat-body-stream::after");
+    expect(source).toContain("flex: 0 0 calc(var(--chat-dock-clearance, 132px) + var(--space-6));");
     expect(source).toContain("width: min(100%, var(--chat-message-width));");
-    expect(source).toContain("position: fixed;");
+    expect(source).toContain("position: absolute;");
+    expect(source).not.toContain("chat-workspace");
+    expect(source).not.toContain("chat-main-column");
     expect(source).not.toContain("--chat-sidecar-width");
     expect(source).not.toContain("grid-template-columns: minmax(0, 1fr) minmax(0, var(--chat-message-width)) minmax(0, 1fr);");
-    expect(source).not.toContain(".chat-workspace :deep(.runtime-rail)");
+    expect(source).not.toContain("position: static;");
+
+    expect(panelSource).toContain("min-height: 100%;");
+    expect(panelSource).not.toMatch(/(^|\n)\s*height: 100%;/);
 
     expect(railSource).toContain("grid-template-rows: auto minmax(0, 1fr);");
     expect(railSource).toContain(".runtime-rail__list");
@@ -366,8 +444,7 @@ describe("ChatPage", () => {
 
     expect(wrapper.text()).toContain("旧回复");
 
-    await wrapper.findAll("select")[0]!.setValue("9");
-    await flushPromises();
+    await chooseAgent(wrapper, 9);
 
     expect(createChatSessionWithThread).toHaveBeenCalledWith({
       name: "新的 Web 对话",
@@ -398,13 +475,11 @@ describe("ChatPage", () => {
     const wrapper = mount(ChatPage);
     await flushPromises();
 
-    await wrapper.findAll("select")[0]!.setValue("9");
-    await flushPromises();
+    await chooseAgent(wrapper, 9);
 
-    const selects = wrapper.findAllComponents({ name: "OpenTinySelectStub" });
     expect(createChatSessionWithThread).not.toHaveBeenCalled();
-    expect(selects[1].props("modelValue")).toBe("8");
-    expect(selects[2].props("modelValue")).toBe("kimi-k2");
+    expect(wrapper.get("[data-testid='agent-picker-trigger']").text()).toContain("代码助手");
+    expect(wrapper.get("[data-testid='llm-picker-trigger']").text()).toContain("kimi-k2");
   });
 
   it("keeps the existing conversation when switching agents fails to create the new session", async () => {
@@ -427,15 +502,12 @@ describe("ChatPage", () => {
     const wrapper = mount(ChatPage);
     await flushPromises();
 
-    await wrapper.findAll("select")[0]!.setValue("9");
-    await flushPromises();
+    await chooseAgent(wrapper, 9);
 
     expect(wrapper.text()).toContain("旧回复");
     expect(wrapper.text()).toContain("create failed");
-    const selects = wrapper.findAllComponents({ name: "OpenTinySelectStub" });
-    expect(selects[0].props("modelValue")).toBe("3");
-    expect(selects[1].props("modelValue")).toBe("7");
-    expect(selects[2].props("modelValue")).toBe("glm-4.7");
+    expect(wrapper.get("[data-testid='agent-picker-trigger']").text()).toContain("通用助手");
+    expect(wrapper.get("[data-testid='llm-picker-trigger']").text()).toContain("glm-4.7");
   });
 
   it("opens history dialog when clicking the history button", async () => {

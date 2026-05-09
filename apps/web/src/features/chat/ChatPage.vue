@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import type { PromptProps } from "@opentiny/tiny-robot";
 
 import {
@@ -35,6 +35,9 @@ const templates = ref<AgentRecord[]>([]);
 const selectedTemplateId = ref<number | null>(null);
 const selectedProviderId = ref<number | null>(null);
 const selectedModel = ref("");
+const chatBodyStreamRef = ref<HTMLDivElement | null>(null);
+const shouldStickToBottom = ref(true);
+const AUTO_SCROLL_THRESHOLD = 72;
 
 const chatComposer = useChatComposer({
   activeSessionId: chatSessions.activeSessionId,
@@ -79,6 +82,32 @@ const robotMessages = computed(() => toRobotMessages({
 }));
 const bubbleRoles = createBubbleRoles();
 const starterPrompts = createStarterPrompts();
+
+function getDistanceFromBottom(element: HTMLDivElement) {
+  return element.scrollHeight - element.clientHeight - element.scrollTop;
+}
+
+function updateStickToBottom() {
+  const stream = chatBodyStreamRef.value;
+  if (!stream) return;
+  shouldStickToBottom.value = getDistanceFromBottom(stream) <= AUTO_SCROLL_THRESHOLD;
+}
+
+function scrollChatBodyToBottom() {
+  const stream = chatBodyStreamRef.value;
+  if (!stream) return;
+
+  const top = stream.scrollHeight;
+  if (typeof stream.scrollTo === "function") {
+    stream.scrollTo({ top, behavior: "auto" });
+  } else {
+    stream.scrollTop = top;
+  }
+}
+
+function handleChatBodyScroll() {
+  updateStickToBottom();
+}
 
 onMounted(() => {
   void loadInitialState();
@@ -162,6 +191,16 @@ watch(
       chatThreadStream.openThreadEvents(chatSessions.activeSessionId.value, threadId);
     }
   },
+);
+
+watch(
+  () => robotMessages.value,
+  async (messages) => {
+    if (messages.length === 0 || !shouldStickToBottom.value) return;
+    await nextTick();
+    scrollChatBodyToBottom();
+  },
+  { deep: true },
 );
 
 async function handleSelectThreadFromDialog(sessionId: string, threadId: string) {
@@ -317,18 +356,16 @@ function applyPrompt(_event: MouseEvent, item: PromptProps) {
 
 <template>
   <section class="chat-page chat-page--immersive chat-page--single-scroll">
-    <div class="chat-workspace">
-      <div class="chat-main-column">
-        <ChatConversationPanel
-          :error="chatComposer.error.value"
-          :notice="chatComposer.actionMessage.value"
-          :thread-loading="chatThreadStream.threadLoading.value"
-          :robot-messages="robotMessages"
-          :bubble-roles="bubbleRoles"
-          :starter-prompts="starterPrompts"
-          @prompt="applyPrompt"
-        />
-      </div>
+    <div ref="chatBodyStreamRef" class="chat-body-stream" @scroll.passive="handleChatBodyScroll">
+      <ChatConversationPanel
+        :error="chatComposer.error.value"
+        :notice="chatComposer.actionMessage.value"
+        :thread-loading="chatThreadStream.threadLoading.value"
+        :robot-messages="robotMessages"
+        :bubble-roles="bubbleRoles"
+        :starter-prompts="starterPrompts"
+        @prompt="applyPrompt"
+      />
     </div>
 
     <div class="chat-runtime-floating-layer">
@@ -377,20 +414,14 @@ function applyPrompt(_event: MouseEvent, item: PromptProps) {
   --chat-message-width: 936px;
   --chat-rail-width: 320px;
   --chat-layout-gap: var(--space-5);
-  --chat-dock-clearance: 212px;
-  padding: var(--space-6);
+  --chat-dock-clearance: 132px;
   height: 100vh;
   min-height: 100vh;
   max-height: 100vh;
+  padding: 0;
   overflow-x: hidden;
-  overflow-y: auto;
+  overflow-y: hidden;
   overscroll-behavior: contain;
-  scrollbar-width: none;
-}
-
-.chat-page::-webkit-scrollbar {
-  width: 0;
-  height: 0;
 }
 
 .chat-page--immersive {
@@ -406,25 +437,32 @@ function applyPrompt(_event: MouseEvent, item: PromptProps) {
   scroll-behavior: smooth;
 }
 
-.chat-workspace,
-.chat-main-column {
-  min-height: 100%;
-}
-
-.chat-workspace {
-  width: min(100%, var(--chat-message-width));
-  margin-inline: auto;
-}
-
-.chat-main-column {
+.chat-body-stream {
   display: flex;
   flex-direction: column;
+  width: 100%;
+  height: 100%;
   min-width: 0;
-  min-height: 100%;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding: var(--space-6) max(var(--space-6), calc((100% - var(--chat-message-width)) / 2)) 0;
+  overscroll-behavior: contain;
+  scrollbar-width: none;
+}
+
+.chat-body-stream::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
+.chat-body-stream::after {
+  content: "";
+  flex: 0 0 calc(var(--chat-dock-clearance, 132px) + var(--space-6));
 }
 
 .chat-runtime-floating-layer {
-  position: fixed;
+  position: absolute;
   top: var(--space-6);
   right: var(--space-6);
   z-index: 25;
@@ -444,8 +482,8 @@ function applyPrompt(_event: MouseEvent, item: PromptProps) {
 }
 
 .chat-page__composer-dock {
-  position: fixed;
-  left: calc(260px + var(--space-6));
+  position: absolute;
+  left: var(--space-6);
   right: var(--space-6);
   bottom: var(--space-6);
   z-index: 30;
@@ -459,13 +497,16 @@ function applyPrompt(_event: MouseEvent, item: PromptProps) {
 
 @media (max-width: 1180px) {
   .chat-page {
-    padding: var(--space-4);
-    --chat-dock-clearance: 228px;
+    --chat-dock-clearance: 160px;
   }
 
   .chat-page.chat-page--immersive {
     width: calc(100% + var(--space-4) + var(--space-4));
     margin: calc(0px - var(--space-4));
+  }
+
+  .chat-body-stream {
+    padding: var(--space-4) max(var(--space-4), calc((100% - var(--chat-message-width)) / 2)) 0;
   }
 
   .chat-page__composer-dock {
@@ -477,10 +518,11 @@ function applyPrompt(_event: MouseEvent, item: PromptProps) {
 
 @media (max-width: 1280px) {
   .chat-runtime-floating-layer {
-    position: static;
+    position: absolute;
+    top: var(--space-4);
+    right: var(--space-4);
     width: min(100%, var(--chat-message-width));
     max-width: none;
-    margin: var(--space-4) auto calc(var(--chat-dock-clearance, 228px) + var(--space-4));
     pointer-events: auto;
   }
 

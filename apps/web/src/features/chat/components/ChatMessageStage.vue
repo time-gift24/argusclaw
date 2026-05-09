@@ -132,13 +132,13 @@ onMounted(async () => {
 
 <style scoped>
 .message-stage {
-  flex: 1;
+  flex: 1 0 auto;
   min-height: 0;
   height: auto;
   overflow: visible;
-  padding: var(--space-2) 0 calc(var(--chat-dock-clearance, 212px) + var(--space-5));
+  padding: var(--space-2) 0 calc(var(--chat-dock-clearance, 132px) + var(--space-5));
   overscroll-behavior: contain;
-  --assistant-readable-width: 860px;
+  --assistant-readable-width: var(--chat-message-width, 936px);
 }
 
 .message-stage--flat {
@@ -200,8 +200,15 @@ onMounted(async () => {
 }
 
 :deep(.tr-bubble[data-role="assistant"] .tr-bubble__body) {
-  width: min(100%, calc(var(--assistant-readable-width) + 44px));
+  position: relative;
+  width: min(100%, var(--assistant-readable-width));
   justify-content: center;
+}
+
+:deep(.tr-bubble[data-role="assistant"] .tr-bubble__avatar) {
+  position: absolute;
+  top: 0;
+  left: calc(0px - 44px);
 }
 
 :deep(.tr-bubble[data-role="assistant"] .tr-bubble__content) {
@@ -216,8 +223,13 @@ onMounted(async () => {
   max-width: none !important;
   background: transparent !important;
   border: none !important;
+  border-radius: 0 !important;
   box-shadow: none !important;
   padding: 0 !important;
+}
+
+:deep(.tr-bubble__box[data-role="assistant"]:has([data-tool-summary-content])) {
+  border-radius: 0 !important;
 }
 
 :deep(.tr-bubble__box[data-role="assistant"] .tr-bubble__reasoning),
@@ -434,7 +446,7 @@ onMounted(async () => {
 
 @media (max-width: 1180px) {
   .message-stage {
-    padding-bottom: calc(var(--chat-dock-clearance, 228px) + var(--space-4));
+    padding-bottom: calc(var(--chat-dock-clearance, 160px) + var(--space-4));
   }
 }
 </style>

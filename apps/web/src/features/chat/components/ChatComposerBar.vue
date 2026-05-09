@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
 import { TrSender } from "@opentiny/tiny-robot";
-import { TinyButton, TinyOption, TinySelect } from "@/lib/opentiny";
 import type { AgentRecord, LlmProviderRecord } from "@/lib/api";
 
 interface Props {
@@ -35,20 +34,13 @@ const emit = defineEmits<Emits>();
 
 type SelectValue = string | number | null | undefined;
 
-const templateOptions = computed(() =>
-  props.templates.map((t) => ({ label: t.display_name, value: String(t.id) })),
-);
-
-const providerOptions = computed(() =>
-  props.providers.map((p) => ({ label: p.display_name, value: String(p.id) })),
-);
 const modelOptions = computed(() =>
   (props.activeProvider?.models ?? []).map((model) => ({ label: model, value: model })),
 );
 
-const selectedTemplateValue = computed(() => toSelectValue(props.selectedTemplateId));
-const selectedProviderValue = computed(() => toSelectValue(props.selectedProviderId));
-const selectedModelValue = computed(() => props.selectedModel);
+const selectedTemplateLabel = computed(() => props.selectedTemplate?.display_name ?? "选择 Agent");
+const selectedProviderLabel = computed(() => props.activeProvider?.display_name ?? "选择提供方");
+const selectedModelLabel = computed(() => props.selectedModel || "选择模型");
 
 // TrSender theme vars — transparent, borderless, clean
 const senderThemeStyle = {
@@ -79,10 +71,6 @@ const senderThemeStyle = {
   "--tr-sender-button-border-radius": "10px",
 } as const;
 
-function toSelectValue(value: number | null) {
-  return value === null ? "" : String(value);
-}
-
 function parseSelectId(value: SelectValue) {
   if (value === null || value === undefined || value === "") return null;
   const next = Number(value);
@@ -99,6 +87,7 @@ function handleCancel() {
 
 function handleTemplateChange(value: SelectValue) {
   emit("update:selectedTemplateId", parseSelectId(value));
+  activePicker.value = null;
 }
 
 function handleProviderChange(value: SelectValue) {
@@ -112,12 +101,14 @@ function handleProviderChange(value: SelectValue) {
 
 function handleModelChange(value: string) {
   emit("update:selectedModel", value);
+  activePicker.value = null;
 }
 
-// Dropdown open state for visual feedback
-const templateDropdownOpen = ref(false);
-const providerDropdownOpen = ref(false);
-const modelDropdownOpen = ref(false);
+const activePicker = ref<"agent" | "llm" | null>(null);
+
+function togglePicker(picker: "agent" | "llm") {
+  activePicker.value = activePicker.value === picker ? null : picker;
+}
 </script>
 
 <template>
@@ -143,60 +134,84 @@ const modelDropdownOpen = ref(false);
 
     <!-- 底部控制栏 -->
     <div class="composer-bar__footer-row">
-      <!-- 智能体 -->
-      <TinySelect
-        class="composer-bar__select"
-        :model-value="selectedTemplateValue"
-        placeholder="智能体"
-        size="small"
-        :dropdown-class="templateDropdownOpen ? 'is-open' : ''"
-        @update:model-value="handleTemplateChange"
-        @dropdown-open-change="(v: boolean) => (templateDropdownOpen = v)"
-      >
-        <TinyOption
-          v-for="opt in templateOptions"
-          :key="opt.value"
-          :label="opt.label"
-          :value="opt.value"
-        />
-      </TinySelect>
+      <div class="composer-bar__picker">
+        <button
+          type="button"
+          class="composer-bar__picker-trigger"
+          data-testid="agent-picker-trigger"
+          :aria-expanded="activePicker === 'agent'"
+          @click="togglePicker('agent')"
+        >
+          <span class="composer-bar__picker-kicker">Agent</span>
+          <strong>{{ selectedTemplateLabel }}</strong>
+        </button>
+        <div
+          v-if="activePicker === 'agent'"
+          class="composer-bar__popover composer-bar__popover--agent"
+          data-testid="agent-picker-popover"
+        >
+          <button
+            v-for="template in templates"
+            :key="template.id"
+            type="button"
+            class="composer-bar__option"
+            :class="{ 'is-selected': template.id === selectedTemplateId }"
+            :data-testid="`agent-option-${template.id}`"
+            @click="handleTemplateChange(template.id)"
+          >
+            <span>{{ template.display_name }}</span>
+            <small v-if="template.description">{{ template.description }}</small>
+          </button>
+        </div>
+      </div>
 
-      <!-- 提供方 -->
-      <TinySelect
-        class="composer-bar__select"
-        :model-value="selectedProviderValue"
-        placeholder="提供方"
-        size="small"
-        :dropdown-class="providerDropdownOpen ? 'is-open' : ''"
-        @update:model-value="handleProviderChange"
-        @dropdown-open-change="(v: boolean) => (providerDropdownOpen = v)"
-      >
-        <TinyOption
-          v-for="opt in providerOptions"
-          :key="opt.value"
-          :label="opt.label"
-          :value="opt.value"
-        />
-      </TinySelect>
-
-      <!-- 模型 -->
-      <TinySelect
-        class="composer-bar__select composer-bar__model-select"
-        :disabled="modelOptions.length === 0"
-        :dropdown-class="modelDropdownOpen ? 'is-open' : ''"
-        :model-value="selectedModelValue"
-        placeholder="模型"
-        size="small"
-        @update:model-value="handleModelChange(String($event))"
-        @dropdown-open-change="(v: boolean) => (modelDropdownOpen = v)"
-      >
-        <TinyOption
-          v-for="opt in modelOptions"
-          :key="opt.value"
-          :label="opt.label"
-          :value="opt.value"
-        />
-      </TinySelect>
+      <div class="composer-bar__picker composer-bar__picker--llm">
+        <button
+          type="button"
+          class="composer-bar__picker-trigger"
+          data-testid="llm-picker-trigger"
+          :aria-expanded="activePicker === 'llm'"
+          @click="togglePicker('llm')"
+        >
+          <span class="composer-bar__picker-kicker">LLM</span>
+          <strong>{{ selectedProviderLabel }}</strong>
+          <small>{{ selectedModelLabel }}</small>
+        </button>
+        <div
+          v-if="activePicker === 'llm'"
+          class="composer-bar__popover composer-bar__popover--llm"
+          data-testid="llm-picker-popover"
+        >
+          <div class="composer-bar__provider-column">
+            <button
+              v-for="provider in providers"
+              :key="provider.id"
+              type="button"
+              class="composer-bar__option composer-bar__option--provider"
+              :class="{ 'is-selected': provider.id === selectedProviderId }"
+              :data-testid="`provider-option-${provider.id}`"
+              @click="handleProviderChange(provider.id)"
+            >
+              <span>{{ provider.display_name }}</span>
+              <small>{{ provider.default_model }}</small>
+            </button>
+          </div>
+          <div class="composer-bar__model-column">
+            <button
+              v-for="opt in modelOptions"
+              :key="opt.value"
+              type="button"
+              class="composer-bar__option composer-bar__option--model"
+              :class="{ 'is-selected': opt.value === selectedModel }"
+              :data-testid="`model-option-${opt.value}`"
+              @click="handleModelChange(opt.value)"
+            >
+              {{ opt.label }}
+            </button>
+            <span v-if="modelOptions.length === 0" class="composer-bar__empty-option">暂无模型</span>
+          </div>
+        </div>
+      </div>
 
       <div class="composer-bar__actions">
         <button class="composer-bar__icon-btn" title="新对话" @click="emit('newChat')">
@@ -243,6 +258,22 @@ const modelDropdownOpen = ref(false);
   display: flex;
   align-items: stretch;
   min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--border-default) 82%, transparent);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--surface-base) 78%, transparent);
+  transition:
+    border-color 0.16s ease,
+    box-shadow 0.16s ease,
+    background-color 0.16s ease;
+}
+
+.composer-bar__input-shell:focus-within {
+  border-color: color-mix(in srgb, var(--accent) 62%, var(--border-default));
+  background: var(--surface-base);
+  box-shadow:
+    0 0 0 3px color-mix(in srgb, var(--accent) 12%, transparent),
+    inset 0 1px 0 rgba(255, 255, 255, 0.75);
 }
 
 .composer-bar__sender {
@@ -307,10 +338,178 @@ const modelDropdownOpen = ref(false);
 
 /* ── 底部控制栏 ── */
 .composer-bar__footer-row {
+  position: relative;
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
   padding-bottom: 2px;
+}
+
+.composer-bar__picker {
+  position: relative;
+  min-width: 0;
+}
+
+.composer-bar__picker--llm {
+  flex: 1;
+}
+
+.composer-bar__picker-trigger {
+  display: inline-grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  column-gap: 8px;
+  row-gap: 1px;
+  min-width: 134px;
+  max-width: 250px;
+  height: 34px;
+  padding: 0 12px;
+  border: 1px solid color-mix(in srgb, var(--border-default) 76%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--surface-base) 72%, transparent);
+  color: var(--text-primary);
+  cursor: pointer;
+  text-align: left;
+  transition:
+    background 0.14s ease,
+    border-color 0.14s ease,
+    box-shadow 0.14s ease,
+    transform 0.1s ease;
+}
+
+.composer-bar__picker-trigger:hover,
+.composer-bar__picker-trigger[aria-expanded="true"] {
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--border-default));
+  background: color-mix(in srgb, var(--accent) 8%, var(--surface-base));
+  box-shadow: 0 6px 18px rgba(15, 23, 42, 0.08);
+}
+
+.composer-bar__picker-trigger:active {
+  transform: scale(0.98);
+}
+
+.composer-bar__picker-trigger strong,
+.composer-bar__picker-trigger small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-bar__picker-trigger strong {
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 1.2;
+}
+
+.composer-bar__picker-trigger small {
+  grid-column: 2;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.1;
+}
+
+.composer-bar__picker-kicker {
+  grid-row: 1 / span 2;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 20px;
+  padding: 0 7px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.composer-bar__popover {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 8px);
+  z-index: 50;
+  min-width: 260px;
+  padding: 8px;
+  border: 1px solid color-mix(in srgb, var(--border-default) 78%, transparent);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow:
+    0 20px 48px rgba(15, 23, 42, 0.16),
+    0 4px 14px rgba(15, 23, 42, 0.08);
+  backdrop-filter: blur(18px) saturate(160%);
+}
+
+.composer-bar__popover--llm {
+  display: grid;
+  grid-template-columns: minmax(150px, 0.95fr) minmax(160px, 1fr);
+  gap: 8px;
+  min-width: 390px;
+}
+
+.composer-bar__provider-column,
+.composer-bar__model-column {
+  display: grid;
+  align-content: start;
+  gap: 4px;
+}
+
+.composer-bar__model-column {
+  border-left: 1px solid color-mix(in srgb, var(--border-default) 72%, transparent);
+  padding-left: 8px;
+}
+
+.composer-bar__option {
+  display: grid;
+  gap: 2px;
+  width: 100%;
+  padding: 9px 10px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--text-primary);
+  cursor: pointer;
+  text-align: left;
+  transition:
+    background 0.12s ease,
+    color 0.12s ease;
+}
+
+.composer-bar__option:hover,
+.composer-bar__option.is-selected {
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  color: var(--accent);
+}
+
+.composer-bar__option span,
+.composer-bar__option small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-bar__option span {
+  font-size: 13px;
+  font-weight: 620;
+  line-height: 1.35;
+}
+
+.composer-bar__option small {
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.3;
+}
+
+.composer-bar__option--model {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.composer-bar__empty-option {
+  padding: 10px;
+  color: var(--text-muted);
+  font-size: 12px;
 }
 
 /* ── TinySelect：文字链接风格 ── */
@@ -450,6 +649,38 @@ const modelDropdownOpen = ref(false);
   .composer-bar__footer-row {
     flex-wrap: wrap;
     gap: 4px;
+  }
+
+  .composer-bar__picker,
+  .composer-bar__picker--llm {
+    flex: 1 1 150px;
+  }
+
+  .composer-bar__picker-trigger {
+    width: 100%;
+    max-width: none;
+  }
+
+  .composer-bar__popover {
+    max-width: calc(100vw - 32px);
+  }
+
+  .composer-bar__popover--llm {
+    grid-template-columns: 1fr;
+    min-width: min(320px, calc(100vw - 32px));
+  }
+
+  .composer-bar__model-column {
+    border-left: 0;
+    border-top: 1px solid color-mix(in srgb, var(--border-default) 72%, transparent);
+    padding-top: 8px;
+    padding-left: 0;
+  }
+
+  .composer-bar__actions {
+    width: 100%;
+    margin-left: 0;
+    justify-content: flex-end;
   }
 
   .composer-bar__model-select {

@@ -43,7 +43,7 @@ function closeToolDetail() {
 </script>
 
 <template>
-  <div class="tool-summary">
+  <div class="tool-summary" data-tool-summary-content>
     <button
       v-for="tool in toolDetails"
       :key="tool.id"
