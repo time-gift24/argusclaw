@@ -1,32 +1,23 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from "vue";
+import { computed, onMounted, ref } from "vue";
+import { useRouter } from "vue-router";
 
 import {
   getApiClient,
-  type CreateScheduledMessageRequest,
+  type AgentRecord,
+  type ScheduledMessageRunSummary,
   type ScheduledMessageStatus,
   type ScheduledMessageSummary,
 } from "@/lib/api";
-import { TinyButton, TinyInput, TinyOption, TinySelect, TinyTag } from "@/lib/opentiny";
-
-type ScheduleMode = "cron" | "once";
+import { TinyButton, TinyTag } from "@/lib/opentiny";
 
 const schedules = ref<ScheduledMessageSummary[]>([]);
+const router = useRouter();
+const templates = ref<AgentRecord[]>([]);
 const loading = ref(true);
-const submitting = ref(false);
 const actingId = ref("");
 const error = ref("");
 const actionMessage = ref("");
-const scheduleMode = ref<ScheduleMode>("cron");
-const form = reactive({
-  sessionId: "",
-  threadId: "",
-  name: "",
-  prompt: "",
-  cronExpr: "0 9 * * *",
-  timezone: "Asia/Shanghai",
-  scheduledAt: "",
-});
 
 const summary = computed(() => ({
   total: schedules.value.length,
@@ -35,13 +26,6 @@ const summary = computed(() => ({
   paused: schedules.value.filter((item) => item.status === "paused").length,
   failed: schedules.value.filter((item) => item.status === "failed").length,
 }));
-
-const canSubmit = computed(() => {
-  const hasTarget = form.sessionId.trim() && form.threadId.trim();
-  const hasPrompt = form.prompt.trim();
-  const hasSchedule = scheduleMode.value === "cron" ? form.cronExpr.trim() : form.scheduledAt.trim();
-  return Boolean(hasTarget && hasPrompt && hasSchedule && !submitting.value);
-});
 
 function statusType(status: ScheduledMessageStatus): "success" | "info" | "warning" | "danger" {
   if (status === "succeeded") return "success";
@@ -67,14 +51,84 @@ function scheduleText(item: ScheduledMessageSummary): string {
   return item.scheduled_at ? "一次性" : "未设置";
 }
 
+function formatDateTime(value: string | null): string {
+  if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString("zh-CN", {
+    hour: "2-digit",
+    minute: "2-digit",
+    month: "2-digit",
+    day: "2-digit",
+    year: "numeric",
+  });
+}
+
+function shortId(value: string): string {
+  return value.length > 12 ? `${value.slice(0, 8)}...${value.slice(-4)}` : value;
+}
+
 function displayValue(value: string | null): string {
   return value?.trim() || "-";
 }
 
-async function loadSchedules() {
+function agentLabel(item: ScheduledMessageSummary): string {
+  return templates.value.find((template) => template.id === item.template_id)?.display_name ?? `Agent #${item.template_id}`;
+}
+
+function recentTargetText(item: ScheduledMessageSummary): string {
+  if (!item.last_session_id || !item.last_thread_id) return "-";
+  return `${shortId(item.last_session_id)} / ${shortId(item.last_thread_id)}`;
+}
+
+function runHistory(item: ScheduledMessageSummary): ScheduledMessageRunSummary[] {
+  if (item.run_history.length > 0) {
+    return [...item.run_history]
+      .sort((left, right) => Date.parse(right.created_at) - Date.parse(left.created_at))
+      .slice(0, 3);
+  }
+  if (!item.last_session_id || !item.last_thread_id) return [];
+  return [
+    {
+      session_id: item.last_session_id,
+      thread_id: item.last_thread_id,
+      created_at: item.scheduled_at ?? "",
+    },
+  ];
+}
+
+function schedulerRunHref(item: ScheduledMessageSummary, run: ScheduledMessageRunSummary): string {
+  const scheduleId = encodeURIComponent(item.id);
+  const session = encodeURIComponent(run.session_id);
+  const thread = encodeURIComponent(run.thread_id);
+  return `/scheduler/${scheduleId}/runs/${session}/${thread}`;
+}
+
+function runHistoryLabel(run: ScheduledMessageRunSummary, index: number): string {
+  return `${index === 0 ? "最近" : `#${index + 1}`} ${formatDateTime(run.created_at)}`;
+}
+
+async function loadChatOptions() {
+  const api = getApiClient();
+  if (!api.getChatOptions) {
+    error.value = "当前 API 客户端不支持加载 Agent 配置。";
+    return;
+  }
+
+  try {
+    const options = await api.getChatOptions();
+    templates.value = options.templates;
+  } catch (reason) {
+    error.value = reason instanceof Error ? reason.message : "加载 Agent 配置失败。";
+  }
+}
+
+async function loadSchedules(options: { clearError?: boolean } = {}) {
   const api = getApiClient();
   loading.value = true;
-  error.value = "";
+  if (options.clearError ?? true) {
+    error.value = "";
+  }
 
   if (!api.listScheduledMessages) {
     error.value = "当前 API 客户端不支持 Scheduler。";
@@ -88,45 +142,6 @@ async function loadSchedules() {
     error.value = reason instanceof Error ? reason.message : "加载定时任务失败。";
   } finally {
     loading.value = false;
-  }
-}
-
-async function createSchedule() {
-  const api = getApiClient();
-  if (!api.createScheduledMessage) {
-    error.value = "当前 API 客户端不支持创建定时任务。";
-    return;
-  }
-  if (!canSubmit.value) {
-    error.value = "请填写目标对话、提示词和调度配置。";
-    return;
-  }
-
-  const input: CreateScheduledMessageRequest = {
-    session_id: form.sessionId.trim(),
-    thread_id: form.threadId.trim(),
-    name: form.name.trim() || "Scheduled message",
-    prompt: form.prompt.trim(),
-  };
-  if (scheduleMode.value === "cron") {
-    input.cron_expr = form.cronExpr.trim();
-    input.timezone = form.timezone.trim() || null;
-  } else {
-    input.scheduled_at = form.scheduledAt.trim();
-  }
-
-  submitting.value = true;
-  error.value = "";
-  actionMessage.value = "";
-  try {
-    await api.createScheduledMessage(input);
-    actionMessage.value = "定时任务已创建。";
-    resetForm();
-    await loadSchedules();
-  } catch (reason) {
-    error.value = reason instanceof Error ? reason.message : "创建定时任务失败。";
-  } finally {
-    submitting.value = false;
   }
 }
 
@@ -172,16 +187,15 @@ async function runAction(id: string, action: () => Promise<unknown>, message: st
   }
 }
 
-function resetForm() {
-  form.name = "";
-  form.prompt = "";
-  form.cronExpr = "0 9 * * *";
-  form.timezone = "Asia/Shanghai";
-  form.scheduledAt = "";
+function openCreatePage() {
+  void router.push("/scheduler/new");
 }
 
 onMounted(() => {
-  void loadSchedules();
+  void (async () => {
+    await loadChatOptions();
+    await loadSchedules({ clearError: !error.value });
+  })();
 });
 </script>
 
@@ -189,19 +203,28 @@ onMounted(() => {
   <section class="page-section">
     <div class="page-header">
       <div class="page-header-left">
-        <h3 class="page-title">Scheduler</h3>
+        <h3 class="page-title">定时任务</h3>
         <TinyTag v-if="!loading">
           {{ schedules.length }} 项
         </TinyTag>
       </div>
-      <TinyButton
-        data-testid="refresh-schedules"
-        type="default"
-        :disabled="loading"
-        @click="loadSchedules"
-      >
-        {{ loading ? "刷新中" : "刷新" }}
-      </TinyButton>
+      <div class="page-actions">
+        <TinyButton
+          data-testid="refresh-schedules"
+          type="default"
+          :disabled="loading"
+          @click="loadSchedules"
+        >
+          {{ loading ? "刷新中" : "刷新" }}
+        </TinyButton>
+        <TinyButton
+          data-testid="create-schedule-link"
+          type="primary"
+          @click="openCreatePage"
+        >
+          创建任务
+        </TinyButton>
+      </div>
     </div>
 
     <p
@@ -250,102 +273,6 @@ onMounted(() => {
       </article>
     </div>
 
-    <section class="scheduler-panel">
-      <div class="panel-header">
-        <h4>创建定时任务</h4>
-      </div>
-      <div class="form-grid">
-        <label>
-          <span>Session ID</span>
-          <TinyInput
-            v-model="form.sessionId"
-            data-testid="schedule-session-id"
-            placeholder="session uuid"
-          />
-        </label>
-        <label>
-          <span>Thread ID</span>
-          <TinyInput
-            v-model="form.threadId"
-            data-testid="schedule-thread-id"
-            placeholder="thread uuid"
-          />
-        </label>
-        <label>
-          <span>任务名称</span>
-          <TinyInput
-            v-model="form.name"
-            data-testid="schedule-name"
-            placeholder="每日检查"
-          />
-        </label>
-        <label>
-          <span>调度类型</span>
-          <TinySelect
-            v-model="scheduleMode"
-            data-testid="schedule-mode"
-          >
-            <TinyOption
-              label="Cron"
-              value="cron"
-            />
-            <TinyOption
-              label="一次性"
-              value="once"
-            />
-          </TinySelect>
-        </label>
-        <label class="form-wide">
-          <span>提示词</span>
-          <TinyInput
-            v-model="form.prompt"
-            data-testid="schedule-prompt"
-            type="textarea"
-            placeholder="到点后发送到目标 thread 的用户消息"
-          />
-        </label>
-        <template v-if="scheduleMode === 'cron'">
-          <label>
-            <span>Cron 表达式</span>
-            <TinyInput
-              v-model="form.cronExpr"
-              data-testid="schedule-cron-expr"
-              placeholder="0 9 * * *"
-            />
-          </label>
-          <label>
-            <span>时区</span>
-            <TinyInput
-              v-model="form.timezone"
-              data-testid="schedule-timezone"
-              placeholder="Asia/Shanghai"
-            />
-          </label>
-        </template>
-        <label
-          v-else
-          class="form-wide"
-        >
-          <span>一次性时间</span>
-          <TinyInput
-            v-model="form.scheduledAt"
-            data-testid="schedule-scheduled-at"
-            placeholder="2026-05-10T01:00:00Z"
-          />
-        </label>
-      </div>
-      <div class="form-actions">
-        <TinyButton
-          data-testid="create-schedule"
-          type="primary"
-          :disabled="!canSubmit"
-          @click="createSchedule"
-        >
-          {{ submitting ? "创建中" : "创建任务" }}
-        </TinyButton>
-      </div>
-    </section>
-
     <div
       v-if="!loading && schedules.length === 0"
       class="empty-state"
@@ -362,10 +289,22 @@ onMounted(() => {
       </div>
       <div class="schedule-table-wrap">
         <table class="schedule-table">
+          <colgroup>
+            <col class="col-name">
+            <col class="col-agent">
+            <col class="col-recent">
+            <col class="col-status">
+            <col class="col-schedule">
+            <col class="col-timezone">
+            <col class="col-next">
+            <col class="col-error">
+            <col class="col-actions">
+          </colgroup>
           <thead>
             <tr>
               <th>名称</th>
-              <th>目标</th>
+              <th>Agent</th>
+              <th>最近对话</th>
               <th>状态</th>
               <th>调度</th>
               <th>时区</th>
@@ -379,48 +318,91 @@ onMounted(() => {
               v-for="item in schedules"
               :key="item.id"
             >
-              <td>
+              <td
+                class="cell-name"
+                data-label="名称"
+              >
                 <strong>{{ item.name }}</strong>
               </td>
-              <td>
-                <span class="mono">{{ item.session_id }}</span>
-                <span class="mono">{{ item.thread_id }}</span>
+              <td data-label="Agent">
+                {{ agentLabel(item) }}
               </td>
-              <td>
+              <td data-label="最近对话">
+                <div
+                  v-if="runHistory(item).length > 0"
+                  class="history-links"
+                >
+                  <a
+                    v-for="(run, index) in runHistory(item)"
+                    :key="`${run.session_id}:${run.thread_id}`"
+                    class="history-link"
+                    :href="schedulerRunHref(item, run)"
+                    :title="`${run.session_id} / ${run.thread_id}`"
+                  >
+                    {{ runHistoryLabel(run, index) }}
+                  </a>
+                </div>
+                <span
+                  v-else
+                  class="mono"
+                >
+                  {{ recentTargetText(item) }}
+                </span>
+              </td>
+              <td data-label="状态">
                 <TinyTag :type="statusType(item.status)">
                   {{ statusLabel(item.status) }}
                 </TinyTag>
               </td>
-              <td>{{ scheduleText(item) }}</td>
-              <td>{{ displayValue(item.timezone) }}</td>
-              <td>{{ displayValue(item.scheduled_at) }}</td>
-              <td class="error-cell">{{ displayValue(item.last_error) }}</td>
-              <td>
+              <td data-label="调度">
+                <span class="schedule-code">{{ scheduleText(item) }}</span>
+              </td>
+              <td data-label="时区">
+                {{ displayValue(item.timezone) }}
+              </td>
+              <td data-label="下次执行">
+                {{ formatDateTime(item.scheduled_at) }}
+              </td>
+              <td
+                class="error-cell"
+                data-label="最近错误"
+              >
+                {{ displayValue(item.last_error) }}
+              </td>
+              <td data-label="操作">
                 <div class="row-actions">
-                  <TinyButton
+                  <a
+                    class="row-link"
+                    :data-testid="`edit-schedule-${item.id}`"
+                    :href="`/scheduler/${encodeURIComponent(item.id)}/edit`"
+                  >
+                    编辑
+                  </a>
+                  <button
+                    class="row-action"
                     :data-testid="`pause-schedule-${item.id}`"
-                    type="default"
                     :disabled="actingId === item.id || item.status === 'paused'"
                     @click="pauseSchedule(item.id)"
                   >
                     暂停
-                  </TinyButton>
-                  <TinyButton
+                  </button>
+                  <button
+                    class="row-action"
                     :data-testid="`trigger-schedule-${item.id}`"
-                    type="default"
                     :disabled="actingId === item.id"
+                    title="立即触发"
                     @click="triggerSchedule(item.id)"
                   >
-                    立即触发
-                  </TinyButton>
-                  <TinyButton
+                    触发
+                  </button>
+                  <button
+                    class="row-action row-action--danger"
                     :data-testid="`delete-schedule-${item.id}`"
-                    type="default"
                     :disabled="actingId === item.id"
                     @click="deleteSchedule(item.id)"
                   >
                     删除
-                  </TinyButton>
+                  </button>
                 </div>
               </td>
             </tr>
@@ -440,7 +422,7 @@ onMounted(() => {
 .page-header,
 .page-header-left,
 .panel-header,
-.form-actions,
+.page-actions,
 .row-actions {
   display: flex;
   align-items: center;
@@ -506,36 +488,50 @@ onMounted(() => {
   padding: var(--space-5);
 }
 
-.form-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: var(--space-4);
-}
-
-.form-grid label {
-  display: grid;
-  gap: var(--space-2);
-  color: var(--text-secondary);
-  font-size: var(--text-xs);
-  font-weight: 590;
-}
-
-.form-wide {
-  grid-column: 1 / -1;
-}
-
-.form-actions {
-  justify-content: flex-end;
-}
-
 .schedule-table-wrap {
-  overflow-x: auto;
+  overflow: hidden;
 }
 
 .schedule-table {
   width: 100%;
   border-collapse: collapse;
-  min-width: 1120px;
+  table-layout: fixed;
+}
+
+.col-name {
+  width: 14%;
+}
+
+.col-agent {
+  width: 7%;
+}
+
+.col-recent {
+  width: 11%;
+}
+
+.col-status {
+  width: 7%;
+}
+
+.col-schedule {
+  width: 10%;
+}
+
+.col-timezone {
+  width: 9%;
+}
+
+.col-next {
+  width: 13%;
+}
+
+.col-error {
+  width: 11%;
+}
+
+.col-actions {
+  width: 18%;
 }
 
 .schedule-table th,
@@ -543,7 +539,7 @@ onMounted(() => {
   padding: var(--space-3);
   border-bottom: 1px solid var(--border-subtle);
   text-align: left;
-  vertical-align: top;
+  vertical-align: middle;
   font-size: var(--text-sm);
 }
 
@@ -551,11 +547,58 @@ onMounted(() => {
   color: var(--text-muted);
   font-size: var(--text-xs);
   font-weight: 590;
+  white-space: nowrap;
+}
+
+.schedule-table td {
+  min-width: 0;
+  color: var(--text-primary);
+  line-height: 1.4;
+}
+
+.cell-name strong {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+}
+
+.cell-name strong {
+  -webkit-line-clamp: 2;
+}
+
+.error-cell {
+  overflow-wrap: anywhere;
+}
+
+.schedule-code {
+  display: block;
+  overflow: hidden;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.history-links {
+  display: grid;
+  gap: var(--space-1);
+}
+
+.history-link {
+  overflow: hidden;
+  color: var(--color-primary);
+  font-size: var(--text-xs);
+  text-decoration: none;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.history-link:hover {
+  text-decoration: underline;
 }
 
 .mono {
   display: block;
-  max-width: 220px;
   overflow: hidden;
   color: var(--text-muted);
   font-family: var(--font-mono);
@@ -565,13 +608,63 @@ onMounted(() => {
 }
 
 .error-cell {
-  max-width: 220px;
   color: var(--status-danger);
 }
 
 .row-actions {
-  align-items: flex-start;
-  flex-wrap: wrap;
+  align-items: center;
+  flex-wrap: nowrap;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.row-link,
+.row-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: var(--text-xs);
+  font-weight: 590;
+  text-decoration: none;
+}
+
+.page-actions :deep(.tiny-button) {
+  height: 32px !important;
+  min-height: 32px !important;
+  padding: 0 var(--space-3) !important;
+  box-sizing: border-box !important;
+  font-size: var(--text-xs) !important;
+  font-weight: 590 !important;
+  line-height: 1 !important;
+}
+
+.row-link,
+.row-action {
+  width: auto;
+  min-width: 0;
+  height: auto;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  cursor: pointer;
+  line-height: 1.4;
+}
+
+.row-link:hover,
+.row-action:hover {
+  color: var(--accent-hover);
+  text-decoration: underline;
+}
+
+.row-action:disabled {
+  color: var(--text-placeholder);
+  cursor: not-allowed;
+  text-decoration: none;
+}
+
+.row-action--danger {
+  color: var(--danger);
 }
 
 .loading-state,
@@ -600,13 +693,60 @@ onMounted(() => {
 }
 
 @media (max-width: 960px) {
-  .ops-grid,
-  .form-grid {
+  .ops-grid {
     grid-template-columns: 1fr;
   }
+}
 
-  .form-wide {
-    grid-column: auto;
+@media (max-width: 1180px) {
+  .schedule-table-wrap {
+    overflow: visible;
+  }
+
+  .schedule-table,
+  .schedule-table thead,
+  .schedule-table tbody,
+  .schedule-table tr,
+  .schedule-table td {
+    display: block;
+    width: 100%;
+  }
+
+  .schedule-table {
+    min-width: 0;
+  }
+
+  .schedule-table thead,
+  .schedule-table colgroup {
+    display: none;
+  }
+
+  .schedule-table tr {
+    padding: var(--space-4) 0;
+    border-bottom: 1px solid var(--border-subtle);
+  }
+
+  .schedule-table tr:last-child {
+    border-bottom: 0;
+  }
+
+  .schedule-table td {
+    display: grid;
+    grid-template-columns: 108px minmax(0, 1fr);
+    gap: var(--space-3);
+    padding: var(--space-2) var(--space-1);
+    border-bottom: 0;
+  }
+
+  .schedule-table td::before {
+    color: var(--text-muted);
+    content: attr(data-label);
+    font-size: var(--text-xs);
+    font-weight: 590;
+  }
+
+  .row-actions {
+    justify-content: flex-start;
   }
 }
 </style>

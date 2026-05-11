@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -40,8 +41,9 @@ use tokio::sync::broadcast;
 use uuid::Uuid;
 
 use crate::scheduled_messages::{
-    next_cron_run, CreateScheduledMessageRequest, CronScheduler, ScheduledMessageDispatcher,
-    ScheduledMessageError, ScheduledMessageSummary,
+    next_cron_run, CreateScheduledMessageRequest, CronScheduler, ScheduledMessageDelivery,
+    ScheduledMessageDispatcher, ScheduledMessageError, ScheduledMessageRunSummary,
+    ScheduledMessageSummary, UpdateScheduledMessageRequest,
 };
 use crate::session::{Session, SessionSummary, ThreadSummary};
 use argus_protocol::ProviderResolver;
@@ -1732,14 +1734,17 @@ impl SessionManager {
                 reason: "scheduled message prompt cannot be empty".to_string(),
             });
         }
-        self.ensure_thread_in_session(request.session_id, &request.thread_id)
-            .await?;
-        let thread_record = self.get_thread_record(&request.thread_id).await?;
-        let agent_id = thread_record
-            .template_id
+        let agent = self
+            .template_manager
+            .get(request.template_id)
+            .await?
             .ok_or_else(|| ArgusError::JobError {
-                reason: "scheduled message thread has no template".to_string(),
+                reason: format!(
+                    "scheduled message template not found: {}",
+                    request.template_id
+                ),
             })?;
+        let agent_id = agent.id;
 
         let cron_expr = normalize_optional_string(request.cron_expr);
         let scheduled_at = normalize_optional_string(request.scheduled_at);
@@ -1770,7 +1775,13 @@ impl SessionManager {
         };
 
         let context = argus_repository::types::ScheduledMessageContext {
-            target_session_id: request.session_id.to_string(),
+            owner_user_id: Some(request.owner_user_id.to_string()),
+            template_id: Some(request.template_id.inner()),
+            provider_id: request.provider_id.map(|id| id.into_inner()),
+            model: normalize_optional_string(request.model),
+            last_session_id: None,
+            last_thread_id: None,
+            run_history: Vec::new(),
             enabled: true,
             timezone: normalize_optional_string(request.timezone),
             last_error: None,
@@ -1791,7 +1802,7 @@ impl SessionManager {
                 }
             })?),
             prompt: prompt.to_string(),
-            thread_id: Some(request.thread_id),
+            thread_id: None,
             group_id: None,
             depends_on: vec![],
             cron_expr,
@@ -1812,41 +1823,285 @@ impl SessionManager {
         scheduled_message_summary(job)
     }
 
-    pub async fn list_scheduled_messages(
+    pub async fn list_scheduled_messages_for_user(
         &self,
-        session_id: SessionId,
-        thread_id: Option<&ThreadId>,
+        user_id: UserId,
     ) -> Result<Vec<ScheduledMessageSummary>> {
-        if let Some(thread_id) = thread_id {
-            self.ensure_thread_in_session(session_id, thread_id).await?;
-        } else {
-            self.load(session_id).await?;
-        }
         let jobs = self
             .job_repository()?
-            .list_cron_jobs(true, thread_id)
+            .list_cron_jobs(true, None)
             .await
             .map_err(|error| ArgusError::DatabaseError {
                 reason: error.to_string(),
             })?;
 
-        jobs.into_iter()
-            .filter_map(|job| match scheduled_message_summary(job) {
-                Ok(summary) if summary.session_id == session_id => Some(Ok(summary)),
-                Ok(_) => None,
-                Err(error) => Some(Err(error)),
-            })
-            .collect()
+        let mut summaries = Vec::new();
+        for job in jobs
+            .into_iter()
+            .filter(|job| scheduled_message_owner_matches(job, user_id))
+        {
+            summaries.push(
+                self.scheduled_message_summary_for_user(user_id, job)
+                    .await?,
+            );
+        }
+        Ok(summaries)
     }
 
-    pub async fn pause_scheduled_message(
+    pub async fn update_scheduled_message_for_user(
         &self,
-        session_id: SessionId,
+        user_id: UserId,
+        job_id: &str,
+        request: UpdateScheduledMessageRequest,
+    ) -> Result<ScheduledMessageSummary> {
+        let repository = self.job_repository()?;
+        let mut job = self
+            .scheduled_message_job_for_user(&repository, user_id, job_id)
+            .await?;
+
+        let prompt = request.prompt.trim();
+        if prompt.is_empty() {
+            return Err(ArgusError::JobError {
+                reason: "scheduled message prompt cannot be empty".to_string(),
+            });
+        }
+        let agent = self
+            .template_manager
+            .get(request.template_id)
+            .await?
+            .ok_or_else(|| ArgusError::JobError {
+                reason: format!(
+                    "scheduled message template not found: {}",
+                    request.template_id
+                ),
+            })?;
+
+        let cron_expr = normalize_optional_string(request.cron_expr);
+        let scheduled_at = normalize_optional_string(request.scheduled_at);
+        match (cron_expr.as_deref(), scheduled_at.as_deref()) {
+            (Some(_), Some(_)) | (None, None) => {
+                return Err(ArgusError::JobError {
+                    reason: "scheduled message requires exactly one of cron_expr or scheduled_at"
+                        .to_string(),
+                });
+            }
+            _ => {}
+        }
+
+        let now = Utc::now();
+        let next_scheduled_at = if let Some(expr) = cron_expr.as_deref() {
+            next_cron_run(expr, request.timezone.as_deref(), now)
+                .map_err(|error| ArgusError::JobError {
+                    reason: error.to_string(),
+                })?
+                .to_rfc3339()
+        } else {
+            chrono::DateTime::parse_from_rfc3339(scheduled_at.as_deref().expect("checked above"))
+                .map_err(|error| ArgusError::JobError {
+                    reason: format!("invalid scheduled_at: {error}"),
+                })?
+                .with_timezone(&Utc)
+                .to_rfc3339()
+        };
+
+        let mut context = job
+            .context
+            .as_deref()
+            .map(serde_json::from_str::<argus_repository::types::ScheduledMessageContext>)
+            .transpose()
+            .map_err(|error| ArgusError::SerdeError {
+                reason: error.to_string(),
+            })?
+            .unwrap_or_else(argus_repository::types::ScheduledMessageContext::new);
+        context.owner_user_id = Some(user_id.to_string());
+        context.template_id = Some(request.template_id.inner());
+        context.provider_id = request.provider_id.map(|id| id.into_inner());
+        context.model = normalize_optional_string(request.model);
+        context.timezone = normalize_optional_string(request.timezone);
+        context.last_error = None;
+
+        job.name = if request.name.trim().is_empty() {
+            "Scheduled message".to_string()
+        } else {
+            request.name.trim().to_string()
+        };
+        job.status = if job.status == argus_repository::types::JobStatus::Paused {
+            argus_repository::types::JobStatus::Paused
+        } else {
+            argus_repository::types::JobStatus::Pending
+        };
+        job.agent_id = agent.id;
+        job.prompt = prompt.to_string();
+        job.cron_expr = cron_expr;
+        job.scheduled_at = Some(next_scheduled_at);
+
+        let context_json =
+            serde_json::to_string(&context).map_err(|error| ArgusError::SerdeError {
+                reason: error.to_string(),
+            })?;
+        let updated = repository
+            .update_cron_definition(&job, Some(&context_json))
+            .await
+            .map_err(|error| ArgusError::DatabaseError {
+                reason: error.to_string(),
+            })?;
+        if !updated {
+            return Err(ArgusError::JobError {
+                reason: format!("scheduled message cannot be edited while running: {job_id}"),
+            });
+        }
+        self.notify_scheduled_messages_changed();
+        let job = repository
+            .get(&job.id)
+            .await
+            .map_err(|error| ArgusError::DatabaseError {
+                reason: error.to_string(),
+            })?;
+        scheduled_message_summary(job.ok_or_else(|| ArgusError::JobError {
+            reason: format!("scheduled message not found: {job_id}"),
+        })?)
+    }
+
+    async fn scheduled_message_session_ids_for_user(
+        &self,
+        user_id: UserId,
+    ) -> Result<HashSet<SessionId>> {
+        let Some(repository) = self.job_repository.clone() else {
+            return Ok(HashSet::new());
+        };
+        let jobs = repository
+            .list_cron_jobs(true, None)
+            .await
+            .map_err(|error| ArgusError::DatabaseError {
+                reason: error.to_string(),
+            })?;
+        let mut session_ids = HashSet::new();
+        let mut schedule_names = HashSet::new();
+        for job in jobs
+            .into_iter()
+            .filter(|job| scheduled_message_owner_matches(job, user_id))
+        {
+            schedule_names.insert(job.name.clone());
+            let Some(context_json) = job.context.as_deref() else {
+                continue;
+            };
+            let Ok(context) = serde_json::from_str::<
+                argus_repository::types::ScheduledMessageContext,
+            >(context_json) else {
+                continue;
+            };
+            if let Some(session_id) = context
+                .last_session_id
+                .as_deref()
+                .and_then(|id| SessionId::parse(id).ok())
+            {
+                session_ids.insert(session_id);
+            }
+            for run in context.run_history {
+                if let Ok(session_id) = SessionId::parse(&run.session_id) {
+                    session_ids.insert(session_id);
+                }
+            }
+        }
+        let sessions = self
+            .session_repo
+            .list_with_counts_for_user(&user_id)
+            .await
+            .map_err(|error| ArgusError::DatabaseError {
+                reason: error.to_string(),
+            })?;
+        for session in sessions {
+            if session.thread_count == 1 && schedule_names.contains(&session.session.name) {
+                session_ids.insert(session.session.id);
+            }
+        }
+        Ok(session_ids)
+    }
+
+    async fn scheduled_message_summary_for_user(
+        &self,
+        user_id: UserId,
+        job: argus_repository::types::JobRecord,
+    ) -> Result<ScheduledMessageSummary> {
+        let job_name = job.name.clone();
+        let mut summary = scheduled_message_summary(job)?;
+        let mut known_session_ids = summary
+            .run_history
+            .iter()
+            .map(|run| run.session_id)
+            .collect::<HashSet<_>>();
+        if let Some(session_id) = summary.last_session_id {
+            known_session_ids.insert(session_id);
+            if let Some(thread_id) = summary.last_thread_id {
+                if !summary
+                    .run_history
+                    .iter()
+                    .any(|run| run.session_id == session_id && run.thread_id == thread_id)
+                {
+                    summary.run_history.push(ScheduledMessageRunSummary {
+                        session_id,
+                        thread_id,
+                        created_at: summary.scheduled_at.clone().unwrap_or_default(),
+                    });
+                }
+            }
+        }
+        summary.run_history.extend(
+            self.legacy_scheduled_message_runs_for_user(user_id, &job_name, &known_session_ids)
+                .await?,
+        );
+        Ok(summary)
+    }
+
+    async fn legacy_scheduled_message_runs_for_user(
+        &self,
+        user_id: UserId,
+        job_name: &str,
+        known_session_ids: &HashSet<SessionId>,
+    ) -> Result<Vec<ScheduledMessageRunSummary>> {
+        let sessions = self
+            .session_repo
+            .list_with_counts_for_user(&user_id)
+            .await
+            .map_err(|error| ArgusError::DatabaseError {
+                reason: error.to_string(),
+            })?;
+        let mut runs = Vec::new();
+        for session in sessions {
+            if session.session.name != job_name
+                || session.thread_count != 1
+                || known_session_ids.contains(&session.session.id)
+            {
+                continue;
+            }
+            let threads = self
+                .thread_repo
+                .list_threads_in_session_for_user(&user_id, &session.session.id)
+                .await
+                .map_err(|error| ArgusError::DatabaseError {
+                    reason: error.to_string(),
+                })?;
+            runs.extend(
+                threads
+                    .into_iter()
+                    .map(|thread| ScheduledMessageRunSummary {
+                        session_id: session.session.id,
+                        thread_id: thread.id,
+                        created_at: thread.created_at,
+                    }),
+            );
+        }
+        Ok(runs)
+    }
+
+    pub async fn pause_scheduled_message_for_user(
+        &self,
+        user_id: UserId,
         job_id: &str,
     ) -> Result<ScheduledMessageSummary> {
         let repository = self.job_repository()?;
         let job = self
-            .scheduled_message_job(&repository, session_id, job_id)
+            .scheduled_message_job_for_user(&repository, user_id, job_id)
             .await?;
         let id = job.id.clone();
         repository
@@ -1867,14 +2122,14 @@ impl SessionManager {
         })?)
     }
 
-    pub async fn delete_scheduled_message(
+    pub async fn delete_scheduled_message_for_user(
         &self,
-        session_id: SessionId,
+        user_id: UserId,
         job_id: &str,
     ) -> Result<bool> {
         let repository = self.job_repository()?;
         let job = self
-            .scheduled_message_job(&repository, session_id, job_id)
+            .scheduled_message_job_for_user(&repository, user_id, job_id)
             .await?;
         let deleted =
             repository
@@ -1889,50 +2144,57 @@ impl SessionManager {
         Ok(deleted)
     }
 
-    pub async fn trigger_scheduled_message_now(
+    pub async fn trigger_scheduled_message_now_for_user(
         &self,
-        session_id: SessionId,
+        user_id: UserId,
         job_id: &str,
-    ) -> Result<bool> {
+    ) -> Result<ScheduledMessageSummary> {
         let repository = self.job_repository()?;
         let job = self
-            .scheduled_message_job(&repository, session_id, job_id)
+            .scheduled_message_job_for_user(&repository, user_id, job_id)
             .await?;
         let now = Utc::now();
-        repository
-            .update_status(
-                &job.id,
-                argus_repository::types::JobStatus::Pending,
-                None,
-                None,
-            )
+        if !repository
+            .trigger_cron_job_now(&job.id, &now.to_rfc3339())
             .await
             .map_err(|error| ArgusError::DatabaseError {
                 reason: error.to_string(),
-            })?;
-        repository
-            .update_scheduled_at(&job.id, &now.to_rfc3339())
-            .await
-            .map_err(|error| ArgusError::DatabaseError {
-                reason: error.to_string(),
-            })?;
+            })?
+        {
+            return scheduled_message_summary(job);
+        }
         if let Some(scheduler) = self.scheduled_message_scheduler() {
-            return scheduler
-                .run_due_once(now)
+            let job = repository
+                .get(&job.id)
                 .await
-                .map(|count| count > 0)
+                .map_err(|error| ArgusError::DatabaseError {
+                    reason: error.to_string(),
+                })?
+                .ok_or_else(|| ArgusError::JobError {
+                    reason: format!("scheduled message not found: {job_id}"),
+                })?;
+            scheduler
+                .run_job_now(job, now)
+                .await
                 .map_err(|error| ArgusError::JobError {
                     reason: error.to_string(),
-                });
+                })?;
+        } else {
+            self.notify_scheduled_messages_changed();
         }
-        self.notify_scheduled_messages_changed();
-        Ok(false)
+        self.list_scheduled_messages_for_user(user_id)
+            .await?
+            .into_iter()
+            .find(|schedule| schedule.id == job_id)
+            .ok_or_else(|| ArgusError::JobError {
+                reason: format!("scheduled message not found: {job_id}"),
+            })
     }
 
-    async fn scheduled_message_job(
+    async fn scheduled_message_job_for_user(
         &self,
         repository: &Arc<dyn JobRepository>,
-        session_id: SessionId,
+        user_id: UserId,
         job_id: &str,
     ) -> Result<argus_repository::types::JobRecord> {
         let job = repository
@@ -1949,25 +2211,9 @@ impl SessionManager {
                 reason: format!("job is not a scheduled message: {job_id}"),
             });
         }
-        let context_json = job.context.as_deref().ok_or_else(|| ArgusError::JobError {
-            reason: format!("scheduled message {} has no context", job.id),
-        })?;
-        let context: argus_repository::types::ScheduledMessageContext =
-            serde_json::from_str(context_json).map_err(|error| ArgusError::SerdeError {
-                reason: error.to_string(),
-            })?;
-        let target_session_id =
-            SessionId::parse(&context.target_session_id).map_err(|error| ArgusError::JobError {
-                reason: format!("invalid scheduled message target session id: {error}"),
-            })?;
-        if target_session_id != session_id {
-            return Err(ArgusError::SessionNotFound(session_id));
+        if !scheduled_message_owner_matches(&job, user_id) {
+            return Err(ArgusError::ThreadNotFound(job_id.to_string()));
         }
-        let thread_id = job.thread_id.ok_or_else(|| ArgusError::JobError {
-            reason: format!("scheduled message {} has no thread", job.id),
-        })?;
-        self.ensure_thread_in_session(session_id, &thread_id)
-            .await?;
         Ok(job)
     }
 
@@ -2130,6 +2376,7 @@ impl SessionManager {
 
     /// List sessions owned by a user (from DB).
     pub async fn list_sessions_for_user(&self, user_id: UserId) -> Result<Vec<SessionSummary>> {
+        let scheduled_session_ids = self.scheduled_message_session_ids_for_user(user_id).await?;
         let sessions = self
             .session_repo
             .list_with_counts_for_user(&user_id)
@@ -2140,6 +2387,7 @@ impl SessionManager {
 
         Ok(sessions
             .into_iter()
+            .filter(|swc| !scheduled_session_ids.contains(&swc.session.id))
             .map(|swc| {
                 let updated_at = chrono::DateTime::parse_from_rfc3339(&swc.session.updated_at)
                     .map(|dt| dt.with_timezone(&chrono::Utc))
@@ -2544,20 +2792,56 @@ fn scheduled_message_summary(
         serde_json::from_str(context_json).map_err(|error| ArgusError::SerdeError {
             reason: error.to_string(),
         })?;
-    let session_id =
-        SessionId::parse(&context.target_session_id).map_err(|error| ArgusError::JobError {
-            reason: format!("invalid scheduled message target session id: {error}"),
+    let template_id = context
+        .template_id
+        .map(AgentId::new)
+        .unwrap_or(job.agent_id);
+    let last_session_id = context
+        .last_session_id
+        .as_deref()
+        .map(SessionId::parse)
+        .transpose()
+        .map_err(|error| ArgusError::JobError {
+            reason: format!("invalid scheduled message last session id: {error}"),
         })?;
-    let thread_id = job.thread_id.ok_or_else(|| ArgusError::JobError {
-        reason: format!("scheduled message {} has no thread", job.id),
-    })?;
+    let last_thread_id = context
+        .last_thread_id
+        .as_deref()
+        .map(ThreadId::parse)
+        .transpose()
+        .map_err(|error| ArgusError::JobError {
+            reason: format!("invalid scheduled message last thread id: {error}"),
+        })?;
+    let run_history = context
+        .run_history
+        .into_iter()
+        .map(|run| {
+            let session_id =
+                SessionId::parse(&run.session_id).map_err(|error| ArgusError::JobError {
+                    reason: format!("invalid scheduled message history session id: {error}"),
+                })?;
+            let thread_id =
+                ThreadId::parse(&run.thread_id).map_err(|error| ArgusError::JobError {
+                    reason: format!("invalid scheduled message history thread id: {error}"),
+                })?;
+            Ok(ScheduledMessageRunSummary {
+                session_id,
+                thread_id,
+                created_at: run.created_at,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
 
     Ok(ScheduledMessageSummary {
         id: job.id.to_string(),
         name: job.name,
         status: job.status,
-        session_id,
-        thread_id,
+        template_id,
+        provider_id: context.provider_id.map(ProviderId::new),
+        model: context.model,
+        last_session_id,
+        last_thread_id,
+        run_history,
         prompt: job.prompt,
         cron_expr: job.cron_expr,
         scheduled_at: job.scheduled_at,
@@ -2566,17 +2850,78 @@ fn scheduled_message_summary(
     })
 }
 
+fn scheduled_message_owner_matches(
+    job: &argus_repository::types::JobRecord,
+    user_id: UserId,
+) -> bool {
+    let Some(context_json) = job.context.as_deref() else {
+        return false;
+    };
+    let Ok(context) =
+        serde_json::from_str::<argus_repository::types::ScheduledMessageContext>(context_json)
+    else {
+        return false;
+    };
+    context.owner_user_id.as_deref() == Some(&user_id.to_string())
+}
+
 #[async_trait]
 impl ScheduledMessageDispatcher for SessionManager {
     async fn deliver_scheduled_message(
         &self,
-        session_id: SessionId,
-        thread_id: ThreadId,
+        name: String,
+        owner_user_id: UserId,
+        template_id: AgentId,
+        provider_id: Option<ProviderId>,
+        model: Option<String>,
         prompt: String,
-    ) -> std::result::Result<(), ScheduledMessageError> {
-        self.send_message(session_id, &thread_id, prompt)
+    ) -> std::result::Result<ScheduledMessageDelivery, ScheduledMessageError> {
+        let session_id = self
+            .create_for_user(owner_user_id, name)
             .await
-            .map_err(|error| ScheduledMessageError::Dispatch(error.to_string()))
+            .map_err(|error| ScheduledMessageError::Dispatch(error.to_string()))?;
+        let thread_id = match self
+            .create_thread_for_user(
+                owner_user_id,
+                session_id,
+                template_id,
+                provider_id,
+                model.as_deref(),
+            )
+            .await
+        {
+            Ok(thread_id) => thread_id,
+            Err(error) => {
+                cleanup_failed_scheduled_session(self, owner_user_id, session_id).await;
+                return Err(ScheduledMessageError::Dispatch(error.to_string()));
+            }
+        };
+        if let Err(error) = self
+            .send_message_for_user(owner_user_id, session_id, &thread_id, prompt)
+            .await
+        {
+            cleanup_failed_scheduled_session(self, owner_user_id, session_id).await;
+            return Err(ScheduledMessageError::Dispatch(error.to_string()));
+        }
+        Ok(ScheduledMessageDelivery {
+            session_id,
+            thread_id,
+        })
+    }
+}
+
+async fn cleanup_failed_scheduled_session(
+    manager: &SessionManager,
+    owner_user_id: UserId,
+    session_id: SessionId,
+) {
+    if let Err(error) = manager.delete_for_user(owner_user_id, session_id).await {
+        tracing::warn!(
+            user_id = %owner_user_id,
+            session_id = %session_id,
+            error = %error,
+            "Failed to clean up session after scheduled message dispatch failure"
+        );
     }
 }
 
@@ -2659,7 +3004,9 @@ mod tests {
         recover_messages_from_trace, recover_thread_state_from_trace, SessionManager,
         SessionSchedulerBackend,
     };
-    use crate::scheduled_messages::CreateScheduledMessageRequest;
+    use crate::scheduled_messages::{
+        CreateScheduledMessageRequest, ScheduledMessageDispatcher, ScheduledMessageError,
+    };
     use argus_agent::history::{TurnRecord, TurnRecordKind};
     use argus_agent::thread_trace_store::{
         chat_thread_base_dir, persist_thread_metadata, ThreadTraceKind, ThreadTraceMetadata,
@@ -2675,14 +3022,14 @@ mod tests {
     use argus_protocol::{
         AgentId, AgentRecord, MailboxMessage, MailboxMessageType, McpToolResolver, ProviderId,
         ResolvedMcpTools, SessionId, ThinkingConfig, ThreadEvent, ThreadId, ThreadJobResult,
-        ThreadRuntimeStatus, TokenUsage, ToolError,
+        ThreadRuntimeStatus, TokenUsage, ToolError, UserId,
     };
     use argus_repository::migrate;
     use argus_repository::traits::JobRepository;
     use argus_repository::traits::{AgentRepository, SessionRepository, ThreadRepository};
     use argus_repository::types::{
         AgentId as RepoAgentId, JobId, JobRecord, JobResult, JobStatus, JobType,
-        ScheduledMessageContext,
+        ScheduledMessageContext, ScheduledMessageRunContext,
     };
     use argus_repository::ArgusSqlite;
     use argus_template::TemplateManager;
@@ -3027,8 +3374,10 @@ mod tests {
         let error = harness
             .manager
             .create_scheduled_message(CreateScheduledMessageRequest {
-                session_id: harness.session_id,
-                thread_id: harness.thread_id,
+                owner_user_id: UserId::new(),
+                template_id: harness.agent_id,
+                provider_id: Some(ProviderId::new(1)),
+                model: None,
                 name: "empty".to_string(),
                 prompt: "   ".to_string(),
                 cron_expr: Some("0 9 * * *".to_string()),
@@ -3042,17 +3391,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_scheduled_message_persists_target_session_context() {
+    async fn create_scheduled_message_persists_owner_and_agent_context_without_thread() {
         let harness = test_session_manager_harness_with_provider(Arc::new(FixedProvider {
             model_name: "routing-test".to_string(),
         }))
         .await;
+        let owner_user_id = UserId::new();
 
         let created = harness
             .manager
             .create_scheduled_message(CreateScheduledMessageRequest {
-                session_id: harness.session_id,
-                thread_id: harness.thread_id,
+                owner_user_id,
+                template_id: harness.agent_id,
+                provider_id: Some(ProviderId::new(1)),
+                model: Some("routing-test".to_string()),
                 name: "Daily check".to_string(),
                 prompt: "Run daily check".to_string(),
                 cron_expr: Some("0 9 * * *".to_string()),
@@ -3067,11 +3419,296 @@ mod tests {
             .expect("job should load")
             .expect("job should exist");
         assert_eq!(stored.job_type, JobType::Cron);
-        assert_eq!(stored.thread_id, Some(harness.thread_id));
+        assert_eq!(stored.thread_id, None);
         let context: ScheduledMessageContext =
             serde_json::from_str(stored.context.as_deref().unwrap()).unwrap();
-        assert_eq!(context.target_session_id, harness.session_id.to_string());
+        assert_eq!(context.owner_user_id, Some(owner_user_id.to_string()));
+        assert_eq!(context.template_id, Some(harness.agent_id.inner()));
+        assert_eq!(context.provider_id, Some(1));
+        assert_eq!(context.model.as_deref(), Some("routing-test"));
         assert_eq!(context.timezone.as_deref(), Some("Asia/Shanghai"));
+    }
+
+    #[tokio::test]
+    async fn failed_scheduled_dispatch_cleans_up_auto_created_session() {
+        let harness = test_session_manager_harness_with_provider(Arc::new(FixedProvider {
+            model_name: "routing-test".to_string(),
+        }))
+        .await;
+        let owner_user_id = UserId::new();
+        let before_count = harness
+            .manager
+            .list_sessions_for_user(owner_user_id)
+            .await
+            .expect("initial sessions should list")
+            .len();
+
+        let error = ScheduledMessageDispatcher::deliver_scheduled_message(
+            &harness.manager,
+            "Broken schedule".to_string(),
+            owner_user_id,
+            AgentId::new(404),
+            Some(ProviderId::new(1)),
+            None,
+            "Run broken task".to_string(),
+        )
+        .await
+        .expect_err("missing template should fail dispatch");
+
+        assert!(matches!(error, ScheduledMessageError::Dispatch(_)));
+        let sessions = harness
+            .manager
+            .list_sessions_for_user(owner_user_id)
+            .await
+            .expect("sessions should list");
+        assert_eq!(sessions.len(), before_count);
+        assert!(!sessions
+            .iter()
+            .any(|session| session.name == "Broken schedule"));
+    }
+
+    #[tokio::test]
+    async fn trigger_scheduled_message_does_not_reset_running_job() {
+        let harness = test_session_manager_harness_with_provider(Arc::new(FixedProvider {
+            model_name: "routing-test".to_string(),
+        }))
+        .await;
+        let owner_user_id = UserId::new();
+        let created = harness
+            .manager
+            .create_scheduled_message(CreateScheduledMessageRequest {
+                owner_user_id,
+                template_id: harness.agent_id,
+                provider_id: Some(ProviderId::new(1)),
+                model: Some("routing-test".to_string()),
+                name: "Already running".to_string(),
+                prompt: "Run once".to_string(),
+                cron_expr: Some("0 9 * * *".to_string()),
+                scheduled_at: None,
+                timezone: Some("Asia/Shanghai".to_string()),
+            })
+            .await
+            .expect("scheduled message should create");
+        let job_id = JobId::new(created.id.clone());
+        JobRepository::update_status(
+            &*harness.sqlite,
+            &job_id,
+            JobStatus::Running,
+            Some("2026-05-08T01:00:00Z"),
+            None,
+        )
+        .await
+        .expect("job should be marked running");
+        let before_count = harness
+            .manager
+            .list_sessions_for_user(owner_user_id)
+            .await
+            .expect("sessions should list")
+            .len();
+
+        let summary = harness
+            .manager
+            .trigger_scheduled_message_now_for_user(owner_user_id, job_id.as_ref())
+            .await
+            .expect("running scheduled message should return current summary");
+
+        assert_eq!(summary.status, JobStatus::Running);
+        assert_eq!(summary.last_session_id, None);
+        assert_eq!(summary.last_thread_id, None);
+        let sessions = harness
+            .manager
+            .list_sessions_for_user(owner_user_id)
+            .await
+            .expect("sessions should list");
+        assert_eq!(sessions.len(), before_count);
+    }
+
+    #[tokio::test]
+    async fn scheduler_history_sessions_do_not_pollute_chat_sessions() {
+        let harness = test_session_manager_harness_with_provider(Arc::new(FixedProvider {
+            model_name: "routing-test".to_string(),
+        }))
+        .await;
+        let owner_user_id = UserId::new();
+        let before_sessions = harness
+            .manager
+            .list_sessions_for_user(owner_user_id)
+            .await
+            .expect("sessions should list");
+        let session_id = harness
+            .manager
+            .create_for_user(owner_user_id, "Scheduled history".to_string())
+            .await
+            .expect("scheduler session should create");
+        let thread_id = harness
+            .manager
+            .create_thread_for_user(
+                owner_user_id,
+                session_id,
+                harness.agent_id,
+                Some(ProviderId::new(1)),
+                Some("routing-test"),
+            )
+            .await
+            .expect("scheduler thread should create");
+        let context = ScheduledMessageContext {
+            owner_user_id: Some(owner_user_id.to_string()),
+            template_id: Some(harness.agent_id.inner()),
+            provider_id: Some(1),
+            model: Some("routing-test".to_string()),
+            last_session_id: Some(session_id.to_string()),
+            last_thread_id: Some(thread_id.to_string()),
+            run_history: vec![ScheduledMessageRunContext {
+                session_id: session_id.to_string(),
+                thread_id: thread_id.to_string(),
+                created_at: "2026-05-09T01:00:00Z".to_string(),
+            }],
+            enabled: true,
+            timezone: Some("Asia/Shanghai".to_string()),
+            last_error: None,
+        };
+        JobRepository::create(
+            &*harness.sqlite,
+            &JobRecord {
+                id: JobId::new("scheduled-history-job"),
+                job_type: JobType::Cron,
+                name: "Scheduled history".to_string(),
+                status: JobStatus::Pending,
+                agent_id: harness.agent_id,
+                context: Some(serde_json::to_string(&context).unwrap()),
+                prompt: "Run history check".to_string(),
+                thread_id: None,
+                group_id: None,
+                depends_on: vec![],
+                cron_expr: Some("0 9 * * *".to_string()),
+                scheduled_at: Some("2026-05-10T01:00:00Z".to_string()),
+                started_at: None,
+                finished_at: None,
+                parent_job_id: None,
+                result: None,
+            },
+        )
+        .await
+        .expect("scheduled job should persist");
+
+        let chat_sessions = harness
+            .manager
+            .list_sessions_for_user(owner_user_id)
+            .await
+            .expect("chat sessions should list");
+        assert_eq!(chat_sessions.len(), before_sessions.len());
+        assert!(!chat_sessions.iter().any(|session| session.id == session_id));
+
+        let threads = harness
+            .manager
+            .list_threads_for_user(owner_user_id, session_id)
+            .await
+            .expect("scheduler history session should remain directly readable");
+        assert!(threads.iter().any(|thread| thread.id == thread_id));
+    }
+
+    #[tokio::test]
+    async fn legacy_scheduler_named_sessions_are_owned_by_scheduler_history() {
+        let harness = test_session_manager_harness_with_provider(Arc::new(FixedProvider {
+            model_name: "routing-test".to_string(),
+        }))
+        .await;
+        let owner_user_id = UserId::new();
+        let legacy_session_id = harness
+            .manager
+            .create_for_user(owner_user_id, "Daily schedule".to_string())
+            .await
+            .expect("legacy scheduler session should create");
+        let legacy_thread_id = harness
+            .manager
+            .create_thread_for_user(
+                owner_user_id,
+                legacy_session_id,
+                harness.agent_id,
+                Some(ProviderId::new(1)),
+                Some("routing-test"),
+            )
+            .await
+            .expect("legacy scheduler thread should create");
+        let created = harness
+            .manager
+            .create_scheduled_message(CreateScheduledMessageRequest {
+                owner_user_id,
+                template_id: harness.agent_id,
+                provider_id: Some(ProviderId::new(1)),
+                model: Some("routing-test".to_string()),
+                name: "Daily schedule".to_string(),
+                prompt: "Run daily schedule".to_string(),
+                cron_expr: Some("0 9 * * *".to_string()),
+                scheduled_at: None,
+                timezone: Some("Asia/Shanghai".to_string()),
+            })
+            .await
+            .expect("scheduled message should create");
+
+        let schedules = harness
+            .manager
+            .list_scheduled_messages_for_user(owner_user_id)
+            .await
+            .expect("scheduled messages should list");
+        let summary = schedules
+            .into_iter()
+            .find(|schedule| schedule.id == created.id)
+            .expect("created schedule should be listed");
+        assert!(summary.run_history.iter().any(|run| {
+            run.session_id == legacy_session_id && run.thread_id == legacy_thread_id
+        }));
+
+        let chat_sessions = harness
+            .manager
+            .list_sessions_for_user(owner_user_id)
+            .await
+            .expect("chat sessions should list");
+        assert!(!chat_sessions
+            .iter()
+            .any(|session| session.id == legacy_session_id));
+    }
+
+    #[tokio::test]
+    async fn pause_scheduled_message_rejects_non_cron_job_before_mutating() {
+        let harness = test_session_manager_harness_with_provider(Arc::new(FixedProvider {
+            model_name: "routing-test".to_string(),
+        }))
+        .await;
+        let job = JobRecord {
+            id: JobId::new("standalone-job"),
+            job_type: JobType::Standalone,
+            name: "Standalone".to_string(),
+            status: JobStatus::Pending,
+            agent_id: harness.agent_id,
+            context: None,
+            prompt: "Run".to_string(),
+            thread_id: Some(harness.thread_id),
+            group_id: None,
+            depends_on: vec![],
+            cron_expr: None,
+            scheduled_at: None,
+            started_at: None,
+            finished_at: None,
+            parent_job_id: None,
+            result: None,
+        };
+        JobRepository::create(&*harness.sqlite, &job)
+            .await
+            .expect("standalone job should insert");
+
+        let error = harness
+            .manager
+            .pause_scheduled_message_for_user(UserId::new(), job.id.as_ref())
+            .await
+            .expect_err("non-cron job should be rejected");
+
+        assert!(error.to_string().contains("not a scheduled message"));
+        let stored = JobRepository::get(&*harness.sqlite, &job.id)
+            .await
+            .expect("job should load")
+            .expect("job should exist");
+        assert_eq!(stored.status, JobStatus::Pending);
     }
 
     #[tokio::test]

@@ -63,7 +63,7 @@ describe("AdminLayout", () => {
     expect(wrapper.text()).toContain("模型提供方");
     expect(wrapper.text()).toContain("智能体模板");
     expect(wrapper.text()).toContain("工具注册表");
-    expect(wrapper.text()).toContain("Scheduler");
+    expect(wrapper.text()).toContain("定时任务");
     expect(wrapper.text()).toContain("Agent Runs");
     expect(wrapper.text()).toContain("对话");
     expect(wrapper.find(".topbar").exists()).toBe(false);

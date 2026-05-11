@@ -177,6 +177,7 @@ async function chooseAgent(wrapper: ReturnType<typeof mount>, templateId: number
 afterEach(() => {
   resetApiClient();
   document.body.innerHTML = "";
+  window.history.replaceState({}, "", "/");
 });
 
 describe("ChatPage", () => {
@@ -606,6 +607,31 @@ describe("ChatPage", () => {
     expect(source).toContain("background: var(--danger-bg);");
     expect(source).toContain("border: 1px solid var(--danger-border);");
     expect(source).not.toContain("var(--status-danger");
+  });
+
+  it("opens an explicit scheduler-created thread even when it is hidden from chat history", async () => {
+    window.history.replaceState({}, "", "/chat?session_id=scheduler-session&thread_id=scheduler-thread");
+    const listChatThreads = vi.fn().mockResolvedValue([
+      thread({ id: "scheduler-thread", title: "Scheduler run" }),
+    ]);
+    const listChatMessages = vi.fn().mockResolvedValue([
+      message("user", "scheduled prompt"),
+      message("assistant", "scheduled result"),
+    ]);
+    setApiClient(
+      makeApiClient({
+        listChatSessions: vi.fn().mockResolvedValue([]),
+        listChatThreads,
+        listChatMessages,
+      }),
+    );
+
+    const wrapper = mount(ChatPage);
+    await flushPromises();
+
+    expect(listChatThreads).toHaveBeenCalledWith("scheduler-session");
+    expect(listChatMessages).toHaveBeenCalledWith("scheduler-session", "scheduler-thread");
+    expect(wrapper.text()).toContain("scheduled result");
   });
 
   it("switches to the selected session thread from history and refreshes its messages", async () => {

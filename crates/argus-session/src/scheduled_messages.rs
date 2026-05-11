@@ -3,10 +3,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use argus_protocol::{SessionId, ThreadId};
+use argus_protocol::{AgentId, ProviderId, SessionId, ThreadId, UserId};
 use argus_repository::error::DbError;
 use argus_repository::traits::JobRepository;
-use argus_repository::types::{JobId, JobRecord, JobStatus, ScheduledMessageContext};
+use argus_repository::types::{
+    JobId, JobRecord, JobStatus, ScheduledMessageContext, ScheduledMessageRunContext,
+};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
@@ -42,8 +44,22 @@ pub enum ScheduledMessageError {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateScheduledMessageRequest {
-    pub session_id: SessionId,
-    pub thread_id: ThreadId,
+    pub owner_user_id: UserId,
+    pub template_id: AgentId,
+    pub provider_id: Option<ProviderId>,
+    pub model: Option<String>,
+    pub name: String,
+    pub prompt: String,
+    pub cron_expr: Option<String>,
+    pub scheduled_at: Option<String>,
+    pub timezone: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateScheduledMessageRequest {
+    pub template_id: AgentId,
+    pub provider_id: Option<ProviderId>,
+    pub model: Option<String>,
     pub name: String,
     pub prompt: String,
     pub cron_expr: Option<String>,
@@ -56,13 +72,24 @@ pub struct ScheduledMessageSummary {
     pub id: String,
     pub name: String,
     pub status: JobStatus,
-    pub session_id: SessionId,
-    pub thread_id: ThreadId,
+    pub template_id: AgentId,
+    pub provider_id: Option<ProviderId>,
+    pub model: Option<String>,
+    pub last_session_id: Option<SessionId>,
+    pub last_thread_id: Option<ThreadId>,
+    pub run_history: Vec<ScheduledMessageRunSummary>,
     pub prompt: String,
     pub cron_expr: Option<String>,
     pub scheduled_at: Option<String>,
     pub timezone: Option<String>,
     pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScheduledMessageRunSummary {
+    pub session_id: SessionId,
+    pub thread_id: ThreadId,
+    pub created_at: String,
 }
 
 impl From<DbError> for ScheduledMessageError {
@@ -108,14 +135,23 @@ fn next_run_error(error: CronError) -> ScheduledMessageError {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScheduledMessageDelivery {
+    pub session_id: SessionId,
+    pub thread_id: ThreadId,
+}
+
 #[async_trait]
 pub trait ScheduledMessageDispatcher: Send + Sync {
     async fn deliver_scheduled_message(
         &self,
-        session_id: SessionId,
-        thread_id: ThreadId,
+        name: String,
+        owner_user_id: UserId,
+        template_id: AgentId,
+        provider_id: Option<ProviderId>,
+        model: Option<String>,
         prompt: String,
-    ) -> Result<(), ScheduledMessageError>;
+    ) -> Result<ScheduledMessageDelivery, ScheduledMessageError>;
 }
 
 pub struct CronScheduler {
@@ -193,6 +229,14 @@ impl CronScheduler {
         Ok(delivered)
     }
 
+    pub async fn run_job_now(
+        &self,
+        job: JobRecord,
+        now: DateTime<Utc>,
+    ) -> Result<bool, ScheduledMessageError> {
+        self.run_one_due_job(job, now).await
+    }
+
     async fn run_one_due_job(
         &self,
         job: JobRecord,
@@ -214,40 +258,65 @@ impl CronScheduler {
                 return Ok(false);
             }
             Err(error) => {
-                let fallback = context_with_error("", error.to_string());
+                let fallback = context_with_error(error.to_string());
                 self.pause_job(&job.id, &fallback, now).await?;
                 return Ok(false);
             }
         };
 
-        let session_id = match SessionId::parse(&context.target_session_id) {
-            Ok(session_id) => session_id,
-            Err(error) => {
-                context.last_error = Some(format!("invalid target session id: {error}"));
+        let owner_user_id = match context.owner_user_id.as_deref().map(UserId::parse) {
+            Some(Ok(user_id)) => user_id,
+            Some(Err(error)) => {
+                context.last_error = Some(format!("invalid owner user id: {error}"));
+                self.pause_job(&job.id, &context, now).await?;
+                return Ok(false);
+            }
+            None => {
+                context.last_error = Some("scheduled message has no owner user".to_string());
                 self.pause_job(&job.id, &context, now).await?;
                 return Ok(false);
             }
         };
-
-        let Some(thread_id) = job.thread_id else {
-            context.last_error = Some(ScheduledMessageError::MissingThread.to_string());
-            self.pause_job(&job.id, &context, now).await?;
-            return Ok(false);
+        let template_id = match context.template_id {
+            Some(template_id) => AgentId::new(template_id),
+            None => {
+                context.last_error = Some("scheduled message has no template".to_string());
+                self.pause_job(&job.id, &context, now).await?;
+                return Ok(false);
+            }
         };
+        let provider_id = context.provider_id.map(ProviderId::new);
 
-        if let Err(error) = self
+        let delivery = match self
             .dispatcher
-            .deliver_scheduled_message(session_id, thread_id, job.prompt)
+            .deliver_scheduled_message(
+                job.name.clone(),
+                owner_user_id,
+                template_id,
+                provider_id,
+                context.model.clone(),
+                job.prompt,
+            )
             .await
         {
-            context.last_error = Some(error.to_string());
-            self.update_job(&job.id, JobStatus::Failed, None, Utc::now(), &context)
-                .await?;
-            return Err(error);
-        }
+            Ok(delivery) => delivery,
+            Err(error) => {
+                context.last_error = Some(error.to_string());
+                self.update_job(&job.id, JobStatus::Failed, None, Utc::now(), &context)
+                    .await?;
+                return Err(error);
+            }
+        };
 
         let completed_at = Utc::now();
         context.last_error = None;
+        context.last_session_id = Some(delivery.session_id.to_string());
+        context.last_thread_id = Some(delivery.thread_id.to_string());
+        context.run_history.push(ScheduledMessageRunContext {
+            session_id: delivery.session_id.to_string(),
+            thread_id: delivery.thread_id.to_string(),
+            created_at: completed_at.to_rfc3339(),
+        });
         let next_scheduled_at = match job.cron_expr.as_deref() {
             Some(expr) if !expr.trim().is_empty() => {
                 match next_cron_run(expr, context.timezone.as_deref(), completed_at) {
@@ -300,7 +369,8 @@ impl CronScheduler {
     ) -> Result<(), ScheduledMessageError> {
         let context_json = serde_json::to_string(context)
             .map_err(|error| ScheduledMessageError::InvalidContext(error.to_string()))?;
-        self.job_repository
+        let updated = self
+            .job_repository
             .update_cron_after_run(
                 id,
                 status,
@@ -309,6 +379,13 @@ impl CronScheduler {
                 Some(&context_json),
             )
             .await?;
+        if !updated {
+            tracing::info!(
+                job_id = %id,
+                status = %status,
+                "Skipped scheduled message completion update because job is no longer running"
+            );
+        }
         Ok(())
     }
 }
@@ -322,11 +399,8 @@ fn parse_context(job: &JobRecord) -> Result<ScheduledMessageContext, ScheduledMe
         .map_err(|error| ScheduledMessageError::InvalidContext(error.to_string()))
 }
 
-fn context_with_error(
-    target_session_id: impl Into<String>,
-    error: String,
-) -> ScheduledMessageContext {
-    let mut context = ScheduledMessageContext::new(target_session_id);
+fn context_with_error(error: String) -> ScheduledMessageContext {
+    let mut context = ScheduledMessageContext::new();
     context.enabled = false;
     context.last_error = Some(error);
     context
@@ -382,29 +456,60 @@ mod tests {
 mod scheduler_tests {
     use std::sync::Mutex;
 
-    use argus_protocol::AgentId;
+    use argus_protocol::{AgentId, ProviderId, UserId};
     use argus_repository::types::{JobRecord, JobResult, JobType};
 
     use super::*;
 
+    type RecordedDelivery = (
+        String,
+        UserId,
+        AgentId,
+        Option<ProviderId>,
+        Option<String>,
+        String,
+    );
+
     #[derive(Default)]
     struct RecordingDispatcher {
-        messages: Mutex<Vec<(SessionId, ThreadId, String)>>,
+        messages: Mutex<Vec<RecordedDelivery>>,
+        next_session_id: Mutex<Option<SessionId>>,
+        next_thread_id: Mutex<Option<ThreadId>>,
     }
 
     #[async_trait]
     impl ScheduledMessageDispatcher for RecordingDispatcher {
         async fn deliver_scheduled_message(
             &self,
-            session_id: SessionId,
-            thread_id: ThreadId,
+            name: String,
+            owner_user_id: UserId,
+            template_id: AgentId,
+            provider_id: Option<ProviderId>,
+            model: Option<String>,
             prompt: String,
-        ) -> Result<(), ScheduledMessageError> {
-            self.messages
-                .lock()
-                .unwrap()
-                .push((session_id, thread_id, prompt));
-            Ok(())
+        ) -> Result<ScheduledMessageDelivery, ScheduledMessageError> {
+            self.messages.lock().unwrap().push((
+                name,
+                owner_user_id,
+                template_id,
+                provider_id,
+                model,
+                prompt,
+            ));
+            Ok(ScheduledMessageDelivery {
+                session_id: self
+                    .next_session_id
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .unwrap_or_default(),
+                thread_id: self
+                    .next_thread_id
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .unwrap_or_default(),
+            })
         }
     }
 
@@ -479,14 +584,22 @@ mod scheduler_tests {
             scheduled_at: Option<&str>,
             _finished_at: &str,
             context: Option<&str>,
-        ) -> Result<(), DbError> {
+        ) -> Result<bool, DbError> {
             self.updates.lock().unwrap().push(CronUpdate {
                 id: id.clone(),
                 status,
                 scheduled_at: scheduled_at.map(str::to_string),
                 context: context.map(str::to_string),
             });
-            Ok(())
+            Ok(true)
+        }
+
+        async fn update_cron_definition(
+            &self,
+            _job: &JobRecord,
+            _context: Option<&str>,
+        ) -> Result<bool, DbError> {
+            unimplemented!("not needed by scheduler tests")
         }
 
         async fn list_cron_jobs(
@@ -497,7 +610,7 @@ mod scheduler_tests {
             unimplemented!("not needed by scheduler tests")
         }
 
-        async fn update_scheduled_at(&self, _id: &JobId, _next: &str) -> Result<(), DbError> {
+        async fn trigger_cron_job_now(&self, _id: &JobId, _next: &str) -> Result<bool, DbError> {
             unimplemented!("not needed by scheduler tests")
         }
 
@@ -512,18 +625,23 @@ mod scheduler_tests {
 
     #[tokio::test]
     async fn run_due_once_delivers_user_input_and_advances_recurring_job() {
+        let owner_user_id = UserId::new();
         let session_id = SessionId::new();
         let thread_id = ThreadId::new();
         let now = DateTime::parse_from_rfc3339("2026-05-07T00:00:00Z")
             .unwrap()
             .with_timezone(&Utc);
-        let job = scheduled_job("cron-deliver", session_id, thread_id);
+        let job = scheduled_job("cron-deliver", owner_user_id);
         let repo = Arc::new(FakeJobRepository {
             due_jobs: Mutex::new(vec![job]),
             claimed: Mutex::default(),
             updates: Mutex::default(),
         });
-        let dispatcher = Arc::new(RecordingDispatcher::default());
+        let dispatcher = Arc::new(RecordingDispatcher {
+            messages: Mutex::default(),
+            next_session_id: Mutex::new(Some(session_id)),
+            next_thread_id: Mutex::new(Some(thread_id)),
+        });
         let scheduler = CronScheduler::new(repo.clone(), dispatcher.clone());
 
         let delivered = scheduler.run_due_once(now).await.unwrap();
@@ -531,7 +649,14 @@ mod scheduler_tests {
         assert_eq!(delivered, 1);
         assert_eq!(
             dispatcher.messages.lock().unwrap().as_slice(),
-            &[(session_id, thread_id, "Wake up".to_string())]
+            &[(
+                "Scheduled wake up".to_string(),
+                owner_user_id,
+                AgentId::new(1),
+                Some(ProviderId::new(2)),
+                Some("alpha".to_string()),
+                "Wake up".to_string()
+            )]
         );
         let updates = repo.updates.lock().unwrap();
         assert_eq!(updates.len(), 1);
@@ -551,13 +676,24 @@ mod scheduler_tests {
         );
         let context: ScheduledMessageContext =
             serde_json::from_str(updates[0].context.as_deref().unwrap()).unwrap();
-        assert_eq!(context.target_session_id, session_id.to_string());
+        assert_eq!(context.owner_user_id, Some(owner_user_id.to_string()));
+        assert_eq!(context.last_session_id, Some(session_id.to_string()));
+        assert_eq!(context.last_thread_id, Some(thread_id.to_string()));
+        assert_eq!(context.run_history.len(), 1);
+        assert_eq!(context.run_history[0].session_id, session_id.to_string());
+        assert_eq!(context.run_history[0].thread_id, thread_id.to_string());
         assert_eq!(context.last_error, None);
     }
 
-    fn scheduled_job(id: &str, session_id: SessionId, thread_id: ThreadId) -> JobRecord {
+    fn scheduled_job(id: &str, owner_user_id: UserId) -> JobRecord {
         let context = ScheduledMessageContext {
-            target_session_id: session_id.to_string(),
+            owner_user_id: Some(owner_user_id.to_string()),
+            template_id: Some(1),
+            provider_id: Some(2),
+            model: Some("alpha".to_string()),
+            last_session_id: None,
+            last_thread_id: None,
+            run_history: Vec::new(),
             enabled: true,
             timezone: Some("Asia/Shanghai".to_string()),
             last_error: Some("old error".to_string()),
@@ -570,7 +706,7 @@ mod scheduler_tests {
             agent_id: AgentId::new(1),
             context: Some(serde_json::to_string(&context).unwrap()),
             prompt: "Wake up".to_string(),
-            thread_id: Some(thread_id),
+            thread_id: None,
             group_id: None,
             depends_on: vec![],
             cron_expr: Some("0 9 * * *".to_string()),

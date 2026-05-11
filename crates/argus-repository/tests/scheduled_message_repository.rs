@@ -42,7 +42,7 @@ fn cron_job(id: &str, status: JobStatus, thread_id: Option<ThreadId>) -> JobReco
         status,
         agent_id: AgentId::new(1),
         context: Some(
-            serde_json::to_string(&ScheduledMessageContext::new("session-1"))
+            serde_json::to_string(&ScheduledMessageContext::new())
                 .expect("context should serialize"),
         ),
         prompt: "Send the scheduled message".to_string(),
@@ -116,7 +116,13 @@ async fn update_cron_after_run_updates_next_schedule_and_context() {
     let repo = repository().await;
     let job = cron_job("cron-update", JobStatus::Pending, None);
     let next_context = serde_json::to_string(&ScheduledMessageContext {
-        target_session_id: "session-1".to_string(),
+        owner_user_id: Some("user-1".to_string()),
+        template_id: Some(1),
+        provider_id: Some(2),
+        model: Some("alpha".to_string()),
+        last_session_id: None,
+        last_thread_id: None,
+        run_history: Vec::new(),
         enabled: true,
         timezone: Some("Asia/Shanghai".to_string()),
         last_error: None,
@@ -126,16 +132,23 @@ async fn update_cron_after_run_updates_next_schedule_and_context() {
     JobRepository::create(&repo, &job)
         .await
         .expect("cron should insert");
-    JobRepository::update_cron_after_run(
-        &repo,
-        &job.id,
-        JobStatus::Pending,
-        Some("2026-05-08T02:00:00Z"),
-        "2026-05-08T01:00:30Z",
-        Some(&next_context),
-    )
-    .await
-    .expect("cron should update after run");
+    assert!(
+        JobRepository::claim_cron_job(&repo, &job.id, "2026-05-08T01:00:01Z")
+            .await
+            .expect("cron should claim")
+    );
+    assert!(
+        JobRepository::update_cron_after_run(
+            &repo,
+            &job.id,
+            JobStatus::Pending,
+            Some("2026-05-08T02:00:00Z"),
+            "2026-05-08T01:00:30Z",
+            Some(&next_context),
+        )
+        .await
+        .expect("cron should update after run")
+    );
 
     let stored = JobRepository::get(&repo, &job.id)
         .await
@@ -155,16 +168,23 @@ async fn update_cron_after_run_preserves_schedule_when_next_schedule_absent() {
     JobRepository::create(&repo, &job)
         .await
         .expect("cron should insert");
-    JobRepository::update_cron_after_run(
-        &repo,
-        &job.id,
-        JobStatus::Failed,
-        None,
-        "2026-05-08T01:00:30Z",
-        None,
-    )
-    .await
-    .expect("cron should update after run");
+    assert!(
+        JobRepository::claim_cron_job(&repo, &job.id, "2026-05-08T01:00:01Z")
+            .await
+            .expect("cron should claim")
+    );
+    assert!(
+        JobRepository::update_cron_after_run(
+            &repo,
+            &job.id,
+            JobStatus::Failed,
+            None,
+            "2026-05-08T01:00:30Z",
+            None,
+        )
+        .await
+        .expect("cron should update after run")
+    );
 
     let stored = JobRepository::get(&repo, &job.id)
         .await
@@ -173,6 +193,72 @@ async fn update_cron_after_run_preserves_schedule_when_next_schedule_absent() {
     assert_eq!(stored.status, JobStatus::Failed);
     assert_eq!(stored.scheduled_at, job.scheduled_at);
     assert_eq!(stored.context, job.context);
+}
+
+#[tokio::test]
+async fn update_cron_after_run_does_not_override_paused_job() {
+    let repo = repository().await;
+    let job = cron_job("cron-paused-during-run", JobStatus::Pending, None);
+
+    JobRepository::create(&repo, &job)
+        .await
+        .expect("cron should insert");
+    assert!(
+        JobRepository::claim_cron_job(&repo, &job.id, "2026-05-08T01:00:01Z")
+            .await
+            .expect("cron should claim")
+    );
+    JobRepository::update_status(&repo, &job.id, JobStatus::Paused, None, None)
+        .await
+        .expect("cron should pause");
+
+    assert!(
+        !JobRepository::update_cron_after_run(
+            &repo,
+            &job.id,
+            JobStatus::Pending,
+            Some("2026-05-08T02:00:00Z"),
+            "2026-05-08T01:00:30Z",
+            None,
+        )
+        .await
+        .expect("cron completion should be skipped")
+    );
+
+    let stored = JobRepository::get(&repo, &job.id)
+        .await
+        .expect("job should load")
+        .expect("job should exist");
+    assert_eq!(stored.status, JobStatus::Paused);
+    assert_eq!(stored.scheduled_at, job.scheduled_at);
+}
+
+#[tokio::test]
+async fn trigger_cron_job_now_does_not_reset_running_job() {
+    let repo = repository().await;
+    let job = cron_job("cron-running-trigger", JobStatus::Pending, None);
+
+    JobRepository::create(&repo, &job)
+        .await
+        .expect("cron should insert");
+    assert!(
+        JobRepository::claim_cron_job(&repo, &job.id, "2026-05-08T01:00:01Z")
+            .await
+            .expect("cron should claim")
+    );
+
+    assert!(
+        !JobRepository::trigger_cron_job_now(&repo, &job.id, "2026-05-08T01:00:02Z")
+            .await
+            .expect("running cron should not trigger")
+    );
+
+    let stored = JobRepository::get(&repo, &job.id)
+        .await
+        .expect("job should load")
+        .expect("job should exist");
+    assert_eq!(stored.status, JobStatus::Running);
+    assert_eq!(stored.scheduled_at, job.scheduled_at);
 }
 
 #[tokio::test]

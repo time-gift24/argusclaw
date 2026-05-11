@@ -1,5 +1,7 @@
-use argus_protocol::{SessionId, ThreadId};
-use argus_session::scheduled_messages::{CreateScheduledMessageRequest, ScheduledMessageSummary};
+use argus_protocol::{AgentId, ProviderId};
+use argus_session::scheduled_messages::{
+    CreateScheduledMessageRequest, ScheduledMessageSummary, UpdateScheduledMessageRequest,
+};
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -12,14 +14,17 @@ use crate::user_context::RequestUser;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateScheduledMessageBody {
-    pub session_id: String,
-    pub thread_id: String,
+    pub template_id: i64,
+    pub provider_id: Option<i64>,
+    pub model: Option<String>,
     pub name: String,
     pub prompt: String,
     pub cron_expr: Option<String>,
     pub scheduled_at: Option<String>,
     pub timezone: Option<String>,
 }
+
+pub type UpdateScheduledMessageBody = CreateScheduledMessageBody;
 
 pub async fn list_scheduled_messages(
     request_user: RequestUser,
@@ -40,8 +45,10 @@ pub async fn create_scheduled_message(
         .create_scheduled_message(
             &request_user,
             CreateScheduledMessageRequest {
-                session_id: parse_session_id(&body.session_id)?,
-                thread_id: parse_thread_id(&body.thread_id)?,
+                owner_user_id: state.core().chat_user_id(&request_user).await?,
+                template_id: AgentId::new(body.template_id),
+                provider_id: body.provider_id.map(ProviderId::new),
+                model: body.model,
                 name: body.name,
                 prompt: body.prompt,
                 cron_expr: body.cron_expr,
@@ -62,6 +69,32 @@ pub async fn pause_scheduled_message(
     let summary = state
         .core()
         .pause_scheduled_message(&request_user, &job_id)
+        .await?;
+    Ok(Json(MutationResponse::new(summary)))
+}
+
+pub async fn update_scheduled_message(
+    request_user: RequestUser,
+    State(state): State<AppState>,
+    Path(job_id): Path<String>,
+    Json(body): Json<UpdateScheduledMessageBody>,
+) -> Result<Json<MutationResponse<ScheduledMessageSummary>>, ApiError> {
+    let summary = state
+        .core()
+        .update_scheduled_message(
+            &request_user,
+            &job_id,
+            UpdateScheduledMessageRequest {
+                template_id: AgentId::new(body.template_id),
+                provider_id: body.provider_id.map(ProviderId::new),
+                model: body.model,
+                name: body.name,
+                prompt: body.prompt,
+                cron_expr: body.cron_expr,
+                scheduled_at: body.scheduled_at,
+                timezone: body.timezone,
+            },
+        )
         .await?;
     Ok(Json(MutationResponse::new(summary)))
 }
@@ -88,12 +121,4 @@ pub async fn delete_scheduled_message(
         .delete_scheduled_message(&request_user, &job_id)
         .await?;
     Ok(Json(MutationResponse::new(DeleteResponse { deleted })))
-}
-
-fn parse_session_id(value: &str) -> Result<SessionId, ApiError> {
-    SessionId::parse(value).map_err(|_| ApiError::bad_request("invalid session_id"))
-}
-
-fn parse_thread_id(value: &str) -> Result<ThreadId, ApiError> {
-    ThreadId::parse(value).map_err(|_| ApiError::bad_request("invalid thread_id"))
 }

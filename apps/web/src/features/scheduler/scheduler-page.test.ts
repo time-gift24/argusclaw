@@ -3,12 +3,19 @@ import { flushPromises, mount } from "@vue/test-utils";
 
 vi.mock("@/lib/opentiny", async () => import("@/test/stubs/opentiny"));
 
+const push = vi.fn();
+
+vi.mock("vue-router", () => ({
+  useRouter: () => ({ push }),
+}));
+
 import SchedulerPage from "./SchedulerPage.vue";
 import {
   resetApiClient,
   setApiClient,
   type ApiClient,
-  type CreateScheduledMessageRequest,
+  type AgentRecord,
+  type LlmProviderRecord,
   type ScheduledMessageSummary,
 } from "@/lib/api";
 
@@ -17,13 +24,56 @@ function schedule(overrides: Partial<ScheduledMessageSummary> = {}): ScheduledMe
     id: "schedule-1",
     name: "每日检查",
     status: "pending",
-    session_id: "session-1",
-    thread_id: "thread-1",
+    template_id: 7,
+    provider_id: 3,
+    model: "alpha",
+    last_session_id: "session-1",
+    last_thread_id: "thread-1",
+    run_history: [
+      {
+        session_id: "session-1",
+        thread_id: "thread-1",
+        created_at: "2026-05-10T01:00:00Z",
+      },
+    ],
     prompt: "Run daily check",
     cron_expr: "0 9 * * *",
     scheduled_at: "2026-05-10T01:00:00Z",
     timezone: "Asia/Shanghai",
     last_error: null,
+    ...overrides,
+  };
+}
+
+function provider(overrides: Partial<LlmProviderRecord> = {}): LlmProviderRecord {
+  return {
+    id: 3,
+    kind: "openai-compatible",
+    display_name: "测试 Provider",
+    base_url: "https://example.invalid/v1",
+    api_key: "",
+    models: ["alpha", "beta"],
+    model_config: {},
+    default_model: "alpha",
+    is_default: true,
+    extra_headers: {},
+    secret_status: "ready",
+    meta_data: {},
+    ...overrides,
+  };
+}
+
+function template(overrides: Partial<AgentRecord> = {}): AgentRecord {
+  return {
+    id: 7,
+    display_name: "巡检 Agent",
+    description: "",
+    version: "1.0.0",
+    provider_id: 3,
+    model_id: "alpha",
+    system_prompt: "",
+    tool_names: [],
+    subagent_names: [],
     ...overrides,
   };
 }
@@ -79,6 +129,10 @@ function makeApiClient(overrides: Partial<ApiClient> = {}): ApiClient {
       },
     }),
     listProviders: async () => [],
+    getChatOptions: async () => ({
+      providers: [provider()],
+      templates: [template()],
+    }),
     saveProvider: async (input) => input,
     listTemplates: async () => [],
     saveTemplate: async (input) => input,
@@ -90,12 +144,36 @@ function makeApiClient(overrides: Partial<ApiClient> = {}): ApiClient {
 
 describe("SchedulerPage", () => {
   afterEach(() => {
+    push.mockReset();
     resetApiClient();
   });
 
   it("loads and renders scheduled messages", async () => {
     const listScheduledMessages = vi.fn(async () => [
-      schedule(),
+      schedule({
+        run_history: [
+          {
+            session_id: "session-1",
+            thread_id: "thread-1",
+            created_at: "2026-05-10T01:00:00Z",
+          },
+          {
+            session_id: "session-2",
+            thread_id: "thread-2",
+            created_at: "2026-05-10T00:00:00Z",
+          },
+          {
+            session_id: "session-3",
+            thread_id: "thread-3",
+            created_at: "2026-05-09T23:00:00Z",
+          },
+          {
+            session_id: "session-4",
+            thread_id: "thread-4",
+            created_at: "2026-05-09T22:00:00Z",
+          },
+        ],
+      }),
       schedule({
         id: "schedule-2",
         name: "失败任务",
@@ -105,73 +183,30 @@ describe("SchedulerPage", () => {
         last_error: "dispatch failed",
       }),
     ]);
-    setApiClient(makeApiClient({ listScheduledMessages }));
+    const getChatOptions = vi.fn(async () => ({
+      providers: [provider()],
+      templates: [template()],
+    }));
+    setApiClient(makeApiClient({ getChatOptions, listScheduledMessages }));
 
     const wrapper = mount(SchedulerPage);
     await flushPromises();
 
     expect(listScheduledMessages).toHaveBeenCalledTimes(1);
-    expect(wrapper.text()).toContain("Scheduler");
+    expect(getChatOptions).toHaveBeenCalledTimes(1);
+    expect(wrapper.text()).toContain("定时任务");
     expect(wrapper.text()).toContain("总任务数");
     expect(wrapper.text()).toContain("每日检查");
     expect(wrapper.text()).toContain("失败任务");
     expect(wrapper.text()).toContain("dispatch failed");
-  });
-
-  it("creates a cron scheduled message", async () => {
-    const listScheduledMessages = vi.fn(async () => []);
-    const createScheduledMessage = vi.fn(async (_input: CreateScheduledMessageRequest) => schedule());
-    setApiClient(makeApiClient({ createScheduledMessage, listScheduledMessages }));
-
-    const wrapper = mount(SchedulerPage);
-    await flushPromises();
-
-    await wrapper.get('[data-testid="schedule-session-id"]').setValue("session-9");
-    await wrapper.get('[data-testid="schedule-thread-id"]').setValue("thread-9");
-    await wrapper.get('[data-testid="schedule-name"]').setValue("晨间检查");
-    await wrapper.get('[data-testid="schedule-prompt"]').setValue("检查今天的状态");
-    await wrapper.get('[data-testid="schedule-cron-expr"]').setValue("30 8 * * *");
-    await wrapper.get('[data-testid="schedule-timezone"]').setValue("Asia/Shanghai");
-    await wrapper.get('[data-testid="create-schedule"]').trigger("click");
-    await flushPromises();
-
-    expect(createScheduledMessage).toHaveBeenCalledWith({
-      session_id: "session-9",
-      thread_id: "thread-9",
-      name: "晨间检查",
-      prompt: "检查今天的状态",
-      cron_expr: "30 8 * * *",
-      timezone: "Asia/Shanghai",
-    });
-    expect(createScheduledMessage.mock.calls[0][0]).not.toHaveProperty("scheduled_at");
-    expect(wrapper.text()).toContain("定时任务已创建。");
-    expect(listScheduledMessages).toHaveBeenCalledTimes(2);
-  });
-
-  it("creates a one-shot scheduled message", async () => {
-    const listScheduledMessages = vi.fn(async () => []);
-    const createScheduledMessage = vi.fn(async (_input: CreateScheduledMessageRequest) => schedule({ cron_expr: null }));
-    setApiClient(makeApiClient({ createScheduledMessage, listScheduledMessages }));
-
-    const wrapper = mount(SchedulerPage);
-    await flushPromises();
-
-    await wrapper.get('[data-testid="schedule-mode"]').setValue("once");
-    await wrapper.get('[data-testid="schedule-session-id"]').setValue("session-10");
-    await wrapper.get('[data-testid="schedule-thread-id"]').setValue("thread-10");
-    await wrapper.get('[data-testid="schedule-prompt"]').setValue("只运行一次");
-    await wrapper.get('[data-testid="schedule-scheduled-at"]').setValue("2026-05-10T01:00:00Z");
-    await wrapper.get('[data-testid="create-schedule"]').trigger("click");
-    await flushPromises();
-
-    expect(createScheduledMessage).toHaveBeenCalledWith({
-      session_id: "session-10",
-      thread_id: "thread-10",
-      name: "Scheduled message",
-      prompt: "只运行一次",
-      scheduled_at: "2026-05-10T01:00:00Z",
-    });
-    expect(createScheduledMessage.mock.calls[0][0]).not.toHaveProperty("cron_expr");
+    const historyLink = wrapper.get('a[href="/scheduler/schedule-1/runs/session-1/thread-1"]');
+    expect(historyLink.text()).toContain("最近");
+    expect(wrapper.find('a[href="/scheduler/schedule-1/runs/session-4/thread-4"]').exists()).toBe(false);
+    const createButton = wrapper.get('[data-testid="create-schedule-link"]');
+    expect(createButton.text()).toContain("创建任务");
+    await createButton.trigger("click");
+    expect(push).toHaveBeenCalledWith("/scheduler/new");
+    expect(wrapper.get('a[href="/scheduler/schedule-1/edit"]').text()).toContain("编辑");
   });
 
   it("pauses, triggers, deletes, and refreshes schedules", async () => {
@@ -203,11 +238,25 @@ describe("SchedulerPage", () => {
   });
 
   it("shows an error when the API client does not support scheduler operations", async () => {
-    setApiClient(makeApiClient());
+    setApiClient(makeApiClient({ listScheduledMessages: undefined, getChatOptions: undefined }));
 
     const wrapper = mount(SchedulerPage);
     await flushPromises();
 
     expect(wrapper.text()).toContain("当前 API 客户端不支持 Scheduler。");
+  });
+
+  it("keeps the chat options error visible when schedule loading succeeds", async () => {
+    setApiClient(makeApiClient({
+      getChatOptions: vi.fn(async () => {
+        throw new Error("加载 Agent 配置失败。");
+      }),
+      listScheduledMessages: vi.fn(async () => []),
+    }));
+
+    const wrapper = mount(SchedulerPage);
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("加载 Agent 配置失败。");
   });
 });

@@ -176,11 +176,11 @@ impl JobRepository for ArgusSqlite {
         scheduled_at: Option<&str>,
         finished_at: &str,
         context: Option<&str>,
-    ) -> DbResult<()> {
-        sqlx::query(
+    ) -> DbResult<bool> {
+        let result = sqlx::query(
             "UPDATE jobs
              SET status = ?1, scheduled_at = COALESCE(?2, scheduled_at), finished_at = ?3, context = COALESCE(?4, context), updated_at = datetime('now')
-             WHERE id = ?5 AND job_type = 'cron'",
+             WHERE id = ?5 AND job_type = 'cron' AND status = 'running'",
         )
         .bind(status.as_str())
         .bind(scheduled_at)
@@ -193,7 +193,34 @@ impl JobRepository for ArgusSqlite {
             reason: e.to_string(),
         })?;
 
-        Ok(())
+        Ok(result.rows_affected() == 1)
+    }
+
+    async fn update_cron_definition(
+        &self,
+        job: &JobRecord,
+        context: Option<&str>,
+    ) -> DbResult<bool> {
+        let result = sqlx::query(
+            "UPDATE jobs
+             SET name = ?1, status = ?2, agent_id = ?3, context = COALESCE(?4, context), prompt = ?5, cron_expr = ?6, scheduled_at = ?7, started_at = NULL, finished_at = NULL, result = NULL, updated_at = datetime('now')
+             WHERE id = ?8 AND job_type = 'cron' AND status != 'running'",
+        )
+        .bind(&job.name)
+        .bind(job.status.as_str())
+        .bind(job.agent_id.inner())
+        .bind(context)
+        .bind(&job.prompt)
+        .bind(&job.cron_expr)
+        .bind(&job.scheduled_at)
+        .bind(job.id.to_string())
+        .execute(&self.pool)
+        .await
+        .map_err(|e| DbError::QueryFailed {
+            reason: e.to_string(),
+        })?;
+
+        Ok(result.rows_affected() == 1)
     }
 
     async fn list_cron_jobs(
@@ -252,9 +279,11 @@ impl JobRepository for ArgusSqlite {
         rows.into_iter().map(|r| self.map_job_record(r)).collect()
     }
 
-    async fn update_scheduled_at(&self, id: &JobId, next: &str) -> DbResult<()> {
-        sqlx::query(
-            "UPDATE jobs SET scheduled_at = ?1, updated_at = datetime('now') WHERE id = ?2",
+    async fn trigger_cron_job_now(&self, id: &JobId, next: &str) -> DbResult<bool> {
+        let result = sqlx::query(
+            "UPDATE jobs
+             SET status = 'pending', scheduled_at = ?1, updated_at = datetime('now')
+             WHERE id = ?2 AND job_type = 'cron' AND status != 'running'",
         )
         .bind(next)
         .bind(id.to_string())
@@ -264,7 +293,7 @@ impl JobRepository for ArgusSqlite {
             reason: e.to_string(),
         })?;
 
-        Ok(())
+        Ok(result.rows_affected() == 1)
     }
 
     async fn list_by_group(&self, group_id: &str) -> DbResult<Vec<JobRecord>> {

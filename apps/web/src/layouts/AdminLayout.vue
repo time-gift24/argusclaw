@@ -13,7 +13,10 @@ const visibleNavItems = computed(() => navItemsForRole(isAdminUser.value));
 const isImmersiveRoute = computed(() => route.meta?.immersive === true);
 const shouldShowRouteHeader = computed(() => route.meta?.hideRouteHeader !== true);
 const currentItem = computed(() => {
-  return visibleNavItems.value.find((item) => item.to === route.path) ?? visibleNavItems.value[0] ?? adminNavItems[0];
+  const matches = visibleNavItems.value
+    .filter((item) => route.path === item.to || (item.to !== "/" && route.path.startsWith(`${item.to}/`)))
+    .sort((left, right) => right.to.length - left.to.length);
+  return matches[0] ?? visibleNavItems.value[0] ?? adminNavItems[0];
 });
 
 const isDark = ref(false);
@@ -59,6 +62,10 @@ function toggleTheme() {
     localStorage.setItem("theme", "light");
   }
 }
+
+function isActiveNavItem(path: string) {
+  return route.path === path || (path !== "/" && route.path.startsWith(`${path}/`));
+}
 </script>
 
 <template>
@@ -89,7 +96,7 @@ function toggleTheme() {
               :key="item.key"
               :to="item.to"
               class="nav-item"
-              :class="{ active: route.path === item.to }"
+              :class="{ active: isActiveNavItem(item.to) }"
             >
               <span class="nav-item__label">{{ item.label }}</span>
             </RouterLink>

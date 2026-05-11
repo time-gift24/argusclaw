@@ -66,7 +66,8 @@ pub fn router() -> Router<AppState> {
         )
         .route(
             "/api/v1/scheduled-messages/{job_id}",
-            axum::routing::delete(scheduled_messages::delete_scheduled_message),
+            axum::routing::delete(scheduled_messages::delete_scheduled_message)
+                .put(scheduled_messages::update_scheduled_message),
         )
         .route(
             "/api/v1/chat/sessions",

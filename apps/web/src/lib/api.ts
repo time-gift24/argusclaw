@@ -353,8 +353,12 @@ export interface ScheduledMessageSummary {
   id: string;
   name: string;
   status: ScheduledMessageStatus;
-  session_id: string;
-  thread_id: string;
+  template_id: number;
+  provider_id: number | null;
+  model: string | null;
+  last_session_id: string | null;
+  last_thread_id: string | null;
+  run_history: ScheduledMessageRunSummary[];
   prompt: string;
   cron_expr: string | null;
   scheduled_at: string | null;
@@ -362,15 +366,24 @@ export interface ScheduledMessageSummary {
   last_error: string | null;
 }
 
-export interface CreateScheduledMessageRequest {
+export interface ScheduledMessageRunSummary {
   session_id: string;
   thread_id: string;
+  created_at: string;
+}
+
+export interface CreateScheduledMessageRequest {
+  template_id: number;
+  provider_id?: number | null;
+  model?: string | null;
   name: string;
   prompt: string;
   cron_expr?: string | null;
   scheduled_at?: string | null;
   timezone?: string | null;
 }
+
+export type UpdateScheduledMessageRequest = CreateScheduledMessageRequest;
 
 export type AgentRunStatus = "queued" | "running" | "completed" | "failed";
 
@@ -542,6 +555,7 @@ export interface ApiClient {
   subscribeChatThread?(sessionId: string, threadId: string, handlers: ChatThreadEventHandlers): RuntimeEventSubscription;
   listScheduledMessages?(): Promise<ScheduledMessageSummary[]>;
   createScheduledMessage?(input: CreateScheduledMessageRequest): Promise<ScheduledMessageSummary>;
+  updateScheduledMessage?(id: string, input: UpdateScheduledMessageRequest): Promise<ScheduledMessageSummary>;
   pauseScheduledMessage?(id: string): Promise<ScheduledMessageSummary>;
   triggerScheduledMessage?(id: string): Promise<ScheduledMessageSummary>;
   deleteScheduledMessage?(id: string): Promise<DeleteResponse>;
@@ -913,6 +927,18 @@ class HttpApiClient implements ApiClient {
         "Content-Type": "application/json",
       },
       method: "POST",
+    });
+
+    return response.item;
+  }
+
+  async updateScheduledMessage(id: string, input: UpdateScheduledMessageRequest): Promise<ScheduledMessageSummary> {
+    const response = await this.request<MutationResponse<ScheduledMessageSummary>>(`/scheduled-messages/${id}`, {
+      body: JSON.stringify(input),
+      headers: {
+        "Content-Type": "application/json",
+      },
+      method: "PUT",
     });
 
     return response.item;

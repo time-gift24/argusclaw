@@ -26,7 +26,7 @@ export const adminNavItems: AdminNavItem[] = [
   },
   {
     key: "scheduler",
-    label: "Scheduler",
+    label: "定时任务",
     description: "定时消息、一次性触发与循环唤醒管理",
     to: "/scheduler",
   },

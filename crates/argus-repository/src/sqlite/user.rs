@@ -9,6 +9,8 @@ use crate::sqlite::ArgusSqlite;
 use crate::traits::{ResolvedUser, UserRepository};
 use argus_protocol::UserId;
 use async_trait::async_trait;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 
 const ORDINARY_TEST_USER_ID: &str = "ordinary-user";
 const DEV_USER_ID: &str = "dev-user";
@@ -21,20 +23,26 @@ impl UserRepository for ArgusSqlite {
         _display_name: Option<&str>,
     ) -> Result<ResolvedUser, DbError> {
         Ok(ResolvedUser {
-            id: UserId::default(),
+            id: stable_sqlite_user_id(external_id),
             is_admin: external_id != ORDINARY_TEST_USER_ID && external_id != DEV_USER_ID,
         })
     }
 
     async fn set_user_admin(
         &self,
-        _external_id: &str,
+        external_id: &str,
         _display_name: Option<&str>,
         is_admin: bool,
     ) -> Result<ResolvedUser, DbError> {
         Ok(ResolvedUser {
-            id: UserId::default(),
+            id: stable_sqlite_user_id(external_id),
             is_admin,
         })
     }
+}
+
+fn stable_sqlite_user_id(external_id: &str) -> UserId {
+    let mut hasher = DefaultHasher::new();
+    external_id.hash(&mut hasher);
+    UserId(uuid::Uuid::from_u128(hasher.finish() as u128))
 }
