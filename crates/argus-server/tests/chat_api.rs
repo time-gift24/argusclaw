@@ -12,7 +12,7 @@ use argus_repository::traits::{JobRepository, ThreadRepository};
 use argus_repository::types::{
     JobId, JobRecord, JobResult, JobStatus, JobType, MessageRecord, ThreadRecord,
 };
-use argus_repository::{ArgusSqlite, migrate};
+use argus_repository::{ArgusPostgres, ArgusSqlite, connect_postgres, migrate, migrate_postgres};
 use argus_server::app_state::AppState;
 use argus_server::response::MutationResponse;
 use argus_server::server_core::ServerCore;
@@ -24,6 +24,10 @@ use serde::Serialize;
 use serde_json::json;
 use tempfile::TempDir;
 use tower::util::ServiceExt;
+
+trait SeedRepository: JobRepository + ThreadRepository {}
+
+impl<T> SeedRepository for T where T: JobRepository + ThreadRepository {}
 
 #[tokio::test]
 async fn chat_routes_fail_closed_without_trusted_user_header() {
@@ -723,6 +727,64 @@ async fn get_chat_job_returns_readonly_conversation_messages() {
 }
 
 #[tokio::test]
+async fn chat_job_routes_reject_valid_job_owned_by_another_user() {
+    let Some(ctx) = SeededChatContext::postgres_if_configured().await else {
+        return;
+    };
+    let provider = create_seeded_provider(&ctx).await;
+    let template = first_seeded_template(&ctx).await;
+    let session = create_seeded_session(&ctx, "Owned Job Conversation Parent").await;
+    let parent_thread = create_seeded_thread(&ctx, &session, &template, &provider).await;
+    let child_thread_id = ThreadId::new();
+    let job_id = format!("job-owned-by-default-{}", ThreadId::new());
+
+    ctx.seed_child_job(
+        SeedChildJob {
+            job_id: job_id.as_str(),
+            parent_session_id: session.id,
+            parent_thread_id: parent_thread.id,
+            child_thread_id,
+            provider_id: provider.id,
+            agent_id: template.id,
+            name: "Owned conversation job",
+            status: JobStatus::Succeeded,
+            result: Some(JobResult {
+                success: true,
+                message: "private result should not be visible".to_string(),
+                token_usage: None,
+                agent_id: template.id,
+                agent_display_name: "Private Subagent".to_string(),
+                agent_description: "Owned by the default test user".to_string(),
+            }),
+            thread_title: Some("Private child conversation".to_string()),
+            persist_parent_metadata: true,
+            record_thread_id: Some(child_thread_id),
+        },
+        vec![ChatMessage::assistant("private child reply")],
+    )
+    .await;
+
+    let user_b_job_response = ctx
+        .get_as(
+            &format!("/api/v1/chat/jobs/{job_id}"),
+            support::ALT_TEST_USER_ID,
+        )
+        .await;
+    assert_eq!(user_b_job_response.status(), StatusCode::NOT_FOUND);
+
+    let user_b_jobs_response = ctx
+        .get_as(
+            &format!(
+                "/api/v1/chat/sessions/{}/threads/{}/jobs",
+                session.id, parent_thread.id
+            ),
+            support::ALT_TEST_USER_ID,
+        )
+        .await;
+    assert_eq!(user_b_jobs_response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn get_chat_job_rejects_unbound_job_without_ownership_proof() {
     let ctx = SeededChatContext::new().await;
     let template = first_seeded_template(&ctx).await;
@@ -847,7 +909,7 @@ async fn create_test_session(ctx: &support::TestContext, name: &str) -> SessionS
 
 struct SeededChatContext {
     app: Router,
-    repo: Arc<ArgusSqlite>,
+    repo: Arc<dyn SeedRepository>,
     trace_dir: TempDir,
 }
 
@@ -882,13 +944,52 @@ impl SeededChatContext {
         let app = argus_server::router(AppState::new(core));
         Self {
             app,
-            repo,
+            repo: repo as Arc<dyn SeedRepository>,
             trace_dir,
         }
     }
 
+    async fn postgres_if_configured() -> Option<Self> {
+        let database_url = match std::env::var(support::POSTGRES_TEST_URL_ENV) {
+            Ok(database_url) => database_url,
+            Err(_) => {
+                eprintln!(
+                    "skipping PostgreSQL seeded chat test: {} is not set",
+                    support::POSTGRES_TEST_URL_ENV
+                );
+                return None;
+            }
+        };
+        let pool = connect_postgres(&database_url)
+            .await
+            .expect("postgres seeded chat pool should connect");
+        migrate_postgres(&pool)
+            .await
+            .expect("postgres seeded chat migrations should succeed");
+        let repo = Arc::new(ArgusPostgres::new(pool.clone()));
+        let trace_dir = tempfile::tempdir().expect("postgres seeded chat trace dir should exist");
+        let core =
+            ServerCore::with_postgres_pool_and_trace_dir(pool, trace_dir.path().to_path_buf())
+                .await
+                .expect("server core should initialize against postgres seeded chat pool");
+        core.set_dev_user_admin(support::DEFAULT_TEST_USER_ID, Some("Test Admin"), true)
+            .await
+            .expect("default seeded chat user should become admin");
+        let app = argus_server::router(AppState::new(core));
+        Some(Self {
+            app,
+            repo: repo as Arc<dyn SeedRepository>,
+            trace_dir,
+        })
+    }
+
     async fn get(&self, path: &str) -> axum::http::Response<Body> {
         self.request(Method::GET, path, Option::<&()>::None).await
+    }
+
+    async fn get_as(&self, path: &str, user_id: &str) -> axum::http::Response<Body> {
+        self.request_as(Method::GET, path, Option::<&()>::None, user_id)
+            .await
     }
 
     async fn post_json<T>(&self, path: &str, payload: &T) -> axum::http::Response<Body>
@@ -907,10 +1008,24 @@ impl SeededChatContext {
     where
         T: Serialize,
     {
+        self.request_as(method, path, payload, support::DEFAULT_TEST_USER_ID)
+            .await
+    }
+
+    async fn request_as<T>(
+        &self,
+        method: Method,
+        path: &str,
+        payload: Option<&T>,
+        user_id: &str,
+    ) -> axum::http::Response<Body>
+    where
+        T: Serialize,
+    {
         let mut request = axum::http::Request::builder()
             .method(method)
             .uri(path)
-            .header("x-argus-user-id", support::DEFAULT_TEST_USER_ID);
+            .header("x-argus-user-id", user_id);
         let body = match payload {
             Some(payload) => {
                 request = request.header("content-type", "application/json");

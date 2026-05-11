@@ -430,6 +430,23 @@ describe("ChatPage", () => {
     expect(wrapper.text()).toContain("researcher");
   });
 
+  it("hides the dispatched jobs rail after an empty job list loads", async () => {
+    setApiClient(
+      makeApiClient({
+        listChatSessions: vi.fn().mockResolvedValue([session()]),
+        listChatThreads: vi.fn().mockResolvedValue([thread()]),
+        listChatMessages: vi.fn().mockResolvedValue([]),
+        listChatThreadJobs: vi.fn().mockResolvedValue([]),
+      }),
+    );
+
+    const wrapper = mount(ChatPage);
+    await flushPromises();
+
+    expect(wrapper.find(".dispatched-jobs").exists()).toBe(false);
+    expect(wrapper.classes()).not.toContain("chat-page--with-dispatched-jobs");
+  });
+
   it("scrolls the primary chat stream to the bottom when messages render", async () => {
     const messagesDeferred = createDeferred<ChatMessageRecord[]>();
     setApiClient(
@@ -490,6 +507,8 @@ describe("ChatPage", () => {
 
     expect(source).toContain("chat-body-stream");
     expect(source).toContain("chat-runtime-floating-layer");
+    expect(source).toContain("chat-page--with-dispatched-jobs");
+    expect(source).toContain('v-if="showDispatchedJobsPanel"');
     expect(source).toContain(".chat-page.chat-page--immersive");
     expect(source).toContain("ref=\"chatBodyStreamRef\"");
     expect(source).toContain("@scroll.passive=\"handleChatBodyScroll\"");
@@ -508,6 +527,9 @@ describe("ChatPage", () => {
     expect(source).toContain("padding: var(--space-6) var(--space-6) 0;");
     expect(source).toContain("width: min(100%, var(--chat-composer-width));");
     expect(source).not.toContain("calc((100% - var(--chat-message-width)) / 2)");
+    expect(source).toContain("padding-right: calc(var(--chat-rail-width) + var(--chat-layout-gap) + var(--space-6));");
+    expect(source).toContain(".chat-page--with-dispatched-jobs .chat-runtime-floating-layer");
+    expect(source).toContain("position: static;");
     expect(source).toContain("position: absolute;");
     expect(source).toContain("pointer-events: none;");
     expect(source).not.toContain("pointer-events: auto;\n  }\n\n  .chat-runtime-floating-layer :deep(.runtime-rail--collapsed)");
@@ -515,7 +537,6 @@ describe("ChatPage", () => {
     expect(source).not.toContain("chat-main-column");
     expect(source).not.toContain("--chat-sidecar-width");
     expect(source).not.toContain("grid-template-columns: minmax(0, 1fr) minmax(0, var(--chat-message-width)) minmax(0, 1fr);");
-    expect(source).not.toContain("position: static;");
 
     expect(panelSource).toContain("min-height: 100%;");
     expect(panelSource).not.toMatch(/(^|\n)\s*height: 100%;/);

@@ -93,6 +93,9 @@ const robotMessages = computed(() => toRobotMessages({
 }));
 const bubbleRoles = createBubbleRoles();
 const starterPrompts = createStarterPrompts();
+const showDispatchedJobsPanel = computed(
+  () => dispatchedJobsLoading.value || Boolean(dispatchedJobsError.value) || dispatchedJobs.value.length > 0,
+);
 
 function getDistanceFromBottom(element: HTMLElement) {
   return element.scrollHeight - element.clientHeight - element.scrollTop;
@@ -479,8 +482,21 @@ function applyPrompt(_event: MouseEvent, item: PromptProps) {
   <section
     ref="chatBodyStreamRef"
     class="chat-page chat-page--immersive chat-page--single-scroll"
+    :class="{ 'chat-page--with-dispatched-jobs': showDispatchedJobsPanel }"
     @scroll.passive="handleChatBodyScroll"
   >
+    <div class="chat-runtime-floating-layer">
+      <RuntimeActivityRail :activities="chatThreadStream.runtimeActivities.value" />
+      <DispatchedJobsPanel
+        v-if="showDispatchedJobsPanel"
+        :jobs="dispatchedJobs"
+        :loading="dispatchedJobsLoading"
+        :error="dispatchedJobsError"
+        @open-job="openJob"
+        @refresh="refreshDispatchedJobs"
+      />
+    </div>
+
     <div class="chat-body-stream">
       <ChatConversationPanel
         error=""
@@ -490,17 +506,6 @@ function applyPrompt(_event: MouseEvent, item: PromptProps) {
         :bubble-roles="bubbleRoles"
         :starter-prompts="starterPrompts"
         @prompt="applyPrompt"
-      />
-    </div>
-
-    <div class="chat-runtime-floating-layer">
-      <RuntimeActivityRail :activities="chatThreadStream.runtimeActivities.value" />
-      <DispatchedJobsPanel
-        :jobs="dispatchedJobs"
-        :loading="dispatchedJobsLoading"
-        :error="dispatchedJobsError"
-        @open-job="openJob"
-        @refresh="refreshDispatchedJobs"
       />
     </div>
 
@@ -644,6 +649,16 @@ function applyPrompt(_event: MouseEvent, item: PromptProps) {
   font-size: var(--text-sm);
 }
 
+@media (min-width: 1281px) {
+  .chat-page--with-dispatched-jobs .chat-body-stream {
+    padding-right: calc(var(--chat-rail-width) + var(--chat-layout-gap) + var(--space-6));
+  }
+
+  .chat-page--with-dispatched-jobs .chat-page__composer-dock {
+    padding-right: calc(var(--chat-rail-width) + var(--chat-layout-gap));
+  }
+}
+
 @media (max-width: 1180px) {
   .chat-page {
     --chat-dock-clearance: 160px;
@@ -666,12 +681,11 @@ function applyPrompt(_event: MouseEvent, item: PromptProps) {
 }
 
 @media (max-width: 1280px) {
-  .chat-runtime-floating-layer {
-    position: absolute;
-    top: var(--space-4);
-    right: var(--space-4);
-    width: min(100%, var(--chat-composer-width));
+  .chat-page--with-dispatched-jobs .chat-runtime-floating-layer {
+    position: static;
+    width: 100%;
     max-width: none;
+    padding: var(--space-4) var(--space-4) 0;
     pointer-events: none;
   }
 

@@ -187,6 +187,21 @@ impl ServerCore {
     }
 
     async fn from_postgres_pool(pool: PgPool) -> Result<Arc<Self>> {
+        Self::from_postgres_pool_with_trace_dir(pool, default_trace_dir()).await
+    }
+
+    #[doc(hidden)]
+    pub async fn with_postgres_pool_and_trace_dir(
+        pool: PgPool,
+        trace_dir: PathBuf,
+    ) -> Result<Arc<Self>> {
+        Self::from_postgres_pool_with_trace_dir(pool, trace_dir).await
+    }
+
+    async fn from_postgres_pool_with_trace_dir(
+        pool: PgPool,
+        trace_dir: PathBuf,
+    ) -> Result<Arc<Self>> {
         let cipher = Arc::new(Cipher::new(FileKeySource::from_env_or_default()));
         let postgres = Arc::new(ArgusPostgres::new(pool));
         Self::from_repositories(
@@ -201,7 +216,7 @@ impl ServerCore {
             postgres.clone() as Arc<dyn AgentRunRepository>,
             postgres.clone() as Arc<dyn UserRepository>,
             cipher,
-            default_trace_dir(),
+            trace_dir,
         )
         .await
     }
