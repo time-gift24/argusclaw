@@ -85,6 +85,11 @@ pub fn router() -> Router<AppState> {
             get(chat::list_messages).post(chat::send_message),
         )
         .route(
+            "/api/v1/chat/sessions/{session_id}/threads/{thread_id}/jobs",
+            get(chat::list_thread_jobs),
+        )
+        .route("/api/v1/chat/jobs/{job_id}", get(chat::get_chat_job))
+        .route(
             "/api/v1/chat/sessions/{session_id}/threads/{thread_id}/cancel",
             post(chat::cancel_thread),
         )

@@ -577,6 +577,39 @@ async fn chat_routes_use_structured_client_errors() {
     assert_eq!(unknown_body["error"]["code"], "not_found");
 }
 
+#[tokio::test]
+async fn chat_job_message_post_route_does_not_exist() {
+    let ctx = support::TestContext::new().await;
+    let response = ctx
+        .post_json(
+            "/api/v1/chat/jobs/job-123/messages",
+            &serde_json::json!({
+                "message": "should not be accepted"
+            }),
+        )
+        .await;
+
+    assert_eq!(response.status(), axum::http::StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn list_thread_jobs_requires_valid_ids() {
+    let ctx = support::TestContext::new().await;
+    let response = ctx
+        .get("/api/v1/chat/sessions/not-a-uuid/threads/not-a-thread/jobs")
+        .await;
+
+    assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn get_chat_job_requires_non_empty_job_id() {
+    let ctx = support::TestContext::new().await;
+    let response = ctx.get("/api/v1/chat/jobs/%20").await;
+
+    assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+}
+
 async fn create_test_session(ctx: &support::TestContext, name: &str) -> SessionSummary {
     let response = ctx
         .post_json("/api/v1/chat/sessions", &json!({ "name": name }))

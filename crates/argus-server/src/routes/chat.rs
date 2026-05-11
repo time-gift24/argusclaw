@@ -82,6 +82,33 @@ pub struct ChatThreadEventEnvelope {
     pub payload: ChatThreadEventPayload,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatThreadJobSummaryResponse {
+    pub job_id: String,
+    pub title: String,
+    pub subagent_name: String,
+    pub status: String,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+    pub result_preview: Option<String>,
+    pub bound_thread_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatJobConversationResponse {
+    pub job_id: String,
+    pub title: String,
+    pub status: String,
+    pub thread_id: Option<String>,
+    pub session_id: Option<String>,
+    pub parent_session_id: Option<String>,
+    pub parent_thread_id: Option<String>,
+    pub messages: Vec<ChatMessage>,
+    pub turn_count: u32,
+    pub token_count: u32,
+    pub plan_item_count: u32,
+}
+
 pub async fn get_chat_options(
     _request_user: RequestUser,
     State(state): State<AppState>,
@@ -728,6 +755,29 @@ pub async fn list_messages(
                 parse_thread_id(&thread_id)?,
             )
             .await?,
+    ))
+}
+
+pub async fn list_thread_jobs(
+    _request_user: RequestUser,
+    Path((session_id, thread_id)): Path<(String, String)>,
+) -> Result<Json<Vec<ChatThreadJobSummaryResponse>>, ApiError> {
+    let _session_id = parse_session_id(&session_id)?;
+    let _thread_id = parse_thread_id(&thread_id)?;
+
+    Err(ApiError::internal(
+        "chat thread job listing is not implemented",
+    ))
+}
+
+pub async fn get_chat_job(
+    _request_user: RequestUser,
+    Path(job_id): Path<String>,
+) -> Result<Json<ChatJobConversationResponse>, ApiError> {
+    let _job_id = required_non_empty("job_id", job_id)?;
+
+    Err(ApiError::internal(
+        "chat job conversation lookup is not implemented",
     ))
 }
 
