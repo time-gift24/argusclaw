@@ -15,6 +15,7 @@ import ToolsPage from "@/features/tools/ToolsPage.vue";
 import AgentRunsPage from "@/features/agent-runs/AgentRunsPage.vue";
 
 const ChatPage = () => import("@/features/chat/ChatPage.vue");
+const JobChatPage = () => import("@/features/chat/JobChatPage.vue");
 
 export const router = createRouter({
   history: createWebHistory(),
@@ -133,6 +134,12 @@ export const router = createRouter({
           name: "chat",
           component: ChatPage,
           meta: { breadcrumb: "对话", immersive: true, hideRouteHeader: true },
+        },
+        {
+          path: "chat/jobs/:jobId",
+          name: "chat-job",
+          component: JobChatPage,
+          meta: { breadcrumb: "Job 对话", immersive: true, hideRouteHeader: true },
         },
       ],
     },

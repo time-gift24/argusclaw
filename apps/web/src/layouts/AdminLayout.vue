@@ -33,7 +33,7 @@ onMounted(() => {
 });
 
 watchEffect(() => {
-  if (!isAdminUser.value && route.path !== "/chat") {
+  if (!isAdminUser.value && !route.path.startsWith("/chat")) {
     void router.replace("/chat");
   }
 });
