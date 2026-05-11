@@ -581,6 +581,32 @@ describe("ChatPage", () => {
     expect(wrapper.text()).toContain("对话会话加载失败：Request failed: 502");
   });
 
+  it("shows chat load errors directly above the composer in a red alert", async () => {
+    setApiClient(
+      makeApiClient({
+        getChatOptions: vi.fn().mockRejectedValue(new Error("Request failed: 500")),
+        listChatSessions: vi.fn().mockRejectedValue(new Error("Request failed: 500")),
+      }),
+    );
+    const wrapper = mount(ChatPage);
+    await flushPromises();
+
+    const composerShell = wrapper.get(".chat-page__composer-shell");
+    const children = Array.from(composerShell.element.children).map((element) => element.className);
+    const error = composerShell.get(".chat-page__composer-error");
+
+    expect(children[0]).toContain("chat-page__composer-error");
+    expect(children[1]).toContain("composer-bar");
+    expect(error.text()).toBe("对话配置加载失败：Request failed: 500；对话会话加载失败：Request failed: 500");
+    expect(error.attributes("role")).toBe("alert");
+    expect(error.classes()).toContain("chat-page__composer-error--danger");
+
+    const source = readFileSync("src/features/chat/ChatPage.vue", "utf8");
+    expect(source).toContain("color: var(--danger);");
+    expect(source).toContain("background: color-mix(in srgb, var(--danger-bg) 70%, var(--danger) 12%);");
+    expect(source).not.toContain("var(--status-danger");
+  });
+
   it("switches to the selected session thread from history and refreshes its messages", async () => {
     const listChatThreads = vi.fn().mockImplementation(async (sessionId: string) => {
       if (sessionId === "session-1") {

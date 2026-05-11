@@ -362,7 +362,7 @@ function applyPrompt(_event: MouseEvent, item: PromptProps) {
   >
     <div class="chat-body-stream">
       <ChatConversationPanel
-        :error="chatComposer.error.value"
+        error=""
         :notice="chatComposer.actionMessage.value"
         :thread-loading="chatThreadStream.threadLoading.value"
         :robot-messages="robotMessages"
@@ -378,6 +378,13 @@ function applyPrompt(_event: MouseEvent, item: PromptProps) {
 
     <div class="chat-page__composer-dock">
       <div class="chat-page__composer-shell">
+        <div
+          v-if="chatComposer.error.value"
+          class="chat-page__composer-error chat-page__composer-error--danger"
+          role="alert"
+        >
+          {{ chatComposer.error.value }}
+        </div>
         <ChatComposerBar
           v-model="chatComposer.draftMessage.value"
           :templates="templates"
@@ -490,7 +497,27 @@ function applyPrompt(_event: MouseEvent, item: PromptProps) {
 }
 
 .chat-page__composer-shell {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
   width: min(100%, var(--chat-composer-width));
+}
+
+.chat-page__composer-error {
+  padding: 10px 14px;
+  border-radius: 14px;
+  font-size: var(--text-sm);
+  font-weight: 590;
+  line-height: 1.55;
+  box-shadow:
+    0 12px 28px rgba(239, 68, 68, 0.12),
+    inset 0 1px 0 rgba(255, 255, 255, 0.72);
+}
+
+.chat-page__composer-error--danger {
+  border: 1px solid color-mix(in srgb, var(--danger) 58%, var(--surface-base));
+  background: color-mix(in srgb, var(--danger-bg) 70%, var(--danger) 12%);
+  color: var(--danger);
 }
 
 @media (max-width: 1180px) {
