@@ -150,7 +150,7 @@ fn dev_login_page(next: Option<&str>) -> Html<String> {
 <body>
   <main>
     <h1>ArgusWing 本地登录</h1>
-    <p>请选择本地开发测试身份。这个入口只在 ARGUS_DEV_AUTH_ENABLED=true 时可用。</p>
+    <p>请选择本地开发测试身份。这个入口只在 [auth].dev_enabled=true 时可用。</p>
     <a class="admin" href="/auth/dev-login?role=admin&next={encoded_next}">管理员登录</a>
     <a class="user" href="/auth/dev-login?role=user&next={encoded_next}">普通用户登录</a>
   </main>

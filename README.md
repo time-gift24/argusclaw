@@ -26,27 +26,77 @@ pnpm tauri dev
 - `crates/desktop`：React 19 + Vite 8 前端
 - `crates/desktop/src-tauri`：Tauri Rust bridge，负责 command / subscription / bootstrapping
 
-## Linux 部署
+## Linux 编译与部署
 
-Linux 部署以 `argus-server` + `apps/web` 为目标，默认安装到 `/opt/arguswing`，使用 `arguswing.service` 运行。部署机需要已安装 Rust/Cargo、pnpm 和 systemd。
+Linux 部署以 `argus-server` + `apps/web` 为目标，默认安装到 `/opt/arguswing`，使用 `arguswing.service` 运行。部署机需要 Rust/Cargo、pnpm、PostgreSQL 和 systemd；Nginx 只在选择反代模式时需要。
 
-推荐先使用 server-hosted 模式，由 Rust server 同时提供 API 和前端静态文件：
+部署前先准备这些值：
+
+- `DEPLOY_MODE`：`server` 表示 Rust server 同时托管前端；`nginx` 表示 Nginx 托管前端并反代 API
+- `ARGUS_SERVER_ADDR`：server-hosted 模式的监听地址，默认 `0.0.0.0:3010`
+- `DATABASE_URL`：PostgreSQL URL，例如 `postgres://argus:<password>@127.0.0.1:5432/argus`
+- OAuth 配置：是否启用 OAuth、`client_id`、`client_secret`、`redirect_uri`
+- 可选路径：`INSTALL_DIR=/opt/arguswing`、`ETC_DIR=/etc/arguswing`
+
+编译后端和前端：
 
 ```bash
-sudo make linux-deploy DEPLOY_MODE=server
+make linux-build
 ```
 
-该命令会构建后端和前端、创建缺失的 `arguswing` 系统用户/组、安装文件、写入 systemd 配置，并执行 `daemon-reload`、`enable` 和 `restart`。默认监听 `0.0.0.0:3010`，可直接访问 `http://<server-ip>:3010`。
-
-如果希望由 Nginx 托管前端并反代 API：
+安装 server-hosted 模式：
 
 ```bash
-sudo make linux-deploy DEPLOY_MODE=nginx
+sudo make linux-deploy DEPLOY_MODE=server \
+  ARGUS_SERVER_ADDR=0.0.0.0:3010 \
+  DATABASE_URL='postgres://argus:argus_dev@127.0.0.1:5432/argus_dev'
+```
+
+安装 Nginx 模式：
+
+```bash
+sudo make linux-deploy DEPLOY_MODE=nginx \
+  DATABASE_URL='postgres://argus:argus_dev@127.0.0.1:5432/argus_dev'
 sudo nginx -t
 sudo systemctl reload nginx
 ```
 
-Nginx 模式下 `argus-server` 默认监听 `127.0.0.1:3010`，部署脚本会安装或暂存 `deploy/nginx/arguswing.conf`。
+部署脚本会创建系统用户/组、安装二进制和前端文件、写入 `/etc/arguswing/arguswing.toml`，并执行 `daemon-reload`、`enable` 和 `restart`。默认配置会先关闭 OAuth；生产环境请编辑 TOML：
+
+```bash
+sudoedit /etc/arguswing/arguswing.toml
+```
+
+如果字段包含 secret，不要把明文长期留在 TOML。先用同一个配置文件里的 `[crypto].master_key_path` 加密：
+
+```bash
+sudo /opt/arguswing/bin/argus-server \
+  --config /etc/arguswing/arguswing.toml \
+  config encrypt --value 'oauth-client-secret'
+```
+
+命令会输出：
+
+```toml
+{ encrypted = "...", nonce = "..." }
+```
+
+把输出粘到对应字段，例如：
+
+```toml
+[auth.oauth]
+enabled = true
+client_id = "your-client-id"
+client_secret = { encrypted = "...", nonce = "..." }
+redirect_uri = "https://argus.example.test/auth/callback"
+```
+
+`database.url` 如果包含密码，也可以用同样方式加密整个 PostgreSQL URL：
+
+```toml
+[database]
+url = { encrypted = "...", nonce = "..." }
+```
 
 常用检查命令：
 
@@ -60,12 +110,14 @@ curl http://127.0.0.1:3010/api/v1/health
 
 - 程序：`/opt/arguswing/bin/argus-server`
 - 前端：`/opt/arguswing/web`
-- 数据库：通过 `DATABASE_URL` 指向 PostgreSQL
-- traces：`/opt/arguswing/traces`
-- 环境变量：`/etc/arguswing/arguswing.env`
+- 配置：`/etc/arguswing/arguswing.toml`
+- 主密钥：`/etc/arguswing/master.key`
+- agent/thread traces：`/opt/arguswing/traces`
+- 服务日志：默认进 journald；设置 `[logging].file_path` 后写入指定文件
 
-管理员权限直接在 PostgreSQL `users` 表配置。用户第一次访问 `/api/v1/bootstrap`
-后会创建/更新 `users` 记录，响应里的 `current_user.id` 即内部 UUID；授权管理员：
+务必同时备份 `arguswing.toml` 和 `master.key`。只备份 TOML 不够；丢失 `master.key` 后，TOML 中已有的密文 secret 无法解密。
+
+管理员权限直接在 PostgreSQL `users` 表配置。用户第一次访问 `/api/v1/bootstrap` 后会创建/更新 `users` 记录，响应里的 `current_user.id` 即内部 UUID；授权管理员：
 
 ```sql
 UPDATE users SET is_admin = TRUE WHERE id = '<current_user.id>';

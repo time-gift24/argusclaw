@@ -1,7 +1,8 @@
+use std::path::Path;
 use std::sync::Arc;
 
 use argus_auth::{AccountManager, AuthError};
-use argus_crypto::{Cipher, FileKeySource};
+use argus_crypto::{Cipher, FileKeySource, KeyMaterialSource};
 use argus_job::JobManager;
 use argus_llm::ProviderManager;
 use argus_mcp::{McpRuntime, McpRuntimeConfig, RmcpConnector};
@@ -28,8 +29,9 @@ use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, SqlitePool};
 use tokio::sync::broadcast;
 
-use crate::db::{DatabaseTarget, default_trace_dir, resolve_database_target};
+use crate::db::{DatabaseTarget, resolve_database_target};
 use crate::resolver::ProviderManagerResolver;
+use crate::server_config::{ServerConfig, default_trace_dir};
 use crate::user_context::RequestUser;
 
 const DEFAULT_AGENT_DISPLAY_NAME: &str = "ArgusWing";
@@ -141,16 +143,39 @@ impl ServerCore {
         let DatabaseTarget::PostgresUrl(database_url) = database_target;
         let pool = connect_postgres(&database_url).await?;
         migrate_postgres(&pool).await?;
-        Self::from_postgres_pool(pool).await
+        Self::from_postgres_pool(
+            pool,
+            Path::new("~/.arguswing/master.key"),
+            default_trace_dir(),
+        )
+        .await
+    }
+
+    pub async fn init_with_config(config: &ServerConfig) -> Result<Arc<Self>> {
+        let database_target = resolve_database_target(Some(&config.database_url))?;
+        let DatabaseTarget::PostgresUrl(database_url) = database_target;
+        let pool = connect_postgres(&database_url).await?;
+        migrate_postgres(&pool).await?;
+        Self::from_postgres_pool(pool, &config.master_key_path, config.trace_dir.clone()).await
     }
 
     pub async fn with_pool(pool: SqlitePool) -> Result<Arc<Self>> {
         Self::from_sqlite_pool(pool).await
     }
 
-    async fn from_postgres_pool(pool: PgPool) -> Result<Arc<Self>> {
-        let cipher = Arc::new(Cipher::new(FileKeySource::from_env_or_default()));
-        let postgres = Arc::new(ArgusPostgres::new(pool));
+    async fn from_postgres_pool(
+        pool: PgPool,
+        master_key_path: &Path,
+        trace_dir: std::path::PathBuf,
+    ) -> Result<Arc<Self>> {
+        let key_source: Arc<dyn KeyMaterialSource> =
+            Arc::new(FileKeySource::new(master_key_path.display().to_string()));
+        let cipher = Arc::new(Cipher::new_arc(Arc::clone(&key_source)));
+        let postgres = Arc::new(ArgusPostgres::with_key_sources(
+            pool,
+            key_source,
+            Vec::new(),
+        ));
         Self::from_repositories(
             postgres.clone() as Arc<dyn AccountRepository>,
             postgres.clone() as Arc<dyn LlmProviderRepository>,
@@ -163,6 +188,7 @@ impl ServerCore {
             postgres.clone() as Arc<dyn AgentRunRepository>,
             postgres.clone() as Arc<dyn UserRepository>,
             cipher,
+            trace_dir,
         )
         .await
     }
@@ -182,6 +208,7 @@ impl ServerCore {
             sqlite.clone() as Arc<dyn AgentRunRepository>,
             sqlite.clone() as Arc<dyn UserRepository>,
             cipher,
+            default_trace_dir(),
         )
         .await
     }
@@ -199,6 +226,7 @@ impl ServerCore {
         agent_run_repo: Arc<dyn AgentRunRepository>,
         user_repo: Arc<dyn UserRepository>,
         cipher: Arc<Cipher>,
+        trace_dir: std::path::PathBuf,
     ) -> Result<Arc<Self>> {
         let account_manager = Arc::new(AccountManager::new(account_repo.clone(), cipher.clone()));
         let provider_manager =
@@ -212,7 +240,6 @@ impl ServerCore {
 
         let tool_manager = Arc::new(ToolManager::new());
         Self::register_default_tools(&tool_manager);
-        let trace_dir = default_trace_dir();
         let _ = std::fs::create_dir_all(&trace_dir);
 
         let provider_resolver: Arc<dyn ProviderResolver> =
