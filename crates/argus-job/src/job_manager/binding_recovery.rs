@@ -73,7 +73,7 @@ impl JobManager {
             .and_then(|metadata| metadata.parent_thread_id))
     }
 
-    pub async fn recover_child_jobs_for_thread(
+    pub(super) async fn recover_child_jobs_for_thread_inner(
         &self,
         parent_thread_id: ThreadId,
     ) -> Result<Vec<RecoveredChildJob>, JobError> {

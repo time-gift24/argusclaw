@@ -95,6 +95,15 @@ impl JobManager {
     #[cfg(test)]
     const JOB_RESULT_SUMMARY_CHAR_LIMIT: usize = 4000;
 
+    /// Recover direct child job execution threads dispatched by a parent thread.
+    pub async fn recover_child_jobs_for_thread(
+        &self,
+        parent_thread_id: ThreadId,
+    ) -> Result<Vec<RecoveredChildJob>, JobError> {
+        self.recover_child_jobs_for_thread_inner(parent_thread_id)
+            .await
+    }
+
     /// Create a new JobManager.
     pub fn new(
         thread_pool: Arc<ThreadPool>,

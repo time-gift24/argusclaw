@@ -77,6 +77,15 @@ pub struct ArgusWing {
     mcp_repo: Arc<dyn McpRepository>,
 }
 
+/// Persisted binding between a parent thread dispatch and its child job thread.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DispatchedJobBinding {
+    /// Stable job ID used for result correlation.
+    pub job_id: String,
+    /// Execution thread that runs the dispatched job.
+    pub thread_id: ThreadId,
+}
+
 impl ArgusWing {
     async fn bootstrap_template_manager(template_manager: Arc<TemplateManager>) -> Result<()> {
         template_manager.repair_placeholder_ids().await?;
@@ -339,6 +348,28 @@ impl ArgusWing {
         let repository = ArgusSqlite::new(self.pool.clone());
         let persisted = JobRepository::get(&repository, &JobId::new(job_id)).await?;
         Ok(persisted.and_then(|job| job.thread_id))
+    }
+
+    /// Recover direct child job execution threads dispatched by a parent thread.
+    pub async fn dispatched_jobs_for_thread(
+        &self,
+        parent_thread_id: ThreadId,
+    ) -> Result<Vec<DispatchedJobBinding>> {
+        let children = self
+            .job_manager
+            .recover_child_jobs_for_thread(parent_thread_id)
+            .await
+            .map_err(|error| ArgusError::JobError {
+                reason: error.to_string(),
+            })?;
+
+        Ok(children
+            .into_iter()
+            .map(|child| DispatchedJobBinding {
+                job_id: child.job_id,
+                thread_id: child.thread_id,
+            })
+            .collect())
     }
 
     /// Get a reference to the account manager.
@@ -1825,6 +1856,78 @@ mod tests {
             .await
             .expect("binding lookup should succeed after restart");
         assert_eq!(recovered_binding, Some(bound_thread_id));
+    }
+
+    #[tokio::test]
+    async fn dispatched_jobs_for_thread_recovers_child_job_bindings() {
+        use tokio::sync::broadcast;
+
+        let temp_dir = tempfile::tempdir().expect("temp dir should exist");
+        let database_path = temp_dir.path().join("test.sqlite");
+
+        let wing = ArgusWing::init(Some(&database_path.display().to_string()))
+            .await
+            .expect("ArgusWing should initialize");
+
+        let agent_id = wing
+            .upsert_template(AgentRecord {
+                id: AgentId::new(0),
+                display_name: "Dispatch Binding List Agent".to_string(),
+                description: "Used to verify parent thread job binding lookup".to_string(),
+                version: "1.0.0".to_string(),
+                provider_id: None,
+                model_id: None,
+                system_prompt: "You are a dispatch binding test agent.".to_string(),
+                tool_names: vec![],
+                subagent_names: vec![],
+                max_tokens: None,
+                temperature: None,
+                thinking_config: Some(ThinkingConfig::enabled()),
+            })
+            .await
+            .expect("template should upsert");
+
+        let session_id = wing
+            .create_session("dispatch-binding-list-session")
+            .await
+            .expect("session should create");
+        let parent_thread_id = wing
+            .create_thread(session_id, agent_id, None, None)
+            .await
+            .expect("parent thread should create");
+        let job_id = "job-binding-list-recoverable".to_string();
+        let (pipe_tx, _pipe_rx) = broadcast::channel(32);
+
+        wing.job_manager
+            .dispatch_job(
+                parent_thread_id,
+                job_id.clone(),
+                agent_id,
+                "execute a listed recoverable job".to_string(),
+                None,
+                pipe_tx,
+            )
+            .await
+            .expect("dispatch should enqueue");
+
+        let bound_thread_id = wing
+            .job_thread_binding(&job_id)
+            .await
+            .expect("job thread binding lookup should succeed")
+            .expect("job should be bound to an execution thread");
+
+        let bindings = wing
+            .dispatched_jobs_for_thread(parent_thread_id)
+            .await
+            .expect("dispatched jobs lookup should succeed");
+
+        assert_eq!(
+            bindings,
+            vec![DispatchedJobBinding {
+                job_id,
+                thread_id: bound_thread_id,
+            }]
+        );
     }
 
     #[tokio::test]
