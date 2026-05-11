@@ -177,6 +177,70 @@ describe("HttpApiClient", () => {
     expect(result.deleted_thread_count).toBe(2);
   });
 
+  it("lists jobs dispatched from a chat thread", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      headers: {
+        get: () => "application/json",
+      },
+      json: async () => [
+        {
+          job_id: "job-1",
+          title: "job:job-1",
+          subagent_name: "Reviewer",
+          status: "succeeded",
+          created_at: "2026-05-11T00:00:00Z",
+          updated_at: "2026-05-11T00:00:01Z",
+          result_preview: "Done",
+          bound_thread_id: "child-thread-1",
+        },
+      ],
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = getApiClient();
+    expect(client.listChatThreadJobs).toBeDefined();
+
+    const jobs = await client.listChatThreadJobs!("session-1", "thread-1");
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/chat/sessions/session-1/threads/thread-1/jobs",
+      { credentials: "same-origin" },
+    );
+    expect(jobs[0]!.job_id).toBe("job-1");
+  });
+
+  it("gets a read-only chat job conversation", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      headers: {
+        get: () => "application/json",
+      },
+      json: async () => ({
+        job_id: "job-1",
+        title: "job:job-1",
+        status: "succeeded",
+        thread_id: "child-thread-1",
+        session_id: "child-session-1",
+        parent_session_id: "session-1",
+        parent_thread_id: "thread-1",
+        messages: [],
+        turn_count: 1,
+        token_count: 42,
+        plan_item_count: 0,
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = getApiClient();
+    expect(client.getChatJobConversation).toBeDefined();
+
+    const conversation = await client.getChatJobConversation!("job-1");
+
+    expect(fetchMock).toHaveBeenCalledWith("/api/v1/chat/jobs/job-1", { credentials: "same-origin" });
+    expect(conversation.job_id).toBe("job-1");
+  });
+
   it("redirects to OAuth login when the API returns unauthorized", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: false,

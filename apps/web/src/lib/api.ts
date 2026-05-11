@@ -324,6 +324,33 @@ export interface ChatThreadSnapshot {
   plan_item_count: number;
 }
 
+export type ChatJobStatus = "pending" | "queued" | "running" | "succeeded" | "failed" | "cancelled";
+
+export interface ChatThreadJobSummary {
+  job_id: string;
+  title: string;
+  subagent_name: string;
+  status: ChatJobStatus | string;
+  created_at: string | null;
+  updated_at: string | null;
+  result_preview: string | null;
+  bound_thread_id: string | null;
+}
+
+export interface ChatJobConversation {
+  job_id: string;
+  title: string;
+  status: ChatJobStatus | string;
+  thread_id: string | null;
+  session_id: string | null;
+  parent_session_id: string | null;
+  parent_thread_id: string | null;
+  messages: ChatMessageRecord[];
+  turn_count: number;
+  token_count: number;
+  plan_item_count: number;
+}
+
 export interface ChatThreadBinding {
   session_id: string;
   thread_id: string;
@@ -508,6 +535,9 @@ export interface ApiClient {
   sendChatMessage?(sessionId: string, threadId: string, message: string): Promise<ChatActionResponse>;
   cancelChatThread?(sessionId: string, threadId: string): Promise<ChatActionResponse>;
   subscribeChatThread?(sessionId: string, threadId: string, handlers: ChatThreadEventHandlers): RuntimeEventSubscription;
+  listChatThreadJobs?(sessionId: string, threadId: string): Promise<ChatThreadJobSummary[]>;
+  getChatJobConversation?(jobId: string): Promise<ChatJobConversation>;
+  subscribeChatJobConversation?(jobId: string, handlers: ChatThreadEventHandlers): RuntimeEventSubscription;
   createAgentRun?(input: CreateAgentRunRequest): Promise<AgentRunSummary>;
   getAgentRun?(runId: string): Promise<AgentRunDetail>;
 }
@@ -837,6 +867,14 @@ class HttpApiClient implements ApiClient {
 
   listChatMessages(sessionId: string, threadId: string): Promise<ChatMessageRecord[]> {
     return this.request(`/chat/sessions/${sessionId}/threads/${threadId}/messages`);
+  }
+
+  listChatThreadJobs(sessionId: string, threadId: string): Promise<ChatThreadJobSummary[]> {
+    return this.request(`/chat/sessions/${sessionId}/threads/${threadId}/jobs`);
+  }
+
+  getChatJobConversation(jobId: string): Promise<ChatJobConversation> {
+    return this.request(`/chat/jobs/${jobId}`);
   }
 
   async sendChatMessage(sessionId: string, threadId: string, message: string): Promise<ChatActionResponse> {
