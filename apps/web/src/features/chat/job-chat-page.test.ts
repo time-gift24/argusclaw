@@ -305,6 +305,71 @@ describe("JobChatPage", () => {
     expect(wrapper.text()).toContain("完成");
   });
 
+  it("keeps polling the next job when a previous job poll is still unresolved", async () => {
+    vi.useFakeTimers();
+    const stalePoll = deferredConversation();
+    const jobCalls = new Map<string, number>();
+    const getChatJobConversation = vi.fn((requestedJobId: string) => {
+      const callCount = (jobCalls.get(requestedJobId) ?? 0) + 1;
+      jobCalls.set(requestedJobId, callCount);
+
+      if (requestedJobId === "job-1" && callCount === 2) {
+        return stalePoll.promise;
+      }
+
+      if (requestedJobId === "job-2" && callCount === 2) {
+        return Promise.resolve(conversation({
+          job_id: "job-2",
+          title: "job:job-2",
+          status: "succeeded",
+          messages: [
+            message("assistant", "job-2 refreshed"),
+          ],
+        }));
+      }
+
+      return Promise.resolve(conversation({
+        job_id: requestedJobId,
+        title: `job:${requestedJobId}`,
+        status: "running",
+        messages: [
+          message("assistant", `${requestedJobId} initial`),
+        ],
+      }));
+    });
+    const { router, wrapper } = await mountJobChatPage({
+      getChatJobConversation,
+    } as unknown as ApiClient);
+
+    await vi.advanceTimersByTimeAsync(1500);
+    await flushPromises();
+    expect(getChatJobConversation).toHaveBeenCalledTimes(2);
+
+    await router.push("/chat/jobs/job-2");
+    await flushPromises();
+    expect(wrapper.text()).toContain("job-2 initial");
+
+    await vi.advanceTimersByTimeAsync(1500);
+    await flushPromises();
+
+    expect(getChatJobConversation).toHaveBeenCalledTimes(4);
+    expect(getChatJobConversation).toHaveBeenLastCalledWith("job-2");
+    expect(wrapper.text()).toContain("job-2 refreshed");
+
+    stalePoll.resolve(conversation({
+      job_id: "job-1",
+      title: "job:job-1",
+      status: "succeeded",
+      messages: [
+        message("assistant", "stale job-1 response"),
+      ],
+    }));
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("job-2 refreshed");
+    expect(wrapper.text()).not.toContain("stale job-1 response");
+  });
+
   it("stops polling after a terminal job conversation response", async () => {
     vi.useFakeTimers();
     const getChatJobConversation = vi

@@ -22,7 +22,7 @@ const starterPrompts: PromptProps[] = [];
 const POLL_INTERVAL_MS = 1500;
 const ACTIVE_STATUSES = new Set(["pending", "queued", "running"]);
 let pollTimer: ReturnType<typeof setInterval> | null = null;
-let pollInFlight = false;
+let pollInFlight: { jobId: string; requestId: number } | null = null;
 
 const jobId = computed(() => {
   const value = route.params.jobId;
@@ -124,8 +124,6 @@ function stopPolling() {
 }
 
 async function refreshConversation() {
-  if (pollInFlight) return;
-
   const nextJobId = jobId.value;
   if (!nextJobId) {
     stopPolling();
@@ -133,7 +131,8 @@ async function refreshConversation() {
   }
 
   const requestId = requestSequence.value;
-  pollInFlight = true;
+  if (pollInFlight?.jobId === nextJobId && pollInFlight.requestId === requestId) return;
+  pollInFlight = { jobId: nextJobId, requestId };
 
   try {
     const api = getApiClient();
@@ -149,7 +148,9 @@ async function refreshConversation() {
     if (requestId !== requestSequence.value || nextJobId !== jobId.value) return;
     error.value = formatErrorMessage(reason);
   } finally {
-    pollInFlight = false;
+    if (pollInFlight?.jobId === nextJobId && pollInFlight.requestId === requestId) {
+      pollInFlight = null;
+    }
   }
 }
 
