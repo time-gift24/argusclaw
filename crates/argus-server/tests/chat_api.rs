@@ -22,6 +22,7 @@ use axum::body::Body;
 use axum::http::{Method, StatusCode};
 use serde::Serialize;
 use serde_json::json;
+use tempfile::TempDir;
 use tower::util::ServiceExt;
 
 #[tokio::test]
@@ -650,6 +651,8 @@ async fn thread_jobs_lists_dispatched_subagents_for_parent_thread() {
                 agent_description: "Looks things up".to_string(),
             }),
             thread_title: Some("Child investigation".to_string()),
+            persist_parent_metadata: true,
+            record_thread_id: Some(child_thread_id),
         },
         Vec::new(),
     )
@@ -694,6 +697,8 @@ async fn get_chat_job_returns_readonly_conversation_messages() {
             status: JobStatus::Running,
             result: None,
             thread_title: Some("Readonly child conversation".to_string()),
+            persist_parent_metadata: true,
+            record_thread_id: Some(child_thread_id),
         },
         vec![ChatMessage::assistant("persisted child reply")],
     )
@@ -718,7 +723,7 @@ async fn get_chat_job_returns_readonly_conversation_messages() {
 }
 
 #[tokio::test]
-async fn get_chat_job_reports_pending_when_job_has_no_thread_binding() {
+async fn get_chat_job_rejects_unbound_job_without_ownership_proof() {
     let ctx = SeededChatContext::new().await;
     let template = first_seeded_template(&ctx).await;
     let job_id = "job-pending-unbound";
@@ -745,12 +750,90 @@ async fn get_chat_job_reports_pending_when_job_has_no_thread_binding() {
 
     let response = ctx.get(&format!("/api/v1/chat/jobs/{job_id}")).await;
 
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn get_chat_job_rejects_bound_job_without_parent_or_session_ownership() {
+    let ctx = SeededChatContext::new().await;
+    let provider = create_seeded_provider(&ctx).await;
+    let template = first_seeded_template(&ctx).await;
+    let session = create_seeded_session(&ctx, "Unowned Child Parent").await;
+    let parent_thread = create_seeded_thread(&ctx, &session, &template, &provider).await;
+    let child_thread_id = ThreadId::new();
+    let job_id = "job-no-parent-metadata";
+
+    ctx.seed_child_job(
+        SeedChildJob {
+            job_id,
+            parent_session_id: session.id,
+            parent_thread_id: parent_thread.id,
+            child_thread_id,
+            provider_id: provider.id,
+            agent_id: template.id,
+            name: "Missing metadata job",
+            status: JobStatus::Running,
+            result: None,
+            thread_title: Some("Should not leak".to_string()),
+            persist_parent_metadata: false,
+            record_thread_id: Some(child_thread_id),
+        },
+        vec![ChatMessage::assistant("secret child reply")],
+    )
+    .await;
+
+    let response = ctx.get(&format!("/api/v1/chat/jobs/{job_id}")).await;
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn thread_jobs_skips_recovered_job_when_persisted_binding_mismatches() {
+    let ctx = SeededChatContext::new().await;
+    let provider = create_seeded_provider(&ctx).await;
+    let template = first_seeded_template(&ctx).await;
+    let session = create_seeded_session(&ctx, "Mismatched Job List").await;
+    let parent_thread = create_seeded_thread(&ctx, &session, &template, &provider).await;
+    let recovered_child_thread_id = ThreadId::new();
+    let persisted_child_thread_id = ThreadId::new();
+    let job_id = "job-mismatched-binding";
+
+    ctx.seed_child_job(
+        SeedChildJob {
+            job_id,
+            parent_session_id: session.id,
+            parent_thread_id: parent_thread.id,
+            child_thread_id: recovered_child_thread_id,
+            provider_id: provider.id,
+            agent_id: template.id,
+            name: "Mismatched child job name",
+            status: JobStatus::Succeeded,
+            result: Some(JobResult {
+                success: true,
+                message: "Should not be exposed through mismatched binding".to_string(),
+                token_usage: None,
+                agent_id: template.id,
+                agent_display_name: "Wrong Binding Subagent".to_string(),
+                agent_description: "Should be skipped".to_string(),
+            }),
+            thread_title: Some("Mismatched child investigation".to_string()),
+            persist_parent_metadata: true,
+            record_thread_id: Some(persisted_child_thread_id),
+        },
+        Vec::new(),
+    )
+    .await;
+
+    let response = ctx
+        .get(&format!(
+            "/api/v1/chat/sessions/{}/threads/{}/jobs",
+            session.id, parent_thread.id
+        ))
+        .await;
+
     assert_eq!(response.status(), StatusCode::OK);
-    let conversation: serde_json::Value = support::json_body(response).await;
-    assert_eq!(conversation["job_id"], job_id);
-    assert_eq!(conversation["status"], "pending");
-    assert!(conversation["thread_id"].is_null());
-    assert_eq!(conversation["messages"].as_array().map(Vec::len), Some(0));
+    let jobs: serde_json::Value = support::json_body(response).await;
+    assert_eq!(jobs.as_array().map(Vec::len), Some(0));
 }
 
 async fn create_test_session(ctx: &support::TestContext, name: &str) -> SessionSummary {
@@ -765,6 +848,7 @@ async fn create_test_session(ctx: &support::TestContext, name: &str) -> SessionS
 struct SeededChatContext {
     app: Router,
     repo: Arc<ArgusSqlite>,
+    trace_dir: TempDir,
 }
 
 struct SeedChildJob<'a> {
@@ -778,6 +862,8 @@ struct SeedChildJob<'a> {
     status: JobStatus,
     result: Option<JobResult>,
     thread_title: Option<String>,
+    persist_parent_metadata: bool,
+    record_thread_id: Option<ThreadId>,
 }
 
 impl SeededChatContext {
@@ -789,11 +875,16 @@ impl SeededChatContext {
             .await
             .expect("test migrations should succeed");
         let repo = Arc::new(ArgusSqlite::new(pool.clone()));
-        let core = ServerCore::with_pool(pool)
+        let trace_dir = tempfile::tempdir().expect("seeded chat trace dir should exist");
+        let core = ServerCore::with_pool_and_trace_dir(pool, trace_dir.path().to_path_buf())
             .await
             .expect("server core should initialize for tests");
         let app = argus_server::router(AppState::new(core));
-        Self { app, repo }
+        Self {
+            app,
+            repo,
+            trace_dir,
+        }
     }
 
     async fn get(&self, path: &str) -> axum::http::Response<Body> {
@@ -899,7 +990,7 @@ impl SeededChatContext {
             agent_id: seed.agent_id,
             context: None,
             prompt: "Seed child job".to_string(),
-            thread_id: Some(seed.child_thread_id),
+            thread_id: seed.record_thread_id.or(Some(seed.child_thread_id)),
             group_id: None,
             depends_on: Vec::new(),
             cron_expr: None,
@@ -911,62 +1002,63 @@ impl SeededChatContext {
         })
         .await;
 
-        persist_child_trace_metadata(
-            seed.parent_session_id,
-            seed.parent_thread_id,
-            seed.child_thread_id,
-            seed.job_id,
-            seed.agent_id,
-        )
-        .await;
-    }
-}
-
-async fn persist_child_trace_metadata(
-    parent_session_id: SessionId,
-    parent_thread_id: ThreadId,
-    child_thread_id: ThreadId,
-    job_id: &str,
-    agent_id: AgentId,
-) {
-    let trace_root = dirs::home_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("~"))
-        .join(".arguswing")
-        .join("traces");
-    let child_dir = trace_root
-        .join(parent_session_id.to_string())
-        .join(parent_thread_id.to_string())
-        .join(child_thread_id.to_string());
-    tokio::fs::create_dir_all(&child_dir)
-        .await
-        .expect("child trace dir should seed");
-    let metadata = json!({
-        "thread_id": child_thread_id,
-        "kind": "Job",
-        "root_session_id": null,
-        "parent_thread_id": parent_thread_id,
-        "job_id": job_id,
-        "agent_snapshot": {
-            "id": agent_id,
-            "display_name": "Seeded Subagent",
-            "description": "Seeded from chat API test",
-            "version": "1.0.0",
-            "provider_id": null,
-            "model_id": "alpha",
-            "system_prompt": "You are a seeded subagent.",
-            "tool_names": [],
-            "subagent_names": [],
-            "max_tokens": null,
-            "temperature": null,
-            "thinking_config": null
+        if seed.persist_parent_metadata {
+            self.persist_child_trace_metadata(
+                seed.parent_session_id,
+                seed.parent_thread_id,
+                seed.child_thread_id,
+                seed.job_id,
+                seed.agent_id,
+            )
+            .await;
         }
-    });
-    tokio::fs::write(
-        child_dir.join("thread.json"),
-        serde_json::to_vec_pretty(&metadata).unwrap(),
-    )
-    .await
-    .expect("child trace metadata should seed");
+    }
+
+    async fn persist_child_trace_metadata(
+        &self,
+        parent_session_id: SessionId,
+        parent_thread_id: ThreadId,
+        child_thread_id: ThreadId,
+        job_id: &str,
+        agent_id: AgentId,
+    ) {
+        let child_dir = self
+            .trace_dir
+            .path()
+            .join(parent_session_id.to_string())
+            .join(parent_thread_id.to_string())
+            .join(child_thread_id.to_string());
+        tokio::fs::create_dir_all(&child_dir)
+            .await
+            .expect("child trace dir should seed");
+        let metadata = json!({
+            "thread_id": child_thread_id,
+            "kind": "Job",
+            "root_session_id": null,
+            "parent_thread_id": parent_thread_id,
+            "job_id": job_id,
+            "agent_snapshot": {
+                "id": agent_id,
+                "display_name": "Seeded Subagent",
+                "description": "Seeded from chat API test",
+                "version": "1.0.0",
+                "provider_id": null,
+                "model_id": "alpha",
+                "system_prompt": "You are a seeded subagent.",
+                "tool_names": [],
+                "subagent_names": [],
+                "max_tokens": null,
+                "temperature": null,
+                "thinking_config": null
+            }
+        });
+        tokio::fs::write(
+            child_dir.join("thread.json"),
+            serde_json::to_vec_pretty(&metadata).unwrap(),
+        )
+        .await
+        .expect("child trace metadata should seed");
+    }
 }
 
 async fn create_seeded_session(ctx: &SeededChatContext, name: &str) -> SessionSummary {

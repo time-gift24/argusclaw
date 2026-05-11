@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use argus_auth::{AccountManager, AuthError};
@@ -178,6 +179,13 @@ impl ServerCore {
         Self::from_sqlite_pool(pool).await
     }
 
+    pub async fn with_pool_and_trace_dir(
+        pool: SqlitePool,
+        trace_dir: PathBuf,
+    ) -> Result<Arc<Self>> {
+        Self::from_sqlite_pool_with_trace_dir(pool, trace_dir).await
+    }
+
     async fn from_postgres_pool(pool: PgPool) -> Result<Arc<Self>> {
         let cipher = Arc::new(Cipher::new(FileKeySource::from_env_or_default()));
         let postgres = Arc::new(ArgusPostgres::new(pool));
@@ -193,11 +201,19 @@ impl ServerCore {
             postgres.clone() as Arc<dyn AgentRunRepository>,
             postgres.clone() as Arc<dyn UserRepository>,
             cipher,
+            default_trace_dir(),
         )
         .await
     }
 
     async fn from_sqlite_pool(pool: SqlitePool) -> Result<Arc<Self>> {
+        Self::from_sqlite_pool_with_trace_dir(pool, default_trace_dir()).await
+    }
+
+    async fn from_sqlite_pool_with_trace_dir(
+        pool: SqlitePool,
+        trace_dir: PathBuf,
+    ) -> Result<Arc<Self>> {
         let cipher = Arc::new(Cipher::new(FileKeySource::from_env_or_default()));
         let sqlite = Arc::new(ArgusSqlite::new(pool));
         Self::from_repositories(
@@ -212,6 +228,7 @@ impl ServerCore {
             sqlite.clone() as Arc<dyn AgentRunRepository>,
             sqlite.clone() as Arc<dyn UserRepository>,
             cipher,
+            trace_dir,
         )
         .await
     }
@@ -229,6 +246,7 @@ impl ServerCore {
         agent_run_repo: Arc<dyn AgentRunRepository>,
         user_repo: Arc<dyn UserRepository>,
         cipher: Arc<Cipher>,
+        trace_dir: PathBuf,
     ) -> Result<Arc<Self>> {
         let account_manager = Arc::new(AccountManager::new(account_repo.clone(), cipher.clone()));
         let provider_manager =
@@ -242,7 +260,6 @@ impl ServerCore {
 
         let tool_manager = Arc::new(ToolManager::new());
         Self::register_default_tools(&tool_manager);
-        let trace_dir = default_trace_dir();
         let _ = std::fs::create_dir_all(&trace_dir);
 
         let provider_resolver: Arc<dyn ProviderResolver> =
@@ -907,6 +924,15 @@ impl ServerCore {
                 tracing::warn!(job_id = %child.job_id, "recovered child job has no persisted job record");
                 continue;
             };
+            if record.thread_id != Some(child.thread_id) {
+                tracing::warn!(
+                    job_id = %child.job_id,
+                    recovered_thread_id = %child.thread_id,
+                    persisted_thread_id = ?record.thread_id,
+                    "skipping recovered child job with mismatched persisted binding"
+                );
+                continue;
+            }
             summaries.push(chat_thread_job_summary(record, Some(child.thread_id)));
         }
         Ok(summaries)
@@ -927,7 +953,7 @@ impl ServerCore {
             .ok_or_else(|| ArgusError::ThreadNotFound(format!("job {job_id}")))?;
 
         let Some(thread_id) = record.thread_id else {
-            return Ok(pending_job_conversation(record));
+            return Err(ArgusError::ThreadNotFound(format!("job {job_id}")));
         };
 
         let thread = self
@@ -943,23 +969,9 @@ impl ServerCore {
             .map_err(|error| ArgusError::JobError {
                 reason: error.to_string(),
             })?;
-        let parent_session_id = if let Some(parent_thread_id) = parent_thread_id {
-            let parent = self
-                .thread_repo
-                .get_thread(&parent_thread_id)
-                .await
-                .map_err(database_error)?;
-            if let Some(parent_session_id) = parent.and_then(|record| record.session_id) {
-                self.session_manager
-                    .get_thread_snapshot_for_user(user_id, parent_session_id, &parent_thread_id)
-                    .await?;
-                Some(parent_session_id)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
+        let parent_session_id = self
+            .authorize_chat_job_conversation(user_id, &thread, parent_thread_id)
+            .await?;
         let messages = self
             .thread_repo
             .get_messages(&thread_id)
@@ -976,6 +988,36 @@ impl ServerCore {
             parent_session_id,
             messages,
         ))
+    }
+
+    async fn authorize_chat_job_conversation(
+        &self,
+        user_id: UserId,
+        thread: &ThreadRecord,
+        parent_thread_id: Option<ThreadId>,
+    ) -> Result<Option<SessionId>> {
+        if let Some(parent_thread_id) = parent_thread_id {
+            let parent = self
+                .thread_repo
+                .get_thread(&parent_thread_id)
+                .await
+                .map_err(database_error)?;
+            if let Some(parent_session_id) = parent.and_then(|record| record.session_id) {
+                self.session_manager
+                    .get_thread_snapshot_for_user(user_id, parent_session_id, &parent_thread_id)
+                    .await?;
+                return Ok(Some(parent_session_id));
+            }
+        }
+
+        if let Some(session_id) = thread.session_id {
+            self.session_manager
+                .get_thread_snapshot_for_user(user_id, session_id, &thread.id)
+                .await?;
+            return Ok(None);
+        }
+
+        Err(ArgusError::ThreadNotFound(thread.id.to_string()))
     }
 
     pub async fn activate_chat_thread(
@@ -1220,22 +1262,6 @@ fn chat_thread_job_summary(
             .as_ref()
             .map(|result| preview_text(&result.message, 240)),
         bound_thread_id: recovered_thread_id.or(record.thread_id),
-    }
-}
-
-fn pending_job_conversation(record: JobRecord) -> ChatJobConversation {
-    ChatJobConversation {
-        job_id: record.id.to_string(),
-        title: record.name,
-        status: record.status.as_str().to_string(),
-        thread_id: None,
-        session_id: None,
-        parent_session_id: None,
-        parent_thread_id: None,
-        messages: Vec::new(),
-        turn_count: 0,
-        token_count: 0,
-        plan_item_count: 0,
     }
 }
 
