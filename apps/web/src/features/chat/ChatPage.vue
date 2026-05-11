@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { useRouter } from "vue-router";
+import { useRoute, useRouter } from "vue-router";
 import type { PromptProps } from "@opentiny/tiny-robot";
 
 import {
@@ -28,6 +28,7 @@ import DispatchedJobsPanel from "./components/DispatchedJobsPanel.vue";
 import RuntimeActivityRail from "./components/RuntimeActivityRail.vue";
 
 const router = useRouter();
+const route = useRoute();
 const chatSessions = useChatSessions();
 const chatThreadStream = useChatThreadStream({
   activeSessionId: chatSessions.activeSessionId,
@@ -132,6 +133,8 @@ onBeforeUnmount(() => {
 
 async function loadInitialState() {
   const api = getApiClient();
+  const preferredSessionId = getStringQueryValue(route.query.session);
+  const preferredThreadId = getStringQueryValue(route.query.thread);
   const loadErrors: string[] = [];
   chatSessions.loading.value = true;
   chatComposer.error.value = "";
@@ -165,7 +168,7 @@ async function loadInitialState() {
     }
 
     try {
-      await chatSessions.loadInitialState();
+      await chatSessions.loadInitialState(preferredSessionId, preferredThreadId);
       if (chatSessions.activeSessionId.value && chatSessions.activeThreadId.value) {
         try {
           await syncActiveThreadBinding();
@@ -184,6 +187,10 @@ async function loadInitialState() {
   } finally {
     chatSessions.loading.value = false;
   }
+}
+
+function getStringQueryValue(value: unknown) {
+  return typeof value === "string" ? value : undefined;
 }
 
 function formatErrorMessage(reason: unknown) {

@@ -5,7 +5,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 vi.mock("@/lib/opentiny", async () => import("@/test/stubs/opentiny"));
 vi.mock("@opentiny/tiny-robot", async () => import("@/test/stubs/tiny-robot"));
 const routerPush = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
+const routeState = vi.hoisted(() => ({
+  query: {} as Record<string, unknown>,
+}));
 vi.mock("vue-router", () => ({
+  useRoute: () => routeState,
   useRouter: () => ({ push: routerPush }),
 }));
 
@@ -196,6 +200,7 @@ async function chooseAgent(wrapper: ReturnType<typeof mount>, templateId: number
 
 afterEach(() => {
   routerPush.mockClear();
+  routeState.query = {};
   resetApiClient();
   document.body.innerHTML = "";
 });
@@ -329,6 +334,46 @@ describe("ChatPage", () => {
     expect(activateChatThread).toHaveBeenCalledWith("session-1", "thread-1");
     expect(wrapper.get("[data-testid='agent-picker-trigger']").text()).toContain("代码助手");
     expect(wrapper.get("[data-testid='llm-picker-trigger']").text()).toContain("kimi-k2");
+  });
+
+  it("activates the requested session and thread from the initial route query", async () => {
+    routeState.query = {
+      session: "session-2",
+      thread: "thread-2",
+    };
+    const listChatThreads = vi.fn().mockImplementation(async (sessionId: string) => {
+      if (sessionId === "session-1") {
+        return [thread({ id: "thread-1", title: "一号线程" })];
+      }
+      if (sessionId === "session-2") {
+        return [thread({ id: "thread-2", title: "二号线程" })];
+      }
+      return [];
+    });
+    const listChatMessages = vi.fn().mockImplementation(async (sessionId: string, threadId: string) => {
+      if (sessionId === "session-2" && threadId === "thread-2") {
+        return [message("assistant", "二号回复")];
+      }
+      return [message("assistant", "一号回复")];
+    });
+
+    setApiClient(
+      makeApiClient({
+        listChatSessions: vi.fn().mockResolvedValue([
+          session({ id: "session-1", name: "默认会话" }),
+          session({ id: "session-2", name: "二号会话" }),
+        ]),
+        listChatThreads,
+        listChatMessages,
+      }),
+    );
+    const wrapper = mount(ChatPage);
+    await flushPromises();
+
+    expect(listChatThreads).toHaveBeenCalledWith("session-2");
+    expect(listChatMessages).toHaveBeenLastCalledWith("session-2", "thread-2");
+    expect(wrapper.text()).toContain("二号回复");
+    expect(wrapper.text()).not.toContain("一号回复");
   });
 
   it("loads and renders dispatched subagents for the active thread", async () => {
