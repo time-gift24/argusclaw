@@ -59,11 +59,15 @@ function makeApiClient(item: ChatJobConversation): ApiClient {
   } as unknown as ApiClient;
 }
 
+function isApiClient(item: ChatJobConversation | ApiClient): item is ApiClient {
+  return typeof (item as ApiClient).getChatJobConversation === "function";
+}
+
 async function mountJobChatPage(
   item: ChatJobConversation | ApiClient,
   initialPath = "/chat/jobs/job-1",
 ) {
-  const apiClient = "getChatJobConversation" in item ? item : makeApiClient(item);
+  const apiClient = isApiClient(item) ? item : makeApiClient(item);
   setApiClient(apiClient);
 
   const router = createRouter({

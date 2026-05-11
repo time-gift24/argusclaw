@@ -48,7 +48,7 @@ const shouldStickToBottom = ref(true);
 const AUTO_SCROLL_THRESHOLD = 72;
 const DISPATCHED_JOBS_REFRESH_DELAY = 180;
 let dispatchedJobsRequestId = 0;
-let dispatchedJobsRefreshTimer: ReturnType<typeof window.setTimeout> | null = null;
+let dispatchedJobsRefreshTimer: number | null = null;
 
 const chatComposer = useChatComposer({
   activeSessionId: chatSessions.activeSessionId,
