@@ -99,6 +99,7 @@ function deferredConversation() {
 afterEach(() => {
   resetApiClient();
   vi.restoreAllMocks();
+  vi.useRealTimers();
 });
 
 describe("JobChatPage", () => {
@@ -271,5 +272,81 @@ describe("JobChatPage", () => {
 
     expect(wrapper.text()).toContain("second response");
     expect(wrapper.text()).not.toContain("stale response");
+  });
+
+  it("polls a running job conversation until the assistant response arrives", async () => {
+    vi.useFakeTimers();
+    const getChatJobConversation = vi
+      .fn()
+      .mockResolvedValueOnce(conversation({
+        status: "running",
+        messages: [
+          message("user", "执行子任务"),
+        ],
+      }))
+      .mockResolvedValueOnce(conversation({
+        status: "succeeded",
+        messages: [
+          message("user", "执行子任务"),
+          message("assistant", "完成"),
+        ],
+      }));
+    const { wrapper } = await mountJobChatPage({
+      getChatJobConversation,
+    } as unknown as ApiClient);
+
+    expect(getChatJobConversation).toHaveBeenCalledTimes(1);
+    expect(wrapper.text()).not.toContain("完成");
+
+    await vi.advanceTimersByTimeAsync(1500);
+    await flushPromises();
+
+    expect(getChatJobConversation).toHaveBeenCalledTimes(2);
+    expect(wrapper.text()).toContain("完成");
+  });
+
+  it("stops polling after a terminal job conversation response", async () => {
+    vi.useFakeTimers();
+    const getChatJobConversation = vi
+      .fn()
+      .mockResolvedValueOnce(conversation({ status: "running" }))
+      .mockResolvedValueOnce(conversation({
+        status: "succeeded",
+        messages: [
+          message("assistant", "完成"),
+        ],
+      }))
+      .mockResolvedValueOnce(conversation({
+        status: "succeeded",
+        messages: [
+          message("assistant", "不应重复刷新"),
+        ],
+      }));
+    await mountJobChatPage({
+      getChatJobConversation,
+    } as unknown as ApiClient);
+
+    await vi.advanceTimersByTimeAsync(1500);
+    await flushPromises();
+    await vi.advanceTimersByTimeAsync(1500);
+    await flushPromises();
+
+    expect(getChatJobConversation).toHaveBeenCalledTimes(2);
+  });
+
+  it("clears polling when the job page unmounts", async () => {
+    vi.useFakeTimers();
+    const getChatJobConversation = vi
+      .fn()
+      .mockResolvedValue(conversation({ status: "running" }));
+    const { wrapper } = await mountJobChatPage({
+      getChatJobConversation,
+    } as unknown as ApiClient);
+
+    wrapper.unmount();
+    await vi.advanceTimersByTimeAsync(1500);
+    await flushPromises();
+
+    expect(getChatJobConversation).toHaveBeenCalledTimes(1);
   });
 });

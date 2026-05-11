@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import type { PromptProps } from "@opentiny/tiny-robot";
 
@@ -19,6 +19,10 @@ const error = ref("");
 const requestSequence = ref(0);
 const bubbleRoles = createBubbleRoles();
 const starterPrompts: PromptProps[] = [];
+const POLL_INTERVAL_MS = 1500;
+const ACTIVE_STATUSES = new Set(["pending", "queued", "running"]);
+let pollTimer: ReturnType<typeof setInterval> | null = null;
+let pollInFlight = false;
 
 const jobId = computed(() => {
   const value = route.params.jobId;
@@ -56,7 +60,13 @@ watch(jobId, (nextJobId) => {
   void loadConversation(nextJobId);
 }, { immediate: true });
 
+onBeforeUnmount(() => {
+  stopPolling();
+  requestSequence.value += 1;
+});
+
 async function loadConversation(nextJobId: string) {
+  stopPolling();
   const requestId = requestSequence.value + 1;
   requestSequence.value = requestId;
   loading.value = true;
@@ -77,6 +87,7 @@ async function loadConversation(nextJobId: string) {
     const nextConversation = await api.getChatJobConversation(nextJobId);
     if (requestId !== requestSequence.value) return;
     conversation.value = nextConversation;
+    updatePollingForConversation(nextConversation);
   } catch (reason) {
     if (requestId !== requestSequence.value) return;
     error.value = formatErrorMessage(reason);
@@ -84,6 +95,61 @@ async function loadConversation(nextJobId: string) {
     if (requestId === requestSequence.value) {
       loading.value = false;
     }
+  }
+}
+
+function updatePollingForConversation(nextConversation: ChatJobConversation) {
+  if (isActiveJobStatus(nextConversation.status)) {
+    startPolling();
+    return;
+  }
+  stopPolling();
+}
+
+function isActiveJobStatus(status: string) {
+  return ACTIVE_STATUSES.has(status);
+}
+
+function startPolling() {
+  if (pollTimer) return;
+  pollTimer = setInterval(() => {
+    void refreshConversation();
+  }, POLL_INTERVAL_MS);
+}
+
+function stopPolling() {
+  if (!pollTimer) return;
+  clearInterval(pollTimer);
+  pollTimer = null;
+}
+
+async function refreshConversation() {
+  if (pollInFlight) return;
+
+  const nextJobId = jobId.value;
+  if (!nextJobId) {
+    stopPolling();
+    return;
+  }
+
+  const requestId = requestSequence.value;
+  pollInFlight = true;
+
+  try {
+    const api = getApiClient();
+    if (!api.getChatJobConversation) {
+      throw new Error("当前服务不支持 Job 对话。");
+    }
+    const nextConversation = await api.getChatJobConversation(nextJobId);
+    if (requestId !== requestSequence.value || nextJobId !== jobId.value) return;
+    error.value = "";
+    conversation.value = nextConversation;
+    updatePollingForConversation(nextConversation);
+  } catch (reason) {
+    if (requestId !== requestSequence.value || nextJobId !== jobId.value) return;
+    error.value = formatErrorMessage(reason);
+  } finally {
+    pollInFlight = false;
   }
 }
 
