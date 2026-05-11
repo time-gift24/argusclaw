@@ -17,6 +17,7 @@ use axum::{Router, middleware};
 use server_config::ServerConfig;
 use server_core::ServerCore;
 use tower_http::services::{ServeDir, ServeFile};
+use tower_http::trace::TraceLayer;
 
 pub fn router(state: AppState) -> Router {
     router_with_web_dist(state, None)
@@ -28,7 +29,8 @@ pub fn router_with_web_dist(state: AppState, web_dist_dir: Option<PathBuf>) -> R
         .layer(middleware::from_fn_with_state(
             state,
             auth::require_api_auth,
-        ));
+        ))
+        .layer(TraceLayer::new_for_http());
     match web_dist_dir {
         Some(web_dist_dir) => router.fallback_service(
             ServeDir::new(&web_dist_dir).fallback(ServeFile::new(web_dist_dir.join("index.html"))),
@@ -38,21 +40,26 @@ pub fn router_with_web_dist(state: AppState, web_dist_dir: Option<PathBuf>) -> R
 }
 
 pub async fn build_app(database_url: Option<&str>) -> argus_protocol::Result<Router> {
-    let config = ServerConfig::from_env().map_err(|error| argus_protocol::ArgusError::IoError {
-        reason: format!("invalid server config: {error}"),
-    })?;
+    let mut config =
+        ServerConfig::from_env().map_err(|error| argus_protocol::ArgusError::IoError {
+            reason: format!("invalid server config: {error}"),
+        })?;
+    if let Some(database_url) = database_url {
+        config.database_url = database_url.to_string();
+    }
     build_app_with_config(database_url, &config).await
 }
 
 pub async fn build_app_with_config(
-    database_url: Option<&str>,
+    _database_url: Option<&str>,
     config: &ServerConfig,
 ) -> argus_protocol::Result<Router> {
-    let core = ServerCore::init(database_url).await?;
-    let auth =
-        auth::AuthState::from_env().map_err(|error| argus_protocol::ArgusError::IoError {
+    let core = ServerCore::init_with_config(config).await?;
+    let auth = auth::AuthState::from_settings(&config.auth).map_err(|error| {
+        argus_protocol::ArgusError::IoError {
             reason: format!("invalid OAuth2 config: {error}"),
-        })?;
+        }
+    })?;
     Ok(router_with_web_dist(
         AppState::with_auth(core, auth),
         config.web_dist_dir.clone(),

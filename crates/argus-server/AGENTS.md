@@ -66,12 +66,12 @@
 - chat / thread / message API 仅按 server-only 边界扩展；不改 desktop 主流程；thread event SSE 只允许镜像现有 `ThreadEvent`，不新增 desktop rewiring
 - 不新增 settings/admin_settings 持久化、repository、migration 或 HTTP route；实例名作为产品展示文案由 bootstrap 返回
 - `bootstrap.rs` 只返回 web shell 需要的最小实例初始化摘要，不承担 settings/profile 语义
-- `ServerCore::init(database_url)` 负责连接 PostgreSQL、migration、manager/runtime 装配与 builtin template seed
+- `ServerCore::init_with_config(config)` 负责连接 PostgreSQL、migration、manager/runtime 装配与 builtin template seed
 - `ServerCore::with_pool(pool)` 只用于测试和 in-memory SQLite harness
-- server/web 运行时必须提供 PostgreSQL `DATABASE_URL`（`postgres://` 或 `postgresql://`）；SQLite 只允许测试 harness 使用
+- server/web 运行时必须通过 TOML `[database].url` 提供 PostgreSQL URL（`postgres://` 或 `postgresql://`）；SQLite 只允许测试 harness 使用
 - 管理类 API 需要当前 `users.id` 对应 `is_admin=true`；普通用户只允许 bootstrap/auth 和 chat API
-- 默认 trace 路径保持 `TRACE_DIR` 优先，否则 `~/.arguswing/traces`
-- 默认 bind address 保持 `ARGUS_SERVER_ADDR` 优先，否则 `127.0.0.1:3000`
+- 默认 trace 路径来自 `[trace].dir`，否则 `~/.arguswing/traces`
+- 默认 bind address 来自 `[server].bind_addr`，否则 `127.0.0.1:3000`
 - response shape、状态码和错误 envelope 改动前必须同步更新 server 测试与 web API client
 - 路由保持窄接口，避免把 desktop 命令面直接平移成大而全的 server surface
 
