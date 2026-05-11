@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { useRouter } from "vue-router";
 import type { PromptProps } from "@opentiny/tiny-robot";
 
 import {
@@ -7,6 +8,7 @@ import {
   type AgentRecord,
   type ChatSessionSummary,
   type ChatThreadBinding,
+  type ChatThreadJobSummary,
   type ChatThreadSummary,
   type LlmProviderRecord,
 } from "@/lib/api";
@@ -22,8 +24,10 @@ import {
 import ChatComposerBar from "./components/ChatComposerBar.vue";
 import ChatConversationPanel from "./components/ChatConversationPanel.vue";
 import ChatHistoryDialog from "./components/ChatHistoryDialog.vue";
+import DispatchedJobsPanel from "./components/DispatchedJobsPanel.vue";
 import RuntimeActivityRail from "./components/RuntimeActivityRail.vue";
 
+const router = useRouter();
 const chatSessions = useChatSessions();
 const chatThreadStream = useChatThreadStream({
   activeSessionId: chatSessions.activeSessionId,
@@ -35,9 +39,15 @@ const templates = ref<AgentRecord[]>([]);
 const selectedTemplateId = ref<number | null>(null);
 const selectedProviderId = ref<number | null>(null);
 const selectedModel = ref("");
+const dispatchedJobs = ref<ChatThreadJobSummary[]>([]);
+const dispatchedJobsLoading = ref(false);
+const dispatchedJobsError = ref("");
 const chatBodyStreamRef = ref<HTMLElement | null>(null);
 const shouldStickToBottom = ref(true);
 const AUTO_SCROLL_THRESHOLD = 72;
+const DISPATCHED_JOBS_REFRESH_DELAY = 180;
+let dispatchedJobsRequestId = 0;
+let dispatchedJobsRefreshTimer: ReturnType<typeof window.setTimeout> | null = null;
 
 const chatComposer = useChatComposer({
   activeSessionId: chatSessions.activeSessionId,
@@ -115,6 +125,9 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   chatThreadStream.closeThreadEvents();
+  if (dispatchedJobsRefreshTimer !== null) {
+    window.clearTimeout(dispatchedJobsRefreshTimer);
+  }
 });
 
 async function loadInitialState() {
@@ -177,6 +190,71 @@ function formatErrorMessage(reason: unknown) {
   return reason instanceof Error ? reason.message : String(reason);
 }
 
+function clearDispatchedJobs() {
+  dispatchedJobsRequestId += 1;
+  dispatchedJobs.value = [];
+  dispatchedJobsLoading.value = false;
+  dispatchedJobsError.value = "";
+}
+
+async function refreshDispatchedJobs() {
+  const sessionId = chatSessions.activeSessionId.value;
+  const threadId = chatSessions.activeThreadId.value;
+  if (!sessionId || !threadId) {
+    clearDispatchedJobs();
+    return;
+  }
+
+  const requestId = ++dispatchedJobsRequestId;
+  dispatchedJobsLoading.value = true;
+  dispatchedJobsError.value = "";
+  try {
+    const api = getApiClient();
+    if (!api.listChatThreadJobs) {
+      dispatchedJobs.value = [];
+      dispatchedJobsError.value = "当前后端不支持派发记录接口";
+      return;
+    }
+
+    const jobs = await api.listChatThreadJobs(sessionId, threadId);
+    if (requestId !== dispatchedJobsRequestId) return;
+    dispatchedJobs.value = jobs;
+  } catch (reason) {
+    if (requestId !== dispatchedJobsRequestId) return;
+    dispatchedJobs.value = [];
+    dispatchedJobsError.value = formatErrorMessage(reason);
+  } finally {
+    if (requestId === dispatchedJobsRequestId) {
+      dispatchedJobsLoading.value = false;
+    }
+  }
+}
+
+function scheduleDispatchedJobsRefresh() {
+  if (dispatchedJobsRefreshTimer !== null) {
+    window.clearTimeout(dispatchedJobsRefreshTimer);
+  }
+  dispatchedJobsRefreshTimer = window.setTimeout(() => {
+    dispatchedJobsRefreshTimer = null;
+    void refreshDispatchedJobs();
+  }, DISPATCHED_JOBS_REFRESH_DELAY);
+}
+
+function openJob(jobId: string) {
+  try {
+    void router.push({
+      name: "chat-job",
+      params: { jobId },
+      query: {
+        fromSession: chatSessions.activeSessionId.value,
+        fromThread: chatSessions.activeThreadId.value,
+      },
+    }).catch(() => undefined);
+  } catch {
+    // Task 6 wires the named route; until then, avoid surfacing router setup noise.
+  }
+}
+
 watch(
   () => chatSessions.activeThreadId.value,
   (threadId, previousThreadId) => {
@@ -190,6 +268,29 @@ watch(
       chatThreadStream.resetRuntimeActivity();
       chatThreadStream.openThreadEvents(chatSessions.activeSessionId.value, threadId);
     }
+  },
+);
+
+watch(
+  () => [chatSessions.activeSessionId.value, chatSessions.activeThreadId.value] as const,
+  ([sessionId, threadId]) => {
+    if (!sessionId || !threadId) {
+      clearDispatchedJobs();
+      return;
+    }
+    void refreshDispatchedJobs();
+  },
+);
+
+watch(
+  () =>
+    chatThreadStream.runtimeActivities.value
+      .filter((activity) => activity.kind === "job")
+      .map((activity) => `${activity.id}:${activity.status}:${activity.resultPreview}`)
+      .join("|"),
+  (signature) => {
+    if (!signature) return;
+    scheduleDispatchedJobsRefresh();
   },
 );
 
@@ -374,6 +475,13 @@ function applyPrompt(_event: MouseEvent, item: PromptProps) {
 
     <div class="chat-runtime-floating-layer">
       <RuntimeActivityRail :activities="chatThreadStream.runtimeActivities.value" />
+      <DispatchedJobsPanel
+        :jobs="dispatchedJobs"
+        :loading="dispatchedJobsLoading"
+        :error="dispatchedJobsError"
+        @open-job="openJob"
+        @refresh="refreshDispatchedJobs"
+      />
     </div>
 
     <div class="chat-page__composer-dock">
@@ -471,12 +579,15 @@ function applyPrompt(_event: MouseEvent, item: PromptProps) {
   top: var(--space-6);
   right: var(--space-6);
   z-index: 25;
+  display: grid;
+  gap: var(--space-3);
   width: var(--chat-rail-width);
   max-width: calc(100vw - 260px - var(--space-6) - var(--space-6));
   pointer-events: none;
 }
 
-.chat-runtime-floating-layer :deep(.runtime-rail) {
+.chat-runtime-floating-layer :deep(.runtime-rail),
+.chat-runtime-floating-layer :deep(.dispatched-jobs) {
   width: 100%;
   pointer-events: auto;
 }

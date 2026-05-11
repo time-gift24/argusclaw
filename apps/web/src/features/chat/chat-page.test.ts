@@ -4,6 +4,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@/lib/opentiny", async () => import("@/test/stubs/opentiny"));
 vi.mock("@opentiny/tiny-robot", async () => import("@/test/stubs/tiny-robot"));
+const routerPush = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
+vi.mock("vue-router", () => ({
+  useRouter: () => ({ push: routerPush }),
+}));
 
 import ChatPage from "./ChatPage.vue";
 import ChatConversationPanel from "./components/ChatConversationPanel.vue";
@@ -18,6 +22,7 @@ import {
   type ChatSessionSummary,
   type ChatThreadSnapshot,
   type ChatThreadSummary,
+  type ChatThreadJobSummary,
   type LlmProviderRecord,
   type RuntimeEventSubscription,
   type ChatThreadEventHandlers,
@@ -98,6 +103,20 @@ function message(
   };
 }
 
+function dispatchedJob(overrides: Partial<ChatThreadJobSummary> = {}): ChatThreadJobSummary {
+  return {
+    job_id: "job-1",
+    title: "整理会议纪要",
+    subagent_name: "researcher",
+    status: "succeeded",
+    created_at: "2026-05-11T09:00:00Z",
+    updated_at: "2026-05-11T09:02:00Z",
+    result_preview: "已完成纪要整理",
+    bound_thread_id: "thread-job-1",
+    ...overrides,
+  };
+}
+
 function makeApiClient(overrides: Partial<ApiClient> = {}): ApiClient {
   return {
     getHealth: vi.fn().mockResolvedValue({ status: "ok" }),
@@ -154,6 +173,7 @@ function makeApiClient(overrides: Partial<ApiClient> = {}): ApiClient {
     sendChatMessage: vi.fn().mockResolvedValue({ accepted: true }),
     cancelChatThread: vi.fn().mockResolvedValue({ accepted: true }),
     subscribeChatThread: vi.fn().mockReturnValue({ close: vi.fn() }),
+    listChatThreadJobs: vi.fn().mockResolvedValue([]),
     ...overrides,
   } as ApiClient;
 }
@@ -175,6 +195,7 @@ async function chooseAgent(wrapper: ReturnType<typeof mount>, templateId: number
 }
 
 afterEach(() => {
+  routerPush.mockClear();
   resetApiClient();
   document.body.innerHTML = "";
 });
@@ -308,6 +329,28 @@ describe("ChatPage", () => {
     expect(activateChatThread).toHaveBeenCalledWith("session-1", "thread-1");
     expect(wrapper.get("[data-testid='agent-picker-trigger']").text()).toContain("代码助手");
     expect(wrapper.get("[data-testid='llm-picker-trigger']").text()).toContain("kimi-k2");
+  });
+
+  it("loads and renders dispatched subagents for the active thread", async () => {
+    const listChatThreadJobs = vi.fn().mockResolvedValue([
+      dispatchedJob({ job_id: "job-1", title: "整理会议纪要", subagent_name: "researcher" }),
+    ]);
+    setApiClient(
+      makeApiClient({
+        listChatSessions: vi.fn().mockResolvedValue([session()]),
+        listChatThreads: vi.fn().mockResolvedValue([thread()]),
+        listChatMessages: vi.fn().mockResolvedValue([]),
+        listChatThreadJobs,
+      }),
+    );
+
+    const wrapper = mount(ChatPage);
+    await flushPromises();
+
+    expect(listChatThreadJobs).toHaveBeenCalledWith("session-1", "thread-1");
+    expect(wrapper.text()).toContain("已派发 subagent");
+    expect(wrapper.text()).toContain("整理会议纪要");
+    expect(wrapper.text()).toContain("researcher");
   });
 
   it("scrolls the primary chat stream to the bottom when messages render", async () => {
@@ -844,7 +887,6 @@ describe("ChatPage", () => {
     expect(wrapper.find(".composer-bar--dock").exists()).toBe(true);
     expect(wrapper.find(".chat-panel__header").exists()).toBe(false);
     expect(wrapper.text()).not.toContain("Conversation");
-    expect(wrapper.text()).not.toContain("刷新");
     expect(wrapper.text()).not.toContain("激活");
     expect(wrapper.text()).not.toContain("取消运行");
   });
