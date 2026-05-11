@@ -15,6 +15,7 @@ use uuid::Uuid;
 
 use crate::app_state::AppState;
 use crate::error::ApiError;
+use crate::server_config::AuthSettings;
 
 const DEFAULT_SCOPE: &str = "base.profile";
 const SESSION_COOKIE_NAME: &str = "argus_session";
@@ -355,6 +356,32 @@ impl AuthState {
                 redirect_uri: redirect_uri.as_deref(),
                 scope: scope.as_deref(),
                 cookie_secure: cookie_secure.as_deref(),
+            },
+        )
+    }
+
+    pub fn from_settings(settings: &AuthSettings) -> Result<Self, AuthConfigError> {
+        let oauth = &settings.oauth;
+        Self::from_env_values(
+            Some(if settings.dev_enabled {
+                "true"
+            } else {
+                "false"
+            }),
+            AuthEnvValues {
+                enabled: Some(if oauth.enabled { "true" } else { "false" }),
+                client_id: oauth.client_id.as_deref(),
+                client_secret: oauth.client_secret.as_deref(),
+                base_url: oauth.base_url.as_deref(),
+                authorize_url: oauth.authorize_url.as_deref(),
+                token_url: oauth.token_url.as_deref(),
+                userinfo_url: oauth.userinfo_url.as_deref(),
+                logout_url: oauth.logout_url.as_deref(),
+                redirect_uri: oauth.redirect_uri.as_deref(),
+                scope: oauth.scope.as_deref(),
+                cookie_secure: oauth
+                    .cookie_secure
+                    .map(|value| if value { "true" } else { "false" }),
             },
         )
     }
@@ -851,6 +878,7 @@ pub(crate) fn header_value(value: &str) -> Result<HeaderValue, ApiError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::server_config::{AuthSettings, OAuthSettings};
 
     #[test]
     fn config_derives_oauth_endpoints_from_base_url() {
@@ -935,5 +963,29 @@ mod tests {
         .expect_err("dev auth and OAuth should not both be enabled");
 
         assert!(matches!(error, AuthConfigError::ConflictingDevAuth));
+    }
+
+    #[test]
+    fn auth_state_builds_from_server_config_values() {
+        let state = AuthState::from_settings(&AuthSettings {
+            dev_enabled: false,
+            oauth: OAuthSettings {
+                enabled: true,
+                client_id: Some("client".to_string()),
+                client_secret: Some("secret".to_string()),
+                base_url: Some("https://auth.example.test".to_string()),
+                authorize_url: None,
+                token_url: None,
+                userinfo_url: None,
+                logout_url: None,
+                redirect_uri: Some("http://127.0.0.1:3010/auth/callback".to_string()),
+                scope: None,
+                cookie_secure: Some(false),
+            },
+        })
+        .expect("auth settings should build");
+
+        assert!(state.is_enabled());
+        assert!(!state.is_dev_enabled());
     }
 }

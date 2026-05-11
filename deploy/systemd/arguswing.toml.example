@@ -1,0 +1,33 @@
+[server]
+bind_addr = "0.0.0.0:3010"
+web_dist_dir = "/opt/arguswing/web"
+
+[database]
+# Use `argus-server config encrypt --config /etc/arguswing/arguswing.toml --value 'postgres://...'`
+# for production URLs that contain credentials.
+url = "postgres://argus:argus_dev@127.0.0.1:5432/argus_dev"
+
+[trace]
+# Agent/thread traces are stored here. Service logs go to journald unless [logging].file_path is set.
+dir = "/opt/arguswing/traces"
+
+[crypto]
+# Back up this file with arguswing.toml. Losing it makes encrypted TOML secrets undecryptable.
+master_key_path = "/etc/arguswing/master.key"
+
+[auth]
+dev_enabled = false
+
+[auth.oauth]
+enabled = false
+base_url = "https://auth.example.test"
+client_id = "replace-me"
+# Replace with an encrypted inline table:
+# client_secret = { encrypted = "...", nonce = "..." }
+redirect_uri = "https://argus.example.test/auth/callback"
+scope = "base.profile"
+cookie_secure = true
+
+[logging]
+level = "info"
+# file_path = "/opt/arguswing/logs/server.log"

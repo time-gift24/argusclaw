@@ -70,11 +70,29 @@ linux-build:
 # Build and run the server-hosted release build locally for manual testing.
 server-dev: linux-build
 	install -d "$(CURDIR)/.tmp/arguswing-dev/data" "$(CURDIR)/.tmp/arguswing-dev/traces"
-	ARGUS_SERVER_ADDR="$(ARGUS_SERVER_ADDR)" \
-	ARGUS_WEB_DIST_DIR="$(CURDIR)/apps/web/dist" \
-	DATABASE_URL="$(DATABASE_URL)" \
-	TRACE_DIR="$(CURDIR)/.tmp/arguswing-dev/traces" \
-	./target/release/argus-server
+	printf '%s\n' \
+		'[server]' \
+		'bind_addr = "$(ARGUS_SERVER_ADDR)"' \
+		'web_dist_dir = "$(CURDIR)/apps/web/dist"' \
+		'' \
+		'[database]' \
+		'url = "$(DATABASE_URL)"' \
+		'' \
+		'[trace]' \
+		'dir = "$(CURDIR)/.tmp/arguswing-dev/traces"' \
+		'' \
+		'[crypto]' \
+		'master_key_path = "$(CURDIR)/.tmp/arguswing-dev/master.key"' \
+		'' \
+		'[auth]' \
+		'dev_enabled = true' \
+		'' \
+		'[auth.oauth]' \
+		'enabled = false' \
+		'' \
+		'[logging]' \
+		'level = "info"' > "$(CURDIR)/.tmp/arguswing-dev/arguswing.toml"
+	./target/release/argus-server --config "$(CURDIR)/.tmp/arguswing-dev/arguswing.toml"
 
 # Stage Linux deployment files without touching system directories.
 linux-package: linux-build
@@ -82,7 +100,7 @@ linux-package: linux-build
 	install -d "$(LINUX_STAGE_DIR)/bin" "$(LINUX_STAGE_DIR)/web" "$(LINUX_STAGE_DIR)/deploy/systemd" "$(LINUX_STAGE_DIR)/deploy/nginx"
 	install -m 0755 target/release/argus-server "$(LINUX_STAGE_DIR)/bin/argus-server"
 	cp -R apps/web/dist/. "$(LINUX_STAGE_DIR)/web/"
-	cp deploy/systemd/arguswing.service deploy/systemd/arguswing.env.example "$(LINUX_STAGE_DIR)/deploy/systemd/"
+	cp deploy/systemd/arguswing.service deploy/systemd/arguswing.toml.example "$(LINUX_STAGE_DIR)/deploy/systemd/"
 	cp deploy/nginx/arguswing.conf "$(LINUX_STAGE_DIR)/deploy/nginx/"
 
 # Install and restart the Linux service. Run as root, e.g.:
@@ -109,18 +127,52 @@ linux-deploy:
 	chown -R "$(SERVICE_USER):$(SERVICE_GROUP)" "$(INSTALL_DIR)"
 	@if [ "$(DEPLOY_MODE)" = "server" ]; then \
 		printf '%s\n' \
-			'ARGUS_SERVER_ADDR=$(SERVER_ADDR_SERVER)' \
-			'ARGUS_WEB_DIST_DIR=$(INSTALL_DIR)/web' \
-			'DATABASE_URL=$(DATABASE_URL)' \
-			'TRACE_DIR=$(INSTALL_DIR)/traces' > "$(ETC_DIR)/arguswing.env"; \
+			'[server]' \
+			'bind_addr = "$(SERVER_ADDR_SERVER)"' \
+			'web_dist_dir = "$(INSTALL_DIR)/web"' \
+			'' \
+			'[database]' \
+			'url = "$(DATABASE_URL)"' \
+			'' \
+			'[trace]' \
+			'dir = "$(INSTALL_DIR)/traces"' \
+			'' \
+			'[crypto]' \
+			'master_key_path = "$(ETC_DIR)/master.key"' \
+			'' \
+			'[auth]' \
+			'dev_enabled = false' \
+			'' \
+			'[auth.oauth]' \
+			'enabled = false' \
+			'' \
+			'[logging]' \
+			'level = "info"' > "$(ETC_DIR)/arguswing.toml"; \
 	else \
 		printf '%s\n' \
-			'ARGUS_SERVER_ADDR=$(SERVER_ADDR_NGINX)' \
-			'DATABASE_URL=$(DATABASE_URL)' \
-			'TRACE_DIR=$(INSTALL_DIR)/traces' > "$(ETC_DIR)/arguswing.env"; \
+			'[server]' \
+			'bind_addr = "$(SERVER_ADDR_NGINX)"' \
+			'' \
+			'[database]' \
+			'url = "$(DATABASE_URL)"' \
+			'' \
+			'[trace]' \
+			'dir = "$(INSTALL_DIR)/traces"' \
+			'' \
+			'[crypto]' \
+			'master_key_path = "$(ETC_DIR)/master.key"' \
+			'' \
+			'[auth]' \
+			'dev_enabled = false' \
+			'' \
+			'[auth.oauth]' \
+			'enabled = false' \
+			'' \
+			'[logging]' \
+			'level = "info"' > "$(ETC_DIR)/arguswing.toml"; \
 	fi
-	chown "$(SERVICE_USER):$(SERVICE_GROUP)" "$(ETC_DIR)/arguswing.env"
-	chmod 0640 "$(ETC_DIR)/arguswing.env"
+	chown "$(SERVICE_USER):$(SERVICE_GROUP)" "$(ETC_DIR)/arguswing.toml"
+	chmod 0640 "$(ETC_DIR)/arguswing.toml"
 	sed -e 's#/opt/arguswing#$(INSTALL_DIR)#g' -e 's#/etc/arguswing#$(ETC_DIR)#g' -e 's#User=arguswing#User=$(SERVICE_USER)#g' -e 's#Group=arguswing#Group=$(SERVICE_GROUP)#g' deploy/systemd/arguswing.service > "$(SYSTEMD_DIR)/$(SERVICE_NAME).service"
 	@if [ "$(DEPLOY_MODE)" = "nginx" ]; then \
 		install -d "$(INSTALL_DIR)/deploy/nginx"; \
