@@ -33,7 +33,7 @@ onMounted(() => {
 });
 
 watchEffect(() => {
-  if (!isAdminUser.value && !route.path.startsWith("/chat")) {
+  if (!isAdminUser.value && !isAllowedChatPath(route.path)) {
     void router.replace("/chat");
   }
 });
@@ -58,6 +58,10 @@ function toggleTheme() {
     document.documentElement.classList.remove("theme-dark");
     localStorage.setItem("theme", "light");
   }
+}
+
+function isAllowedChatPath(path: string) {
+  return path === "/chat" || /^\/chat\/jobs\/[^/]+$/.test(path);
 }
 </script>
 

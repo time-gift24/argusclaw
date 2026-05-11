@@ -60,10 +60,11 @@ function makeApiClient(item: ChatJobConversation): ApiClient {
 }
 
 async function mountJobChatPage(
-  item: ChatJobConversation,
+  item: ChatJobConversation | ApiClient,
   initialPath = "/chat/jobs/job-1",
 ) {
-  setApiClient(makeApiClient(item));
+  const apiClient = "getChatJobConversation" in item ? item : makeApiClient(item);
+  setApiClient(apiClient);
 
   const router = createRouter({
     history: createMemoryHistory(),
@@ -82,7 +83,17 @@ async function mountJobChatPage(
   });
   await flushPromises();
 
-  return { router, wrapper };
+  return { apiClient, router, wrapper };
+}
+
+function deferredConversation() {
+  let resolve!: (value: ChatJobConversation) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<ChatJobConversation>((promiseResolve, promiseReject) => {
+    resolve = promiseResolve;
+    reject = promiseReject;
+  });
+  return { promise, reject, resolve };
 }
 
 afterEach(() => {
@@ -120,6 +131,8 @@ describe("JobChatPage", () => {
     }));
 
     expect(wrapper.text()).toContain("执行线程尚未就绪");
+    expect(wrapper.text()).not.toContain("快速开始");
+    expect(wrapper.find(".prompt-panel").exists()).toBe(false);
   });
 
   it("returns to the parent conversation from conversation parent ids", async () => {
@@ -159,5 +172,104 @@ describe("JobChatPage", () => {
         thread: "query-thread",
       },
     });
+  });
+
+  it("does not mix partial parent ids with query fallback ids", async () => {
+    const { router, wrapper } = await mountJobChatPage(
+      conversation({
+        parent_session_id: "session-1",
+        parent_thread_id: null,
+      }),
+      "/chat/jobs/job-1?fromThread=query-thread",
+    );
+
+    await wrapper.get("button").trigger("click");
+    await flushPromises();
+
+    expect(router.currentRoute.value).toMatchObject({
+      name: "chat",
+      query: {},
+    });
+  });
+
+  it("uses query fallback ids as a pair when parent ids are incomplete", async () => {
+    const { router, wrapper } = await mountJobChatPage(
+      conversation({
+        parent_session_id: "session-1",
+        parent_thread_id: null,
+      }),
+      "/chat/jobs/job-1?fromSession=query-session&fromThread=query-thread",
+    );
+
+    await wrapper.get("button").trigger("click");
+    await flushPromises();
+
+    expect(router.currentRoute.value).toMatchObject({
+      name: "chat",
+      query: {
+        session: "query-session",
+        thread: "query-thread",
+      },
+    });
+  });
+
+  it("loads the next job when the route param changes", async () => {
+    const getChatJobConversation = vi.fn(async (jobId: string) =>
+      conversation({
+        job_id: jobId,
+        title: `job:${jobId}`,
+        messages: [
+          message("assistant", `loaded ${jobId}`),
+        ],
+      }));
+    const { router, wrapper } = await mountJobChatPage({
+      getChatJobConversation,
+    } as unknown as ApiClient);
+
+    expect(wrapper.text()).toContain("loaded job-1");
+
+    await router.push("/chat/jobs/job-2");
+    await flushPromises();
+
+    expect(getChatJobConversation).toHaveBeenCalledWith("job-1");
+    expect(getChatJobConversation).toHaveBeenCalledWith("job-2");
+    expect(wrapper.text()).toContain("loaded job-2");
+    expect(wrapper.text()).not.toContain("loaded job-1");
+  });
+
+  it("ignores stale job conversation responses", async () => {
+    const first = deferredConversation();
+    const second = deferredConversation();
+    const getChatJobConversation = vi
+      .fn()
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(second.promise);
+    const { router, wrapper } = await mountJobChatPage({
+      getChatJobConversation,
+    } as unknown as ApiClient);
+
+    await router.push("/chat/jobs/job-2");
+    await flushPromises();
+
+    second.resolve(conversation({
+      job_id: "job-2",
+      title: "job:job-2",
+      messages: [
+        message("assistant", "second response"),
+      ],
+    }));
+    await flushPromises();
+
+    first.resolve(conversation({
+      job_id: "job-1",
+      title: "job:job-1",
+      messages: [
+        message("assistant", "stale response"),
+      ],
+    }));
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("second response");
+    expect(wrapper.text()).not.toContain("stale response");
   });
 });

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import type { PromptProps } from "@opentiny/tiny-robot";
 
@@ -16,12 +16,16 @@ const router = useRouter();
 const conversation = ref<ChatJobConversation | null>(null);
 const loading = ref(false);
 const error = ref("");
+const requestSequence = ref(0);
 const bubbleRoles = createBubbleRoles();
 const starterPrompts: PromptProps[] = [];
 
 const jobId = computed(() => {
   const value = route.params.jobId;
-  return Array.isArray(value) ? value[0] ?? "" : value;
+  if (Array.isArray(value)) {
+    return typeof value[0] === "string" ? value[0] : "";
+  }
+  return typeof value === "string" ? value : "";
 });
 
 const robotMessages = computed(() => toRobotMessages({
@@ -40,23 +44,46 @@ const notice = computed(() => {
   return "";
 });
 
-onMounted(() => {
-  void loadConversation();
+const hasMessages = computed(() => robotMessages.value.length > 0);
+const emptyStateText = computed(() => {
+  if (loading.value) return "正在加载 Job 对话…";
+  if (error.value) return error.value;
+  if (notice.value) return notice.value;
+  return "Job 对话尚未写入消息。";
 });
 
-async function loadConversation() {
+watch(jobId, (nextJobId) => {
+  void loadConversation(nextJobId);
+}, { immediate: true });
+
+async function loadConversation(nextJobId: string) {
+  const requestId = requestSequence.value + 1;
+  requestSequence.value = requestId;
   loading.value = true;
   error.value = "";
+  conversation.value = null;
+
+  if (!nextJobId) {
+    error.value = "Job ID 无效。";
+    loading.value = false;
+    return;
+  }
+
   try {
     const api = getApiClient();
     if (!api.getChatJobConversation) {
       throw new Error("当前服务不支持 Job 对话。");
     }
-    conversation.value = await api.getChatJobConversation(jobId.value);
+    const nextConversation = await api.getChatJobConversation(nextJobId);
+    if (requestId !== requestSequence.value) return;
+    conversation.value = nextConversation;
   } catch (reason) {
+    if (requestId !== requestSequence.value) return;
     error.value = formatErrorMessage(reason);
   } finally {
-    loading.value = false;
+    if (requestId === requestSequence.value) {
+      loading.value = false;
+    }
   }
 }
 
@@ -67,11 +94,17 @@ function firstQueryValue(value: unknown) {
 }
 
 function returnToParentConversation() {
-  const session = conversation.value?.parent_session_id ?? firstQueryValue(route.query.fromSession);
-  const thread = conversation.value?.parent_thread_id ?? firstQueryValue(route.query.fromThread);
+  const parentSession = conversation.value?.parent_session_id;
+  const parentThread = conversation.value?.parent_thread_id;
+  if (typeof parentSession === "string" && typeof parentThread === "string") {
+    void router.push({ name: "chat", query: { session: parentSession, thread: parentThread } });
+    return;
+  }
 
-  if (typeof session === "string" && typeof thread === "string") {
-    void router.push({ name: "chat", query: { session, thread } });
+  const querySession = firstQueryValue(route.query.fromSession);
+  const queryThread = firstQueryValue(route.query.fromThread);
+  if (typeof querySession === "string" && typeof queryThread === "string") {
+    void router.push({ name: "chat", query: { session: querySession, thread: queryThread } });
     return;
   }
 
@@ -102,6 +135,7 @@ function formatErrorMessage(reason: unknown) {
 
     <div class="job-chat-page__body">
       <ChatConversationPanel
+        v-if="hasMessages"
         :error="error"
         :notice="notice"
         :thread-loading="loading"
@@ -109,6 +143,9 @@ function formatErrorMessage(reason: unknown) {
         :bubble-roles="bubbleRoles"
         :starter-prompts="starterPrompts"
       />
+      <div v-else class="job-chat-page__empty" :class="{ 'job-chat-page__empty--danger': error }">
+        {{ emptyStateText }}
+      </div>
     </div>
   </section>
 </template>
@@ -181,6 +218,26 @@ function formatErrorMessage(reason: unknown) {
 
 .job-chat-page__body :deep(.message-stage) {
   padding-bottom: var(--space-6);
+}
+
+.job-chat-page__empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 280px;
+  border: 1px dashed var(--border-default);
+  border-radius: var(--radius-lg);
+  background: var(--surface-base);
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+  padding: var(--space-6);
+  text-align: center;
+}
+
+.job-chat-page__empty--danger {
+  border-color: color-mix(in srgb, var(--status-danger) 42%, var(--border-default));
+  color: var(--status-danger);
 }
 
 @media (max-width: 1180px) {

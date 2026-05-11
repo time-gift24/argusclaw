@@ -112,4 +112,57 @@ describe("AdminLayout", () => {
     expect(wrapper.text()).not.toContain("运行状态");
     expect(replace).toHaveBeenCalledWith("/chat");
   });
+
+  it("allows ordinary users to stay on chat job routes", async () => {
+    getBootstrap.mockResolvedValueOnce({
+      instance_name: "ArgusWing",
+      provider_count: 0,
+      template_count: 0,
+      mcp_server_count: 0,
+      default_provider_id: 1,
+      default_template_id: null,
+      mcp_ready_count: 0,
+      current_user: {
+        id: "11111111-1111-1111-1111-111111111111",
+        external_id: "ordinary-user",
+        display_name: null,
+        is_admin: false,
+      },
+    });
+    mockRoute.path = "/chat/jobs/job-1";
+    mockRoute.meta = {
+      hideRouteHeader: true,
+      immersive: true,
+    };
+
+    mount(AdminLayout);
+    await flushPromises();
+
+    expect(replace).not.toHaveBeenCalled();
+  });
+
+  it("does not treat unrelated chat-prefixed routes as ordinary-user chat routes", async () => {
+    getBootstrap.mockResolvedValueOnce({
+      instance_name: "ArgusWing",
+      provider_count: 0,
+      template_count: 0,
+      mcp_server_count: 0,
+      default_provider_id: 1,
+      default_template_id: null,
+      mcp_ready_count: 0,
+      current_user: {
+        id: "11111111-1111-1111-1111-111111111111",
+        external_id: "ordinary-user",
+        display_name: null,
+        is_admin: false,
+      },
+    });
+    mockRoute.path = "/chat-settings";
+    mockRoute.meta = {};
+
+    mount(AdminLayout);
+    await flushPromises();
+
+    expect(replace).toHaveBeenCalledWith("/chat");
+  });
 });
