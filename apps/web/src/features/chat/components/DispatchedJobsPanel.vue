@@ -170,7 +170,7 @@ function openJob(jobId: string) {
 }
 
 .dispatched-jobs__state--error {
-  color: var(--status-danger);
+  color: var(--danger);
 }
 
 .dispatched-jobs__list {
@@ -235,7 +235,7 @@ function openJob(jobId: string) {
   justify-content: center;
   padding: 3px 9px;
   border-radius: 999px;
-  background: color-mix(in srgb, var(--surface-muted) 92%, white);
+  background: color-mix(in srgb, var(--surface-overlay) 92%, white);
   color: var(--text-secondary);
   font-size: var(--text-xs);
   font-weight: 650;
@@ -251,13 +251,13 @@ function openJob(jobId: string) {
 }
 
 .dispatched-jobs__status--succeeded {
-  background: color-mix(in srgb, var(--status-success) 12%, white);
-  color: var(--status-success);
+  background: var(--success-bg);
+  color: var(--success);
 }
 
 .dispatched-jobs__status--failed,
 .dispatched-jobs__status--cancelled {
-  background: color-mix(in srgb, var(--status-danger) 12%, white);
-  color: var(--status-danger);
+  background: var(--danger-bg);
+  color: var(--danger);
 }
 </style>

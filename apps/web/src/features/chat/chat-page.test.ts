@@ -432,6 +432,8 @@ describe("ChatPage", () => {
     expect(source).toContain("width: min(100%, var(--chat-composer-width));");
     expect(source).not.toContain("calc((100% - var(--chat-message-width)) / 2)");
     expect(source).toContain("position: absolute;");
+    expect(source).toContain("pointer-events: none;");
+    expect(source).not.toContain("pointer-events: auto;\n  }\n\n  .chat-runtime-floating-layer :deep(.runtime-rail--collapsed)");
     expect(source).not.toContain("chat-workspace");
     expect(source).not.toContain("chat-main-column");
     expect(source).not.toContain("--chat-sidecar-width");
@@ -445,6 +447,50 @@ describe("ChatPage", () => {
     expect(railSource).toContain(".runtime-rail__list");
     expect(railSource).toContain("overflow: auto;");
     expect(railSource).not.toContain("position: sticky;");
+  });
+
+  it("keeps the temporary missing job route quiet when opening a dispatched job", async () => {
+    routerPush.mockImplementationOnce(() => {
+      throw new Error('No match for {"name":"chat-job"}');
+    });
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    setApiClient(
+      makeApiClient({
+        listChatSessions: vi.fn().mockResolvedValue([session()]),
+        listChatThreads: vi.fn().mockResolvedValue([thread()]),
+        listChatMessages: vi.fn().mockResolvedValue([]),
+        listChatThreadJobs: vi.fn().mockResolvedValue([dispatchedJob()]),
+      }),
+    );
+    const wrapper = mount(ChatPage);
+    await flushPromises();
+
+    await wrapper.get("[data-testid='dispatched-job-job-1']").trigger("click");
+    await flushPromises();
+
+    expect(consoleError).not.toHaveBeenCalled();
+    consoleError.mockRestore();
+  });
+
+  it("logs unexpected dispatched job navigation failures", async () => {
+    routerPush.mockRejectedValueOnce(new Error("navigation exploded"));
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    setApiClient(
+      makeApiClient({
+        listChatSessions: vi.fn().mockResolvedValue([session()]),
+        listChatThreads: vi.fn().mockResolvedValue([thread()]),
+        listChatMessages: vi.fn().mockResolvedValue([]),
+        listChatThreadJobs: vi.fn().mockResolvedValue([dispatchedJob()]),
+      }),
+    );
+    const wrapper = mount(ChatPage);
+    await flushPromises();
+
+    await wrapper.get("[data-testid='dispatched-job-job-1']").trigger("click");
+    await flushPromises();
+
+    expect(consoleError).toHaveBeenCalledWith("Failed to open dispatched job", expect.any(Error));
+    consoleError.mockRestore();
   });
 
   it("creates a new session and shows a notice when switching agents from an existing conversation", async () => {

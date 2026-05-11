@@ -1,4 +1,5 @@
 import { mount } from "@vue/test-utils";
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 import type { ChatThreadJobSummary } from "@/lib/api";
@@ -58,5 +59,16 @@ describe("DispatchedJobsPanel", () => {
     await wrapper.get("button[title='刷新']").trigger("click");
 
     expect(wrapper.emitted("refresh")).toHaveLength(1);
+  });
+
+  it("uses available app status and surface tokens", () => {
+    const source = readFileSync("src/features/chat/components/DispatchedJobsPanel.vue", "utf8");
+
+    expect(source).toContain("var(--surface-overlay)");
+    expect(source).toContain("var(--success-bg)");
+    expect(source).toContain("var(--danger-bg)");
+    expect(source).not.toContain("--surface-muted");
+    expect(source).not.toContain("--status-success");
+    expect(source).not.toContain("--status-danger");
   });
 });

@@ -240,19 +240,32 @@ function scheduleDispatchedJobsRefresh() {
   }, DISPATCHED_JOBS_REFRESH_DELAY);
 }
 
+function isTemporaryMissingChatJobRoute(reason: unknown) {
+  return reason instanceof Error && reason.message.includes("No match") && reason.message.includes("chat-job");
+}
+
+function handleOpenJobFailure(reason: unknown) {
+  if (isTemporaryMissingChatJobRoute(reason)) return;
+  console.error("Failed to open dispatched job", reason);
+}
+
 function openJob(jobId: string) {
+  let navigation: ReturnType<typeof router.push>;
   try {
-    void router.push({
+    navigation = router.push({
       name: "chat-job",
       params: { jobId },
       query: {
         fromSession: chatSessions.activeSessionId.value,
         fromThread: chatSessions.activeThreadId.value,
       },
-    }).catch(() => undefined);
-  } catch {
-    // Task 6 wires the named route; until then, avoid surfacing router setup noise.
+    });
+  } catch (reason) {
+    handleOpenJobFailure(reason);
+    return;
   }
+
+  void navigation.catch(handleOpenJobFailure);
 }
 
 watch(
@@ -652,11 +665,11 @@ function applyPrompt(_event: MouseEvent, item: PromptProps) {
     right: var(--space-4);
     width: min(100%, var(--chat-composer-width));
     max-width: none;
-    pointer-events: auto;
+    pointer-events: none;
   }
 
   .chat-runtime-floating-layer :deep(.runtime-rail--collapsed) {
-    width: 100%;
+    width: min(100%, 188px);
   }
 
   .chat-page__composer-shell {
