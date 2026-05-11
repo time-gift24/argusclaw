@@ -82,10 +82,11 @@ export function useChatSessions() {
     try {
       sessions.value = await callChatApi("listChatSessions");
       if (sessions.value.length > 0) {
-        const sessionId =
-          (preferredSessionId && sessions.value.find((session) => session.id === preferredSessionId)?.id) ||
-          sessions.value[0].id;
-        await selectSession(sessionId, preferredThreadId);
+        const preferredSession = preferredSessionId
+          ? sessions.value.find((session) => session.id === preferredSessionId)
+          : undefined;
+        const sessionId = preferredSession?.id ?? sessions.value[0].id;
+        await selectSession(sessionId, preferredSession ? preferredThreadId : undefined);
       }
     } finally {
       loading.value = false;

@@ -376,6 +376,38 @@ describe("ChatPage", () => {
     expect(wrapper.text()).not.toContain("一号回复");
   });
 
+  it("falls back to the first thread when the requested session is missing", async () => {
+    routeState.query = {
+      session: "missing-session",
+      thread: "thread-2",
+    };
+    const listChatThreads = vi.fn().mockResolvedValue([
+      thread({ id: "thread-1", title: "一号线程" }),
+      thread({ id: "thread-2", title: "二号线程" }),
+    ]);
+    const listChatMessages = vi.fn().mockImplementation(async (_sessionId: string, threadId: string) => {
+      if (threadId === "thread-1") {
+        return [message("assistant", "一号回复")];
+      }
+      return [message("assistant", "二号回复")];
+    });
+
+    setApiClient(
+      makeApiClient({
+        listChatSessions: vi.fn().mockResolvedValue([session({ id: "session-1", name: "默认会话" })]),
+        listChatThreads,
+        listChatMessages,
+      }),
+    );
+    const wrapper = mount(ChatPage);
+    await flushPromises();
+
+    expect(listChatThreads).toHaveBeenCalledWith("session-1");
+    expect(listChatMessages).toHaveBeenLastCalledWith("session-1", "thread-1");
+    expect(wrapper.text()).toContain("一号回复");
+    expect(wrapper.text()).not.toContain("二号回复");
+  });
+
   it("loads and renders dispatched subagents for the active thread", async () => {
     const listChatThreadJobs = vi.fn().mockResolvedValue([
       dispatchedJob({ job_id: "job-1", title: "整理会议纪要", subagent_name: "researcher" }),
