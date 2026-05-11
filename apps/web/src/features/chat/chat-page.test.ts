@@ -379,12 +379,15 @@ describe("ChatPage", () => {
     expect(source).toContain("overflow-y: visible;");
     expect(source).not.toContain("scrollbar-width: none;");
     expect(source).not.toContain(".chat-body-stream::-webkit-scrollbar");
-    expect(source).toContain("--chat-message-width: 1120px;");
+    expect(source).toContain("--chat-composer-width: 1120px;");
+    expect(source).not.toContain("--chat-message-width:");
     expect(source).toContain("--chat-dock-clearance: 132px;");
     expect(source).toContain("--chat-dock-clearance: 160px;");
     expect(source).toContain(".chat-body-stream::after");
     expect(source).toContain("flex: 0 0 calc(var(--chat-dock-clearance, 132px) + var(--space-6));");
-    expect(source).toContain("width: min(100%, var(--chat-message-width));");
+    expect(source).toContain("padding: var(--space-6) var(--space-6) 0;");
+    expect(source).toContain("width: min(100%, var(--chat-composer-width));");
+    expect(source).not.toContain("calc((100% - var(--chat-message-width)) / 2)");
     expect(source).toContain("position: absolute;");
     expect(source).not.toContain("chat-workspace");
     expect(source).not.toContain("chat-main-column");
@@ -576,6 +579,33 @@ describe("ChatPage", () => {
     await flushPromises();
 
     expect(wrapper.text()).toContain("对话会话加载失败：Request failed: 502");
+  });
+
+  it("shows chat load errors directly above the composer in a red alert", async () => {
+    setApiClient(
+      makeApiClient({
+        getChatOptions: vi.fn().mockRejectedValue(new Error("Request failed: 500")),
+        listChatSessions: vi.fn().mockRejectedValue(new Error("Request failed: 500")),
+      }),
+    );
+    const wrapper = mount(ChatPage);
+    await flushPromises();
+
+    const composerShell = wrapper.get(".chat-page__composer-shell");
+    const children = Array.from(composerShell.element.children).map((element) => element.className);
+    const error = composerShell.get(".chat-page__composer-error");
+
+    expect(children[0]).toContain("chat-page__composer-error");
+    expect(children[1]).toContain("composer-bar");
+    expect(error.text()).toBe("对话配置加载失败：Request failed: 500；对话会话加载失败：Request failed: 500");
+    expect(error.attributes("role")).toBe("alert");
+    expect(error.classes()).toContain("error-message");
+
+    const source = readFileSync("src/features/chat/ChatPage.vue", "utf8");
+    expect(source).toContain("color: var(--danger);");
+    expect(source).toContain("background: var(--danger-bg);");
+    expect(source).toContain("border: 1px solid var(--danger-border);");
+    expect(source).not.toContain("var(--status-danger");
   });
 
   it("switches to the selected session thread from history and refreshes its messages", async () => {

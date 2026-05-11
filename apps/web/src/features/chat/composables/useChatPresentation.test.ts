@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { ChatMessageRecord } from "@/lib/api";
 import {
+  createStarterPrompts,
   draftMessageForPrompt,
   toRobotMessages,
 } from "./useChatPresentation";
@@ -298,9 +299,21 @@ describe("useChatPresentation", () => {
     ]);
   });
 
-  it("maps starter prompt ids to Chinese draft messages", () => {
-    expect(draftMessageForPrompt("provider")).toContain("当前默认模型");
-    expect(draftMessageForPrompt("mcp")).toContain("当前 MCP 服务");
-    expect(draftMessageForPrompt("unknown")).toContain("当前智能体模板");
+  it("creates a single quality SOP starter prompt", () => {
+    const prompts = createStarterPrompts();
+
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]).toMatchObject({
+      id: "quality-sop",
+      label: "质检 SOP",
+      description: "输入环境 + SOP 单号",
+    });
+  });
+
+  it("maps starter prompt ids to the quality SOP draft message", () => {
+    expect(draftMessageForPrompt("quality-sop")).toContain("质检 SOP");
+    expect(draftMessageForPrompt("quality-sop")).toContain("环境：");
+    expect(draftMessageForPrompt("quality-sop")).toContain("SOP 单号：");
+    expect(draftMessageForPrompt("unknown")).toBe(draftMessageForPrompt("quality-sop"));
   });
 });
