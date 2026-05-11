@@ -48,7 +48,7 @@ pub async fn build_app_with_config(
     database_url: Option<&str>,
     config: &ServerConfig,
 ) -> argus_protocol::Result<Router> {
-    let core = ServerCore::init(database_url).await?;
+    let core = ServerCore::init_with_thread_pool_config(database_url, config.thread_pool).await?;
     let auth =
         auth::AuthState::from_env().map_err(|error| argus_protocol::ArgusError::IoError {
             reason: format!("invalid OAuth2 config: {error}"),

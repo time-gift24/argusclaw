@@ -547,11 +547,7 @@ impl SchedulerBackend for SessionSchedulerBackend {
     ) -> std::result::Result<SchedulerJobLookup, ToolError> {
         let lookup = self
             .job_manager
-            .get_job_result_status_persisted(
-                request.thread_id,
-                &request.job_id,
-                request.consume,
-            )
+            .get_job_result_status_persisted(request.thread_id, &request.job_id, request.consume)
             .await
             .map_err(|error| Self::scheduler_error(error.to_string()))?;
 
