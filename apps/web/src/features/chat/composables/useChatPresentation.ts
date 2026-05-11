@@ -123,34 +123,19 @@ export function createBubbleRoles(): Record<string, BubbleRoleConfig> {
 export function createStarterPrompts(): PromptProps[] {
   return [
     {
-      id: "provider",
-      label: "检查模型配置",
-      description: "当前默认模型和可用 provider 是否适合这个任务？",
-      icon: h("span", { class: "prompt-icon" }, "AI"),
-    },
-    {
-      id: "mcp",
-      label: "规划 MCP 运维",
-      description: "帮我整理当前 MCP 服务的风险和下一步动作。",
-      icon: h("span", { class: "prompt-icon" }, "MCP"),
-    },
-    {
-      id: "template",
-      label: "优化智能体模板",
-      description: "基于当前模板给出系统提示词改进建议。",
-      icon: h("span", { class: "prompt-icon" }, "TPL"),
+      id: "quality-sop",
+      label: "质检 SOP",
+      description: "输入环境 + SOP 单号",
+      icon: h("span", { class: "prompt-icon" }, "SOP"),
     },
   ];
 }
 
 export function draftMessageForPrompt(promptId: string | number | undefined) {
-  if (promptId === "provider") {
-    return "请检查当前默认模型、提供方和智能体模板是否适合继续这个任务。";
+  if (promptId === "quality-sop") {
+    return "请根据以下信息执行质检 SOP：环境：；SOP 单号：。";
   }
-  if (promptId === "mcp") {
-    return "请帮我梳理当前 MCP 服务的运行风险、可用工具和下一步运维动作。";
-  }
-  return "请基于当前智能体模板，给出系统提示词和工具配置的改进建议。";
+  return "请根据以下信息执行质检 SOP：环境：；SOP 单号：。";
 }
 
 function displayMessageText(

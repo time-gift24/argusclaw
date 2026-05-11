@@ -72,9 +72,9 @@ function handlePrompt(event: MouseEvent, item: PromptProps) {
 }
 
 .notice--danger {
-  background: color-mix(in srgb, var(--status-danger-bg) 80%, white);
-  border: 1px solid color-mix(in srgb, var(--status-danger) 58%, white);
-  color: var(--status-danger);
+  background: var(--danger-bg);
+  border: 1px solid var(--danger-border);
+  color: var(--danger);
 }
 
 .notice--info {

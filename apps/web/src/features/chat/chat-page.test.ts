@@ -599,11 +599,12 @@ describe("ChatPage", () => {
     expect(children[1]).toContain("composer-bar");
     expect(error.text()).toBe("对话配置加载失败：Request failed: 500；对话会话加载失败：Request failed: 500");
     expect(error.attributes("role")).toBe("alert");
-    expect(error.classes()).toContain("chat-page__composer-error--danger");
+    expect(error.classes()).toContain("error-message");
 
     const source = readFileSync("src/features/chat/ChatPage.vue", "utf8");
     expect(source).toContain("color: var(--danger);");
-    expect(source).toContain("background: color-mix(in srgb, var(--danger-bg) 70%, var(--danger) 12%);");
+    expect(source).toContain("background: var(--danger-bg);");
+    expect(source).toContain("border: 1px solid var(--danger-border);");
     expect(source).not.toContain("var(--status-danger");
   });
 

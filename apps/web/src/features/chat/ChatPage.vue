@@ -380,7 +380,7 @@ function applyPrompt(_event: MouseEvent, item: PromptProps) {
       <div class="chat-page__composer-shell">
         <div
           v-if="chatComposer.error.value"
-          class="chat-page__composer-error chat-page__composer-error--danger"
+          class="chat-page__composer-error error-message"
           role="alert"
         >
           {{ chatComposer.error.value }}
@@ -504,20 +504,13 @@ function applyPrompt(_event: MouseEvent, item: PromptProps) {
 }
 
 .chat-page__composer-error {
-  padding: 10px 14px;
-  border-radius: 14px;
-  font-size: var(--text-sm);
-  font-weight: 590;
-  line-height: 1.55;
-  box-shadow:
-    0 12px 28px rgba(239, 68, 68, 0.12),
-    inset 0 1px 0 rgba(255, 255, 255, 0.72);
-}
-
-.chat-page__composer-error--danger {
-  border: 1px solid color-mix(in srgb, var(--danger) 58%, var(--surface-base));
-  background: color-mix(in srgb, var(--danger-bg) 70%, var(--danger) 12%);
+  margin: 0;
+  padding: var(--space-3);
+  border: 1px solid var(--danger-border);
+  border-radius: var(--radius-md);
+  background: var(--danger-bg);
   color: var(--danger);
+  font-size: var(--text-sm);
 }
 
 @media (max-width: 1180px) {
