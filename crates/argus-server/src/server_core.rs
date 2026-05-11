@@ -5,7 +5,7 @@ use argus_crypto::{Cipher, FileKeySource};
 use argus_job::JobManager;
 use argus_llm::ProviderManager;
 use argus_mcp::{McpRuntime, McpRuntimeConfig, RmcpConnector};
-use argus_protocol::llm::ChatMessage;
+use argus_protocol::llm::{ChatMessage, Role, ToolCall};
 use argus_protocol::{
     AgentId, AgentRecord, ArgusError, JobRuntimeState, LlmProviderId, LlmProviderRecord,
     McpDiscoveredToolRecord, McpServerRecord, McpServerStatus, McpToolResolver, ProviderId,
@@ -18,6 +18,7 @@ use argus_repository::traits::{
     UserRepository,
 };
 use argus_repository::types::{AgentDeleteReport, AgentRunId, AgentRunRecord, AgentRunStatus};
+use argus_repository::types::{JobId, JobRecord, MessageRecord, ThreadRecord};
 use argus_repository::{ArgusPostgres, ArgusSqlite, connect_postgres, migrate_postgres};
 use argus_session::{SessionManager, SessionSummary, ThreadSummary};
 use argus_template::{TemplateDeleteOptions, TemplateManager};
@@ -45,6 +46,8 @@ pub struct ServerCore {
     account_manager: Arc<AccountManager>,
     mcp_repo: Arc<dyn McpRepository>,
     agent_run_repo: Arc<dyn AgentRunRepository>,
+    job_repo: Arc<dyn JobRepository>,
+    thread_repo: Arc<dyn ThreadRepository>,
     user_repo: Arc<dyn UserRepository>,
 }
 
@@ -60,6 +63,33 @@ pub struct ToolRegistryItem {
 pub struct ChatThreadSnapshot {
     pub session_id: SessionId,
     pub thread_id: ThreadId,
+    pub messages: Vec<ChatMessage>,
+    pub turn_count: u32,
+    pub token_count: u32,
+    pub plan_item_count: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatThreadJobSummary {
+    pub job_id: String,
+    pub title: String,
+    pub subagent_name: String,
+    pub status: String,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+    pub result_preview: Option<String>,
+    pub bound_thread_id: Option<ThreadId>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatJobConversation {
+    pub job_id: String,
+    pub title: String,
+    pub status: String,
+    pub thread_id: Option<ThreadId>,
+    pub session_id: Option<SessionId>,
+    pub parent_session_id: Option<SessionId>,
+    pub parent_thread_id: Option<ThreadId>,
     pub messages: Vec<ChatMessage>,
     pub turn_count: u32,
     pub token_count: u32,
@@ -263,6 +293,8 @@ impl ServerCore {
             account_manager,
             mcp_repo,
             agent_run_repo,
+            job_repo: job_repository,
+            thread_repo: thread_repository,
             user_repo,
         }))
     }
@@ -845,6 +877,107 @@ impl ServerCore {
         })
     }
 
+    pub async fn list_chat_thread_jobs(
+        &self,
+        request_user: &RequestUser,
+        session_id: SessionId,
+        thread_id: ThreadId,
+    ) -> Result<Vec<ChatThreadJobSummary>> {
+        tracing::trace!(external_user_id = %request_user.external_id(), %session_id, %thread_id, "listing dispatched jobs for chat thread");
+        let user_id = self.resolve_chat_user(request_user).await?;
+        self.session_manager
+            .get_thread_snapshot_for_user(user_id, session_id, &thread_id)
+            .await?;
+
+        let recovered = self
+            .job_manager
+            .recover_child_jobs_for_thread(thread_id)
+            .await
+            .map_err(|error| ArgusError::JobError {
+                reason: error.to_string(),
+            })?;
+        let mut summaries = Vec::with_capacity(recovered.len());
+        for child in recovered {
+            let Some(record) = self
+                .job_repo
+                .get(&JobId::new(child.job_id.clone()))
+                .await
+                .map_err(database_error)?
+            else {
+                tracing::warn!(job_id = %child.job_id, "recovered child job has no persisted job record");
+                continue;
+            };
+            summaries.push(chat_thread_job_summary(record, Some(child.thread_id)));
+        }
+        Ok(summaries)
+    }
+
+    pub async fn get_chat_job_conversation(
+        &self,
+        request_user: &RequestUser,
+        job_id: String,
+    ) -> Result<ChatJobConversation> {
+        tracing::trace!(external_user_id = %request_user.external_id(), %job_id, "getting read-only chat job conversation");
+        let user_id = self.resolve_chat_user(request_user).await?;
+        let record = self
+            .job_repo
+            .get(&JobId::new(job_id.clone()))
+            .await
+            .map_err(database_error)?
+            .ok_or_else(|| ArgusError::ThreadNotFound(format!("job {job_id}")))?;
+
+        let Some(thread_id) = record.thread_id else {
+            return Ok(pending_job_conversation(record));
+        };
+
+        let thread = self
+            .thread_repo
+            .get_thread(&thread_id)
+            .await
+            .map_err(database_error)?
+            .ok_or_else(|| ArgusError::ThreadNotFound(thread_id.to_string()))?;
+        let parent_thread_id = self
+            .job_manager
+            .recover_parent_job_thread_id(&thread_id)
+            .await
+            .map_err(|error| ArgusError::JobError {
+                reason: error.to_string(),
+            })?;
+        let parent_session_id = if let Some(parent_thread_id) = parent_thread_id {
+            let parent = self
+                .thread_repo
+                .get_thread(&parent_thread_id)
+                .await
+                .map_err(database_error)?;
+            if let Some(parent_session_id) = parent.and_then(|record| record.session_id) {
+                self.session_manager
+                    .get_thread_snapshot_for_user(user_id, parent_session_id, &parent_thread_id)
+                    .await?;
+                Some(parent_session_id)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let messages = self
+            .thread_repo
+            .get_messages(&thread_id)
+            .await
+            .map_err(database_error)?
+            .into_iter()
+            .map(chat_message_from_record)
+            .collect::<Result<Vec<_>>>()?;
+
+        Ok(chat_job_conversation(
+            record,
+            thread,
+            parent_thread_id,
+            parent_session_id,
+            messages,
+        ))
+    }
+
     pub async fn activate_chat_thread(
         &self,
         request_user: &RequestUser,
@@ -1053,6 +1186,115 @@ impl ServerCore {
 
         Ok(AgentRunDetail::from(&record))
     }
+}
+
+fn chat_thread_job_summary(
+    record: JobRecord,
+    recovered_thread_id: Option<ThreadId>,
+) -> ChatThreadJobSummary {
+    ChatThreadJobSummary {
+        job_id: record.id.to_string(),
+        title: record.name.clone(),
+        subagent_name: record
+            .result
+            .as_ref()
+            .map(|result| result.agent_display_name.trim())
+            .filter(|name| !name.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                if record.name.trim().is_empty() {
+                    format!("job:{}", record.id)
+                } else {
+                    record.name.clone()
+                }
+            }),
+        status: record.status.as_str().to_string(),
+        created_at: record.started_at.clone().or(record.scheduled_at.clone()),
+        updated_at: record
+            .finished_at
+            .clone()
+            .or(record.started_at.clone())
+            .or(record.scheduled_at.clone()),
+        result_preview: record
+            .result
+            .as_ref()
+            .map(|result| preview_text(&result.message, 240)),
+        bound_thread_id: recovered_thread_id.or(record.thread_id),
+    }
+}
+
+fn pending_job_conversation(record: JobRecord) -> ChatJobConversation {
+    ChatJobConversation {
+        job_id: record.id.to_string(),
+        title: record.name,
+        status: record.status.as_str().to_string(),
+        thread_id: None,
+        session_id: None,
+        parent_session_id: None,
+        parent_thread_id: None,
+        messages: Vec::new(),
+        turn_count: 0,
+        token_count: 0,
+        plan_item_count: 0,
+    }
+}
+
+fn chat_job_conversation(
+    record: JobRecord,
+    thread: ThreadRecord,
+    parent_thread_id: Option<ThreadId>,
+    parent_session_id: Option<SessionId>,
+    messages: Vec<ChatMessage>,
+) -> ChatJobConversation {
+    ChatJobConversation {
+        job_id: record.id.to_string(),
+        title: thread.title.clone().unwrap_or(record.name),
+        status: record.status.as_str().to_string(),
+        thread_id: Some(thread.id),
+        session_id: thread.session_id,
+        parent_session_id,
+        parent_thread_id,
+        messages,
+        turn_count: thread.turn_count,
+        token_count: thread.token_count,
+        plan_item_count: 0,
+    }
+}
+
+fn chat_message_from_record(record: MessageRecord) -> Result<ChatMessage> {
+    let role = match record.role.as_str() {
+        "system" => Role::System,
+        "user" => Role::User,
+        "assistant" => Role::Assistant,
+        "tool" => Role::Tool,
+        other => {
+            return Err(ArgusError::DatabaseError {
+                reason: format!("message {} has invalid role: {other}", record.seq),
+            });
+        }
+    };
+    let tool_calls = match record.tool_calls {
+        Some(tool_calls) => Some(serde_json::from_str::<Vec<ToolCall>>(&tool_calls).map_err(
+            |error| ArgusError::DatabaseError {
+                reason: format!("message {} has invalid tool_calls: {error}", record.seq),
+            },
+        )?),
+        None => None,
+    };
+    Ok(ChatMessage {
+        role,
+        content: record.content,
+        reasoning_content: None,
+        content_parts: Vec::new(),
+        tool_call_id: record.tool_call_id,
+        name: record.tool_name,
+        tool_calls,
+        metadata: None,
+    })
+}
+
+fn preview_text(value: &str, max_chars: usize) -> String {
+    value.chars().take(max_chars).collect()
 }
 
 fn database_error(error: impl std::fmt::Display) -> ArgusError {

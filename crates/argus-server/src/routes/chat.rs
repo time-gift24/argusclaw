@@ -19,7 +19,10 @@ use tokio::sync::broadcast;
 use crate::app_state::AppState;
 use crate::error::ApiError;
 use crate::response::{DeleteResponse, MutationResponse};
-use crate::server_core::{ChatSessionPayload, ChatThreadBinding, ChatThreadSnapshot};
+use crate::server_core::{
+    ChatJobConversation, ChatSessionPayload, ChatThreadBinding, ChatThreadJobSummary,
+    ChatThreadSnapshot,
+};
 use crate::user_context::RequestUser;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -107,6 +110,49 @@ pub struct ChatJobConversationResponse {
     pub turn_count: u32,
     pub token_count: u32,
     pub plan_item_count: u32,
+}
+
+impl From<ChatThreadJobSummary> for ChatThreadJobSummaryResponse {
+    fn from(summary: ChatThreadJobSummary) -> Self {
+        Self {
+            job_id: summary.job_id,
+            title: summary.title,
+            subagent_name: summary.subagent_name,
+            status: summary.status,
+            created_at: summary.created_at,
+            updated_at: summary.updated_at,
+            result_preview: summary.result_preview,
+            bound_thread_id: summary
+                .bound_thread_id
+                .map(|thread_id| thread_id.to_string()),
+        }
+    }
+}
+
+impl From<ChatJobConversation> for ChatJobConversationResponse {
+    fn from(conversation: ChatJobConversation) -> Self {
+        Self {
+            job_id: conversation.job_id,
+            title: conversation.title,
+            status: conversation.status,
+            thread_id: conversation
+                .thread_id
+                .map(|thread_id| thread_id.to_string()),
+            session_id: conversation
+                .session_id
+                .map(|session_id| session_id.to_string()),
+            parent_session_id: conversation
+                .parent_session_id
+                .map(|session_id| session_id.to_string()),
+            parent_thread_id: conversation
+                .parent_thread_id
+                .map(|thread_id| thread_id.to_string()),
+            messages: conversation.messages,
+            turn_count: conversation.turn_count,
+            token_count: conversation.token_count,
+            plan_item_count: conversation.plan_item_count,
+        }
+    }
 }
 
 pub async fn get_chat_options(
@@ -759,26 +805,31 @@ pub async fn list_messages(
 }
 
 pub async fn list_thread_jobs(
-    _request_user: RequestUser,
+    request_user: RequestUser,
+    State(state): State<AppState>,
     Path((session_id, thread_id)): Path<(String, String)>,
 ) -> Result<Json<Vec<ChatThreadJobSummaryResponse>>, ApiError> {
-    let _session_id = parse_session_id(&session_id)?;
-    let _thread_id = parse_thread_id(&thread_id)?;
-
-    Err(ApiError::internal(
-        "chat thread job listing is not implemented",
-    ))
+    let jobs = state
+        .core()
+        .list_chat_thread_jobs(
+            &request_user,
+            parse_session_id(&session_id)?,
+            parse_thread_id(&thread_id)?,
+        )
+        .await?;
+    Ok(Json(jobs.into_iter().map(Into::into).collect()))
 }
 
 pub async fn get_chat_job(
-    _request_user: RequestUser,
+    request_user: RequestUser,
+    State(state): State<AppState>,
     Path(job_id): Path<String>,
 ) -> Result<Json<ChatJobConversationResponse>, ApiError> {
-    let _job_id = required_non_empty("job_id", job_id)?;
-
-    Err(ApiError::internal(
-        "chat job conversation lookup is not implemented",
-    ))
+    let conversation = state
+        .core()
+        .get_chat_job_conversation(&request_user, required_non_empty("job_id", job_id)?)
+        .await?;
+    Ok(Json(conversation.into()))
 }
 
 pub async fn send_message(

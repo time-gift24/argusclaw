@@ -1,17 +1,28 @@
 mod support;
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
-use argus_protocol::ThreadId;
-use argus_protocol::llm::ModelConfig;
+use argus_protocol::llm::{ChatMessage, ModelConfig};
 use argus_protocol::{
-    AgentId, AgentRecord, LlmProviderKind, LlmProviderRecordJson, ProviderSecretStatus,
-    ThinkingConfig,
+    AgentId, AgentRecord, LlmProviderId, LlmProviderKind, LlmProviderRecordJson,
+    ProviderSecretStatus, SessionId, ThinkingConfig, ThreadId,
 };
+use argus_repository::traits::{JobRepository, ThreadRepository};
+use argus_repository::types::{
+    JobId, JobRecord, JobResult, JobStatus, JobType, MessageRecord, ThreadRecord,
+};
+use argus_repository::{ArgusSqlite, migrate};
+use argus_server::app_state::AppState;
 use argus_server::response::MutationResponse;
+use argus_server::server_core::ServerCore;
 use argus_session::{SessionSummary, ThreadSummary};
+use axum::Router;
+use axum::body::Body;
 use axum::http::{Method, StatusCode};
+use serde::Serialize;
 use serde_json::json;
+use tower::util::ServiceExt;
 
 #[tokio::test]
 async fn chat_routes_fail_closed_without_trusted_user_header() {
@@ -610,6 +621,138 @@ async fn get_chat_job_requires_non_empty_job_id() {
     assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
 }
 
+#[tokio::test]
+async fn thread_jobs_lists_dispatched_subagents_for_parent_thread() {
+    let ctx = SeededChatContext::new().await;
+    let provider = create_seeded_provider(&ctx).await;
+    let template = first_seeded_template(&ctx).await;
+    let session = create_seeded_session(&ctx, "Parent Job List").await;
+    let parent_thread = create_seeded_thread(&ctx, &session, &template, &provider).await;
+    let child_thread_id = ThreadId::new();
+    let job_id = "job-list-child";
+
+    ctx.seed_child_job(
+        SeedChildJob {
+            job_id,
+            parent_session_id: session.id,
+            parent_thread_id: parent_thread.id,
+            child_thread_id,
+            provider_id: provider.id,
+            agent_id: template.id,
+            name: "Fallback child job name",
+            status: JobStatus::Succeeded,
+            result: Some(JobResult {
+                success: true,
+                message: "Child job completed with a useful summary".to_string(),
+                token_usage: None,
+                agent_id: template.id,
+                agent_display_name: "Research Subagent".to_string(),
+                agent_description: "Looks things up".to_string(),
+            }),
+            thread_title: Some("Child investigation".to_string()),
+        },
+        Vec::new(),
+    )
+    .await;
+
+    let response = ctx
+        .get(&format!(
+            "/api/v1/chat/sessions/{}/threads/{}/jobs",
+            session.id, parent_thread.id
+        ))
+        .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let jobs: serde_json::Value = support::json_body(response).await;
+    let items = jobs.as_array().expect("jobs response should be an array");
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["job_id"], job_id);
+    assert_eq!(items[0]["status"], "succeeded");
+    assert_eq!(items[0]["subagent_name"], "Research Subagent");
+    assert_eq!(items[0]["bound_thread_id"], child_thread_id.to_string());
+}
+
+#[tokio::test]
+async fn get_chat_job_returns_readonly_conversation_messages() {
+    let ctx = SeededChatContext::new().await;
+    let provider = create_seeded_provider(&ctx).await;
+    let template = first_seeded_template(&ctx).await;
+    let session = create_seeded_session(&ctx, "Job Conversation Parent").await;
+    let parent_thread = create_seeded_thread(&ctx, &session, &template, &provider).await;
+    let child_thread_id = ThreadId::new();
+    let job_id = "job-conversation-bound";
+
+    ctx.seed_child_job(
+        SeedChildJob {
+            job_id,
+            parent_session_id: session.id,
+            parent_thread_id: parent_thread.id,
+            child_thread_id,
+            provider_id: provider.id,
+            agent_id: template.id,
+            name: "Conversation job",
+            status: JobStatus::Running,
+            result: None,
+            thread_title: Some("Readonly child conversation".to_string()),
+        },
+        vec![ChatMessage::assistant("persisted child reply")],
+    )
+    .await;
+
+    let response = ctx.get(&format!("/api/v1/chat/jobs/{job_id}")).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let conversation: serde_json::Value = support::json_body(response).await;
+    assert_eq!(conversation["job_id"], job_id);
+    assert_eq!(conversation["thread_id"], child_thread_id.to_string());
+    assert_eq!(
+        conversation["parent_thread_id"],
+        parent_thread.id.to_string()
+    );
+    assert_eq!(conversation["messages"].as_array().map(Vec::len), Some(1));
+    assert_eq!(conversation["messages"][0]["role"], "assistant");
+    assert_eq!(
+        conversation["messages"][0]["content"],
+        "persisted child reply"
+    );
+}
+
+#[tokio::test]
+async fn get_chat_job_reports_pending_when_job_has_no_thread_binding() {
+    let ctx = SeededChatContext::new().await;
+    let template = first_seeded_template(&ctx).await;
+    let job_id = "job-pending-unbound";
+
+    ctx.seed_job_record(JobRecord {
+        id: JobId::new(job_id),
+        job_type: JobType::Standalone,
+        name: "Unbound pending job".to_string(),
+        status: JobStatus::Pending,
+        agent_id: template.id,
+        context: None,
+        prompt: "Wait for execution".to_string(),
+        thread_id: None,
+        group_id: None,
+        depends_on: Vec::new(),
+        cron_expr: None,
+        scheduled_at: Some("2026-05-11T00:00:00Z".to_string()),
+        started_at: None,
+        finished_at: None,
+        parent_job_id: None,
+        result: None,
+    })
+    .await;
+
+    let response = ctx.get(&format!("/api/v1/chat/jobs/{job_id}")).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let conversation: serde_json::Value = support::json_body(response).await;
+    assert_eq!(conversation["job_id"], job_id);
+    assert_eq!(conversation["status"], "pending");
+    assert!(conversation["thread_id"].is_null());
+    assert_eq!(conversation["messages"].as_array().map(Vec::len), Some(0));
+}
+
 async fn create_test_session(ctx: &support::TestContext, name: &str) -> SessionSummary {
     let response = ctx
         .post_json("/api/v1/chat/sessions", &json!({ "name": name }))
@@ -617,6 +760,314 @@ async fn create_test_session(ctx: &support::TestContext, name: &str) -> SessionS
     assert_eq!(response.status(), StatusCode::CREATED);
     let created: MutationResponse<SessionSummary> = support::json_body(response).await;
     created.item
+}
+
+struct SeededChatContext {
+    app: Router,
+    repo: Arc<ArgusSqlite>,
+}
+
+struct SeedChildJob<'a> {
+    job_id: &'a str,
+    parent_session_id: SessionId,
+    parent_thread_id: ThreadId,
+    child_thread_id: ThreadId,
+    provider_id: i64,
+    agent_id: AgentId,
+    name: &'a str,
+    status: JobStatus,
+    result: Option<JobResult>,
+    thread_title: Option<String>,
+}
+
+impl SeededChatContext {
+    async fn new() -> Self {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("sqlite pool should connect for seeded chat tests");
+        migrate(&pool)
+            .await
+            .expect("test migrations should succeed");
+        let repo = Arc::new(ArgusSqlite::new(pool.clone()));
+        let core = ServerCore::with_pool(pool)
+            .await
+            .expect("server core should initialize for tests");
+        let app = argus_server::router(AppState::new(core));
+        Self { app, repo }
+    }
+
+    async fn get(&self, path: &str) -> axum::http::Response<Body> {
+        self.request(Method::GET, path, Option::<&()>::None).await
+    }
+
+    async fn post_json<T>(&self, path: &str, payload: &T) -> axum::http::Response<Body>
+    where
+        T: Serialize,
+    {
+        self.request(Method::POST, path, Some(payload)).await
+    }
+
+    async fn request<T>(
+        &self,
+        method: Method,
+        path: &str,
+        payload: Option<&T>,
+    ) -> axum::http::Response<Body>
+    where
+        T: Serialize,
+    {
+        let mut request = axum::http::Request::builder()
+            .method(method)
+            .uri(path)
+            .header("x-argus-user-id", support::DEFAULT_TEST_USER_ID);
+        let body = match payload {
+            Some(payload) => {
+                request = request.header("content-type", "application/json");
+                Body::from(
+                    serde_json::to_vec(payload).expect("request payload should serialize to json"),
+                )
+            }
+            None => Body::empty(),
+        };
+
+        self.app
+            .clone()
+            .oneshot(request.body(body).expect("request should build"))
+            .await
+            .expect("response should succeed")
+    }
+
+    async fn seed_job_record(&self, job: JobRecord) {
+        let result = job.result.clone();
+        let job_id = job.id.clone();
+        JobRepository::create(self.repo.as_ref(), &job)
+            .await
+            .expect("job record should seed");
+        if let Some(result) = result {
+            JobRepository::update_result(self.repo.as_ref(), &job_id, &result)
+                .await
+                .expect("job result should seed");
+        }
+    }
+
+    async fn seed_child_job(&self, seed: SeedChildJob<'_>, messages: Vec<ChatMessage>) {
+        let now = "2026-05-11T00:00:00Z".to_string();
+        ThreadRepository::upsert_thread(
+            self.repo.as_ref(),
+            &ThreadRecord {
+                id: seed.child_thread_id,
+                provider_id: LlmProviderId::new(seed.provider_id),
+                title: seed.thread_title,
+                token_count: 17,
+                turn_count: messages.len() as u32,
+                session_id: None,
+                template_id: Some(seed.agent_id),
+                model_override: Some("alpha".to_string()),
+                created_at: now.clone(),
+                updated_at: now.clone(),
+            },
+        )
+        .await
+        .expect("child thread should seed");
+
+        for (index, message) in messages.into_iter().enumerate() {
+            ThreadRepository::add_message(
+                self.repo.as_ref(),
+                &MessageRecord {
+                    id: None,
+                    thread_id: seed.child_thread_id,
+                    seq: index as u32 + 1,
+                    role: role_name(message.role).to_string(),
+                    content: message.content,
+                    tool_call_id: message.tool_call_id,
+                    tool_name: message.name,
+                    tool_calls: message
+                        .tool_calls
+                        .map(|tool_calls| serde_json::to_string(&tool_calls).unwrap()),
+                    created_at: now.clone(),
+                },
+            )
+            .await
+            .expect("child message should seed");
+        }
+
+        self.seed_job_record(JobRecord {
+            id: JobId::new(seed.job_id),
+            job_type: JobType::Standalone,
+            name: seed.name.to_string(),
+            status: seed.status,
+            agent_id: seed.agent_id,
+            context: None,
+            prompt: "Seed child job".to_string(),
+            thread_id: Some(seed.child_thread_id),
+            group_id: None,
+            depends_on: Vec::new(),
+            cron_expr: None,
+            scheduled_at: Some(now.clone()),
+            started_at: Some(now.clone()),
+            finished_at: None,
+            parent_job_id: None,
+            result: seed.result,
+        })
+        .await;
+
+        persist_child_trace_metadata(
+            seed.parent_session_id,
+            seed.parent_thread_id,
+            seed.child_thread_id,
+            seed.job_id,
+            seed.agent_id,
+        )
+        .await;
+    }
+}
+
+async fn persist_child_trace_metadata(
+    parent_session_id: SessionId,
+    parent_thread_id: ThreadId,
+    child_thread_id: ThreadId,
+    job_id: &str,
+    agent_id: AgentId,
+) {
+    let trace_root = dirs::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("~"))
+        .join(".arguswing")
+        .join("traces");
+    let child_dir = trace_root
+        .join(parent_session_id.to_string())
+        .join(parent_thread_id.to_string())
+        .join(child_thread_id.to_string());
+    tokio::fs::create_dir_all(&child_dir)
+        .await
+        .expect("child trace dir should seed");
+    let metadata = json!({
+        "thread_id": child_thread_id,
+        "kind": "Job",
+        "root_session_id": null,
+        "parent_thread_id": parent_thread_id,
+        "job_id": job_id,
+        "agent_snapshot": {
+            "id": agent_id,
+            "display_name": "Seeded Subagent",
+            "description": "Seeded from chat API test",
+            "version": "1.0.0",
+            "provider_id": null,
+            "model_id": "alpha",
+            "system_prompt": "You are a seeded subagent.",
+            "tool_names": [],
+            "subagent_names": [],
+            "max_tokens": null,
+            "temperature": null,
+            "thinking_config": null
+        }
+    });
+    tokio::fs::write(
+        child_dir.join("thread.json"),
+        serde_json::to_vec_pretty(&metadata).unwrap(),
+    )
+    .await
+    .expect("child trace metadata should seed");
+}
+
+async fn create_seeded_session(ctx: &SeededChatContext, name: &str) -> SessionSummary {
+    let response = ctx
+        .post_json("/api/v1/chat/sessions", &json!({ "name": name }))
+        .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let created: MutationResponse<SessionSummary> = support::json_body(response).await;
+    created.item
+}
+
+async fn create_seeded_provider(ctx: &SeededChatContext) -> LlmProviderRecordJson {
+    let response = ctx
+        .post_json(
+            "/api/v1/providers",
+            &LlmProviderRecordJson {
+                id: 0,
+                kind: LlmProviderKind::OpenAiCompatible,
+                display_name: "Seeded Chat API Provider".to_string(),
+                base_url: "https://example.invalid/v1".to_string(),
+                api_key: "sk-seeded-chat-api".to_string(),
+                models: vec!["alpha".to_string()],
+                model_config: HashMap::from([(
+                    "alpha".to_string(),
+                    ModelConfig {
+                        max_context_window: 65_536,
+                    },
+                )]),
+                default_model: "alpha".to_string(),
+                is_default: true,
+                extra_headers: HashMap::new(),
+                secret_status: ProviderSecretStatus::Ready,
+                meta_data: HashMap::new(),
+            },
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let created: MutationResponse<LlmProviderRecordJson> = support::json_body(response).await;
+    created.item
+}
+
+async fn create_seeded_thread(
+    ctx: &SeededChatContext,
+    session: &SessionSummary,
+    template: &AgentRecord,
+    provider: &LlmProviderRecordJson,
+) -> ThreadSummary {
+    let response = ctx
+        .post_json(
+            &format!("/api/v1/chat/sessions/{}/threads", session.id),
+            &json!({
+                "template_id": template.id,
+                "provider_id": provider.id,
+                "model": "alpha"
+            }),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let created: MutationResponse<ThreadSummary> = support::json_body(response).await;
+    created.item
+}
+
+async fn first_seeded_template(ctx: &SeededChatContext) -> AgentRecord {
+    let response = ctx.get("/api/v1/agents/templates").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let templates: Vec<AgentRecord> = support::json_body(response).await;
+    if let Some(template) = templates.into_iter().next() {
+        return template;
+    }
+
+    let response = ctx
+        .post_json(
+            "/api/v1/agents/templates",
+            &AgentRecord {
+                id: AgentId::new(0),
+                display_name: "Seeded Chat Agent".to_string(),
+                description: "created by seeded chat API test".to_string(),
+                version: "1.0.0".to_string(),
+                provider_id: None,
+                model_id: Some("alpha".to_string()),
+                system_prompt: "You are a seeded chat agent.".to_string(),
+                tool_names: vec![],
+                subagent_names: vec![],
+                max_tokens: None,
+                temperature: None,
+                thinking_config: Some(ThinkingConfig::enabled()),
+            },
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let created: MutationResponse<AgentRecord> = support::json_body(response).await;
+    created.item
+}
+
+fn role_name(role: argus_protocol::llm::Role) -> &'static str {
+    match role {
+        argus_protocol::llm::Role::System => "system",
+        argus_protocol::llm::Role::User => "user",
+        argus_protocol::llm::Role::Assistant => "assistant",
+        argus_protocol::llm::Role::Tool => "tool",
+    }
 }
 
 async fn create_test_provider(ctx: &support::TestContext) -> LlmProviderRecordJson {
