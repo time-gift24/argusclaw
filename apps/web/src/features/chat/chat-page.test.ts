@@ -367,6 +367,7 @@ describe("ChatPage", () => {
   it("uses one primary chat stream with composer and runtime activity as overlays", () => {
     const source = readFileSync("src/features/chat/ChatPage.vue", "utf8");
     const panelSource = readFileSync("src/features/chat/components/ChatConversationPanel.vue", "utf8");
+    const stageSource = readFileSync("src/features/chat/components/ChatMessageStage.vue", "utf8");
     const railSource = readFileSync("src/features/chat/components/RuntimeActivityRail.vue", "utf8");
 
     expect(source).toContain("chat-body-stream");
@@ -377,7 +378,10 @@ describe("ChatPage", () => {
     expect(source).toContain(".chat-page {");
     expect(source).toContain("overflow-y: auto;");
     expect(source).toContain(".chat-body-stream {");
+    expect(source).toContain("overflow-x: clip;");
     expect(source).toContain("overflow-y: visible;");
+    expect(stageSource).toContain(":deep(.tr-bubble-list)");
+    expect(stageSource).toContain("overflow-y: visible;");
     expect(source).not.toContain("scrollbar-width: none;");
     expect(source).not.toContain(".chat-body-stream::-webkit-scrollbar");
     expect(source).toContain("--chat-composer-width: 1120px;");

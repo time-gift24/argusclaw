@@ -463,7 +463,7 @@ function applyPrompt(_event: MouseEvent, item: PromptProps) {
   height: auto;
   min-width: 0;
   min-height: 100%;
-  overflow-x: hidden;
+  overflow-x: clip;
   overflow-y: visible;
   padding: var(--space-6) var(--space-6) 0;
   overscroll-behavior: contain;
