@@ -15,11 +15,12 @@ use argus_protocol::{
 use chrono::Utc;
 use thiserror::Error;
 use tokio::sync::{
-    Mutex as AsyncMutex, OwnedMutexGuard, OwnedSemaphorePermit, Semaphore, broadcast,
+    Mutex as AsyncMutex, Notify, OwnedMutexGuard, OwnedSemaphorePermit, Semaphore, broadcast,
 };
 use tokio::task::AbortHandle;
 
-const DEFAULT_MAX_THREADS: u32 = 8;
+const DEFAULT_MAX_THREADS: u32 = 64;
+const DEFAULT_MAX_ESTIMATED_MEMORY_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 
 #[derive(Debug, Error)]
 pub enum ThreadPoolError {
@@ -27,17 +28,95 @@ pub enum ThreadPoolError {
     ExecutionFailed(String),
 }
 
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum ThreadPoolConfigError {
+    #[error("{name} must be a positive integer")]
+    InvalidPositiveInteger { name: &'static str },
+    #[error("{name} must be an integer byte count or disabled")]
+    InvalidMemoryBudget { name: &'static str },
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ThreadPoolConfig {
     pub max_threads: u32,
+    pub max_estimated_memory_bytes: Option<u64>,
 }
 
 impl Default for ThreadPoolConfig {
     fn default() -> Self {
         Self {
             max_threads: DEFAULT_MAX_THREADS,
+            max_estimated_memory_bytes: Some(DEFAULT_MAX_ESTIMATED_MEMORY_BYTES),
         }
     }
+}
+
+impl ThreadPoolConfig {
+    pub fn from_env() -> Result<Self, ThreadPoolConfigError> {
+        Self::from_env_values(
+            std::env::var("ARGUS_THREAD_POOL_MAX_THREADS")
+                .ok()
+                .as_deref(),
+            std::env::var("ARGUS_THREAD_POOL_MAX_ESTIMATED_MEMORY_BYTES")
+                .ok()
+                .as_deref(),
+        )
+    }
+
+    pub fn from_env_values(
+        max_threads: Option<&str>,
+        max_estimated_memory_bytes: Option<&str>,
+    ) -> Result<Self, ThreadPoolConfigError> {
+        Ok(Self {
+            max_threads: parse_positive_u32(
+                "ARGUS_THREAD_POOL_MAX_THREADS",
+                max_threads,
+                DEFAULT_MAX_THREADS,
+            )?,
+            max_estimated_memory_bytes: parse_optional_memory_budget(
+                "ARGUS_THREAD_POOL_MAX_ESTIMATED_MEMORY_BYTES",
+                max_estimated_memory_bytes,
+                Some(DEFAULT_MAX_ESTIMATED_MEMORY_BYTES),
+            )?,
+        })
+    }
+}
+
+fn parse_positive_u32(
+    name: &'static str,
+    value: Option<&str>,
+    default: u32,
+) -> Result<u32, ThreadPoolConfigError> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(default);
+    };
+    let parsed = value
+        .parse::<u32>()
+        .map_err(|_| ThreadPoolConfigError::InvalidPositiveInteger { name })?;
+    if parsed == 0 {
+        return Err(ThreadPoolConfigError::InvalidPositiveInteger { name });
+    }
+    Ok(parsed)
+}
+
+fn parse_optional_memory_budget(
+    name: &'static str,
+    value: Option<&str>,
+    default: Option<u64>,
+) -> Result<Option<u64>, ThreadPoolConfigError> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(default);
+    };
+    if matches!(
+        value.to_ascii_lowercase().as_str(),
+        "none" | "off" | "disabled"
+    ) {
+        return Ok(None);
+    }
+    let parsed = value
+        .parse::<u64>()
+        .map_err(|_| ThreadPoolConfigError::InvalidMemoryBudget { name })?;
+    Ok(Some(parsed))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -106,8 +185,10 @@ impl RuntimeShutdown {
 /// Coordinates runtime residency, lifecycle transitions, and metrics.
 pub struct ThreadPool {
     max_threads: u32,
+    max_estimated_memory_bytes: Option<u64>,
     resident_slots: Arc<Semaphore>,
     admission_waiters: Arc<AtomicUsize>,
+    admission_notify: Arc<Notify>,
     store: Arc<StdMutex<ThreadPoolStore>>,
     runtime_lifecycle_observers: Arc<StdMutex<Vec<Arc<RuntimeLifecycleObserver>>>>,
 }
@@ -134,8 +215,10 @@ impl ThreadPool {
     pub fn with_config(config: ThreadPoolConfig) -> Self {
         Self {
             max_threads: config.max_threads,
+            max_estimated_memory_bytes: config.max_estimated_memory_bytes,
             resident_slots: Arc::new(Semaphore::new(config.max_threads as usize)),
             admission_waiters: Arc::new(AtomicUsize::new(0)),
+            admission_notify: Arc::new(Notify::new()),
             store: Arc::new(StdMutex::new(ThreadPoolStore::default())),
             runtime_lifecycle_observers: Arc::new(StdMutex::new(Vec::new())),
         }
@@ -212,6 +295,7 @@ impl ThreadPool {
         let removed = store.runtimes.remove(thread_id).is_some();
         if removed {
             Self::refresh_peaks(&mut store);
+            self.admission_notify.notify_waiters();
         }
         removed
     }
@@ -323,19 +407,20 @@ impl ThreadPool {
     }
 
     pub async fn ensure_runtime_slot(&self, thread_id: &ThreadId) -> Result<(), ThreadPoolError> {
-        {
+        let candidate_estimated_memory_bytes = {
             let store = self.store.lock().expect("thread-pool mutex poisoned");
-            if store
-                .runtimes
-                .get(thread_id)
-                .and_then(|entry| entry.slot_permit.as_ref())
-                .is_some()
-            {
+            let entry = store.runtimes.get(thread_id).ok_or_else(|| {
+                ThreadPoolError::ExecutionFailed(format!("thread {} is not registered", thread_id))
+            })?;
+            if entry.slot_permit.is_some() {
                 return Ok(());
             }
-        }
+            entry.summary.estimated_memory_bytes
+        };
 
-        let permit = self.acquire_runtime_slot().await?;
+        let permit = self
+            .acquire_runtime_slot(candidate_estimated_memory_bytes)
+            .await?;
         let mut store = self.store.lock().expect("thread-pool mutex poisoned");
         let entry = store.runtimes.get_mut(thread_id).ok_or_else(|| {
             ThreadPoolError::ExecutionFailed(format!("thread {} is not registered", thread_id))
@@ -347,10 +432,31 @@ impl ThreadPool {
         Ok(())
     }
 
-    async fn acquire_runtime_slot(&self) -> Result<OwnedSemaphorePermit, ThreadPoolError> {
+    async fn acquire_runtime_slot(
+        &self,
+        candidate_estimated_memory_bytes: u64,
+    ) -> Result<OwnedSemaphorePermit, ThreadPoolError> {
         loop {
+            if !self.memory_budget_allows(candidate_estimated_memory_bytes) {
+                if self
+                    .evict_oldest_cooling_runtime(ThreadPoolEventReason::MemoryPressure)
+                    .await
+                    .is_some()
+                {
+                    continue;
+                }
+                self.wait_for_admission_signal().await;
+                continue;
+            }
+
             match Arc::clone(&self.resident_slots).try_acquire_owned() {
-                Ok(permit) => return Ok(permit),
+                Ok(permit) => {
+                    if self.memory_budget_allows(candidate_estimated_memory_bytes) {
+                        return Ok(permit);
+                    }
+                    drop(permit);
+                    continue;
+                }
                 Err(tokio::sync::TryAcquireError::Closed) => {
                     return Err(ThreadPoolError::ExecutionFailed(
                         "thread pool capacity manager closed".to_string(),
@@ -377,8 +483,27 @@ impl ThreadPool {
                     )
                 });
             self.admission_waiters.fetch_sub(1, Ordering::SeqCst);
-            return permit;
+            let permit = permit?;
+            if self.memory_budget_allows(candidate_estimated_memory_bytes) {
+                return Ok(permit);
+            }
+            drop(permit);
         }
+    }
+
+    async fn wait_for_admission_signal(&self) {
+        self.admission_waiters.fetch_add(1, Ordering::SeqCst);
+        self.admission_notify.notified().await;
+        self.admission_waiters.fetch_sub(1, Ordering::SeqCst);
+    }
+
+    fn memory_budget_allows(&self, candidate_estimated_memory_bytes: u64) -> bool {
+        let Some(max_estimated_memory_bytes) = self.max_estimated_memory_bytes else {
+            return true;
+        };
+        let store = self.store.lock().expect("thread-pool mutex poisoned");
+        Self::total_estimated_memory(&store).saturating_add(candidate_estimated_memory_bytes)
+            <= max_estimated_memory_bytes
     }
 
     pub fn mark_runtime_running(
@@ -448,6 +573,7 @@ impl ThreadPool {
         Self::refresh_peaks(&mut store);
         let snapshot = Self::collect_metrics_from_store(self.max_threads, &store);
         drop(store);
+        self.admission_notify.notify_waiters();
         self.notify_runtime_lifecycle_observers(RuntimeLifecycleChange::Cooling(runtime.clone()));
         Some((runtime, sender, snapshot))
     }
@@ -468,6 +594,7 @@ impl ThreadPool {
                 shutdown = Self::take_runtime_shutdown(entry);
                 entry.slot_permit = None;
                 Self::refresh_peaks(&mut store);
+                self.admission_notify.notify_waiters();
             }
             shutdown
         };
@@ -526,6 +653,7 @@ impl ThreadPool {
         let store = Arc::clone(&self.store);
         let max_threads = self.max_threads;
         let admission_waiters = Arc::clone(&self.admission_waiters);
+        let admission_notify = Arc::clone(&self.admission_notify);
         let lifecycle_observers = Arc::clone(&self.runtime_lifecycle_observers);
 
         let mut runtime_rx = runtime_rx.resubscribe();
@@ -550,6 +678,7 @@ impl ThreadPool {
                                 &store,
                                 max_threads,
                                 &admission_waiters,
+                                &admission_notify,
                                 &thread_id,
                                 estimated_memory_bytes,
                             )
@@ -585,15 +714,18 @@ impl ThreadPool {
             }
         });
         let forwarder_abort = forwarder.abort_handle();
-        let mut store = self.store.lock().expect("thread-pool mutex poisoned");
-        let Some(entry) = store.runtimes.get_mut(&thread_id) else {
-            forwarder_abort.abort();
-            return Err(ThreadPoolError::ExecutionFailed(format!(
-                "thread {} was removed while attaching",
-                thread_id
-            )));
-        };
-        entry.forwarder_abort = Some(forwarder_abort);
+        {
+            let mut store = self.store.lock().expect("thread-pool mutex poisoned");
+            let Some(entry) = store.runtimes.get_mut(&thread_id) else {
+                forwarder_abort.abort();
+                return Err(ThreadPoolError::ExecutionFailed(format!(
+                    "thread {} was removed while attaching",
+                    thread_id
+                )));
+            };
+            entry.forwarder_abort = Some(forwarder_abort);
+        }
+        self.evict_cooling_runtimes_until_memory_fits(0).await;
         Ok(())
     }
 
@@ -614,10 +746,14 @@ impl ThreadPool {
             return Ok(thread);
         }
 
+        let initial_estimated_memory_bytes = self
+            .runtime_summary(&thread_id)
+            .map_or(0, |summary| summary.estimated_memory_bytes);
+
         self.register_runtime(
             thread_id,
             ThreadRuntimeStatus::Loading,
-            0,
+            initial_estimated_memory_bytes,
             Some(Utc::now().to_rfc3339()),
             recoverable,
             None,
@@ -681,6 +817,7 @@ impl ThreadPool {
             thread_id,
             reason,
         )?;
+        self.admission_notify.notify_waiters();
         shutdown.run_and_wait().await;
         self.notify_runtime_lifecycle_observers(RuntimeLifecycleChange::Evicted(runtime.clone()));
         Some(runtime)
@@ -827,10 +964,26 @@ impl ThreadPool {
         self.evict_runtime(&candidate, reason).await
     }
 
+    async fn evict_cooling_runtimes_until_memory_fits(
+        &self,
+        candidate_estimated_memory_bytes: u64,
+    ) {
+        while !self.memory_budget_allows(candidate_estimated_memory_bytes) {
+            if self
+                .evict_oldest_cooling_runtime(ThreadPoolEventReason::MemoryPressure)
+                .await
+                .is_none()
+            {
+                break;
+            }
+        }
+    }
+
     async fn cool_or_evict_after_idle(
         store: &Arc<StdMutex<ThreadPoolStore>>,
         max_threads: u32,
         admission_waiters: &AtomicUsize,
+        admission_notify: &Notify,
         thread_id: &ThreadId,
         estimated_memory_bytes: u64,
     ) -> (RuntimeSummary, Option<RuntimeShutdown>) {
@@ -855,6 +1008,7 @@ impl ThreadPool {
         let runtime = entry.summary.clone();
         Self::refresh_peaks(&mut store_guard);
         drop(store_guard);
+        admission_notify.notify_waiters();
 
         if admission_waiters.load(Ordering::SeqCst) > 0
             && let Some((runtime, snapshot, shutdown)) = Self::evict_runtime_from_shared_store(
@@ -865,6 +1019,7 @@ impl ThreadPool {
             )
         {
             let _ = snapshot;
+            admission_notify.notify_waiters();
             return (runtime, Some(shutdown));
         }
 
@@ -1089,6 +1244,172 @@ mod tests {
         })
         .await
         .expect("runtime should reach the expected status")
+    }
+
+    #[tokio::test]
+    async fn default_config_expands_residency_with_memory_budget() {
+        let config = ThreadPoolConfig::default();
+
+        assert_eq!(config.max_threads, 64);
+        assert_eq!(
+            config.max_estimated_memory_bytes,
+            Some(4 * 1024 * 1024 * 1024)
+        );
+    }
+
+    #[tokio::test]
+    async fn config_parses_explicit_thread_and_memory_values() {
+        let config = ThreadPoolConfig::from_env_values(Some("128"), Some("8589934592"))
+            .expect("explicit pool config should parse");
+
+        assert_eq!(config.max_threads, 128);
+        assert_eq!(
+            config.max_estimated_memory_bytes,
+            Some(8 * 1024 * 1024 * 1024)
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_pressure_evicts_oldest_cooling_runtime_before_admission() {
+        let pool = ThreadPool::with_config(ThreadPoolConfig {
+            max_threads: 4,
+            max_estimated_memory_bytes: Some(150),
+        });
+        let old_cooling = ThreadId::new();
+        let new_runtime = ThreadId::new();
+
+        pool.register_runtime(
+            old_cooling,
+            ThreadRuntimeStatus::Cooling,
+            100,
+            Some("2026-05-11T00:00:00Z".to_string()),
+            true,
+            None,
+            None,
+        );
+        pool.ensure_runtime_slot(&old_cooling)
+            .await
+            .expect("cooling runtime should become resident");
+        pool.register_runtime(
+            new_runtime,
+            ThreadRuntimeStatus::Loading,
+            80,
+            Some("2026-05-11T00:00:01Z".to_string()),
+            true,
+            None,
+            None,
+        );
+
+        pool.ensure_runtime_slot(&new_runtime)
+            .await
+            .expect("new runtime should be admitted after evicting cooling runtime");
+
+        assert!(pool.is_runtime_resident(&new_runtime));
+        let evicted = pool
+            .runtime_summary(&old_cooling)
+            .expect("evicted runtime summary should remain");
+        assert_eq!(evicted.status, ThreadRuntimeStatus::Evicted);
+        assert_eq!(
+            evicted.last_reason,
+            Some(ThreadPoolEventReason::MemoryPressure)
+        );
+        assert_eq!(pool.collect_metrics().estimated_memory_bytes, 80);
+    }
+
+    #[tokio::test]
+    async fn memory_pressure_waits_when_only_non_cooling_runtimes_remain() {
+        let pool = Arc::new(ThreadPool::with_config(ThreadPoolConfig {
+            max_threads: 4,
+            max_estimated_memory_bytes: Some(100),
+        }));
+        let running = ThreadId::new();
+        let waiting = ThreadId::new();
+
+        pool.register_runtime(
+            running,
+            ThreadRuntimeStatus::Running,
+            90,
+            Some("2026-05-11T00:00:00Z".to_string()),
+            true,
+            None,
+            None,
+        );
+        pool.ensure_runtime_slot(&running)
+            .await
+            .expect("running runtime should become resident");
+        pool.register_runtime(
+            waiting,
+            ThreadRuntimeStatus::Loading,
+            20,
+            Some("2026-05-11T00:00:01Z".to_string()),
+            true,
+            None,
+            None,
+        );
+
+        let waiting_pool = Arc::clone(&pool);
+        let wait_task =
+            tokio::spawn(async move { waiting_pool.ensure_runtime_slot(&waiting).await });
+        sleep(Duration::from_millis(50)).await;
+
+        assert!(
+            !wait_task.is_finished(),
+            "memory pressure should wait instead of over-admitting"
+        );
+
+        pool.transition_runtime_to_cooling(&running, Some(90))
+            .expect("running runtime should enter cooling");
+
+        wait_task
+            .await
+            .expect("wait task should join")
+            .expect("waiting runtime should be admitted after cooling eviction");
+        assert!(pool.is_runtime_resident(&waiting));
+        assert_eq!(
+            pool.runtime_summary(&running)
+                .expect("runtime summary should remain")
+                .status,
+            ThreadRuntimeStatus::Evicted
+        );
+    }
+
+    #[tokio::test]
+    async fn disabled_memory_budget_preserves_count_only_admission() {
+        let pool = ThreadPool::with_config(ThreadPoolConfig {
+            max_threads: 2,
+            max_estimated_memory_bytes: None,
+        });
+        let first = ThreadId::new();
+        let second = ThreadId::new();
+
+        pool.register_runtime(
+            first,
+            ThreadRuntimeStatus::Running,
+            1_000,
+            Some("2026-05-11T00:00:00Z".to_string()),
+            true,
+            None,
+            None,
+        );
+        pool.ensure_runtime_slot(&first)
+            .await
+            .expect("first runtime should be admitted");
+        pool.register_runtime(
+            second,
+            ThreadRuntimeStatus::Loading,
+            1_000,
+            Some("2026-05-11T00:00:01Z".to_string()),
+            true,
+            None,
+            None,
+        );
+
+        pool.ensure_runtime_slot(&second)
+            .await
+            .expect("disabled memory budget should not block admission");
+
+        assert!(pool.is_runtime_resident(&first));
+        assert!(pool.is_runtime_resident(&second));
     }
 
     #[tokio::test]

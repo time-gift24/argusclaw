@@ -43,7 +43,7 @@ use argus_repository::traits::{
     AccountRepository, AgentRepository, JobRepository, LlmProviderRepository, McpRepository,
     SessionRepository, ThreadRepository,
 };
-use argus_thread_pool::ThreadPool;
+use argus_thread_pool::{ThreadPool, ThreadPoolConfig};
 
 use argus_repository::types::JobId;
 use argus_repository::{connect, connect_path, migrate, ArgusSqlite};
@@ -110,6 +110,17 @@ impl ArgusWing {
     /// - Migrations fail
     /// - The default template cannot be ensured
     pub async fn init(database_path: Option<&str>) -> Result<Arc<Self>> {
+        let thread_pool_config =
+            ThreadPoolConfig::from_env().map_err(|error| ArgusError::IoError {
+                reason: format!("invalid thread pool config: {error}"),
+            })?;
+        Self::init_with_thread_pool_config(database_path, thread_pool_config).await
+    }
+
+    pub async fn init_with_thread_pool_config(
+        database_path: Option<&str>,
+        thread_pool_config: ThreadPoolConfig,
+    ) -> Result<Arc<Self>> {
         let database_path = resolve_database_target(database_path)?;
         let pool = match &database_path {
             DatabaseTarget::Url(database_url) => connect(database_url).await,
@@ -149,7 +160,7 @@ impl ArgusWing {
         // Create provider resolver wrapper FIRST
         let provider_resolver = Arc::new(ProviderManagerResolver::new(provider_manager.clone()));
 
-        let thread_pool = Arc::new(ThreadPool::new());
+        let thread_pool = Arc::new(ThreadPool::with_config(thread_pool_config));
 
         // Create job manager with all dependencies
         let job_manager = Arc::new(JobManager::new_with_repositories(
@@ -205,6 +216,15 @@ impl ArgusWing {
     /// Create a new ArgusWing with a pre-configured database pool.
     #[must_use]
     pub fn with_pool(pool: SqlitePool) -> Arc<Self> {
+        Self::with_pool_and_thread_pool_config(pool, ThreadPoolConfig::default())
+    }
+
+    /// Create a new ArgusWing with a pre-configured database pool and thread-pool config.
+    #[must_use]
+    pub fn with_pool_and_thread_pool_config(
+        pool: SqlitePool,
+        thread_pool_config: ThreadPoolConfig,
+    ) -> Arc<Self> {
         // Create auth components first
         let cipher = Arc::new(Cipher::new(FileKeySource::from_env_or_default()));
         let account_repo: Arc<dyn AccountRepository> = Arc::new(ArgusSqlite::new(pool.clone()));
@@ -231,7 +251,7 @@ impl ArgusWing {
         // Create provider resolver wrapper FIRST
         let provider_resolver = Arc::new(ProviderManagerResolver::new(provider_manager.clone()));
 
-        let thread_pool = Arc::new(ThreadPool::new());
+        let thread_pool = Arc::new(ThreadPool::with_config(thread_pool_config));
 
         // Create job manager with all dependencies
         let job_manager = Arc::new(JobManager::new_with_repositories(

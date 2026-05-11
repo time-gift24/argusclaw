@@ -14,9 +14,9 @@ async fn runtime_returns_snapshot_payload() {
     assert_eq!(response.status(), StatusCode::OK);
 
     let body: RuntimeStateResponse = support::json_body(response).await;
-    assert_eq!(body.thread_pool.snapshot.max_threads, 8);
+    assert_eq!(body.thread_pool.snapshot.max_threads, 64);
     assert_eq!(body.thread_pool.runtimes.len(), 0);
-    assert_eq!(body.job_runtime.snapshot.max_threads, 8);
+    assert_eq!(body.job_runtime.snapshot.max_threads, 64);
     assert_eq!(body.job_runtime.runtimes.len(), 0);
 }
 

@@ -21,7 +21,7 @@ use argus_repository::types::{AgentDeleteReport, AgentRunId, AgentRunRecord, Age
 use argus_repository::{ArgusPostgres, ArgusSqlite, connect_postgres, migrate_postgres};
 use argus_session::{SessionManager, SessionSummary, ThreadSummary};
 use argus_template::{TemplateDeleteOptions, TemplateManager};
-use argus_thread_pool::ThreadPool;
+use argus_thread_pool::{ThreadPool, ThreadPoolConfig};
 use argus_tool::ToolManager;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -137,18 +137,35 @@ impl From<&AgentRunRecord> for AgentRunDetail {
 
 impl ServerCore {
     pub async fn init(database_url: Option<&str>) -> Result<Arc<Self>> {
+        Self::init_with_thread_pool_config(database_url, ThreadPoolConfig::default()).await
+    }
+
+    pub async fn init_with_thread_pool_config(
+        database_url: Option<&str>,
+        thread_pool_config: ThreadPoolConfig,
+    ) -> Result<Arc<Self>> {
         let database_target = resolve_database_target(database_url)?;
         let DatabaseTarget::PostgresUrl(database_url) = database_target;
         let pool = connect_postgres(&database_url).await?;
         migrate_postgres(&pool).await?;
-        Self::from_postgres_pool(pool).await
+        Self::from_postgres_pool_with_thread_pool_config(pool, thread_pool_config).await
     }
 
     pub async fn with_pool(pool: SqlitePool) -> Result<Arc<Self>> {
-        Self::from_sqlite_pool(pool).await
+        Self::with_pool_and_thread_pool_config(pool, ThreadPoolConfig::default()).await
     }
 
-    async fn from_postgres_pool(pool: PgPool) -> Result<Arc<Self>> {
+    pub async fn with_pool_and_thread_pool_config(
+        pool: SqlitePool,
+        thread_pool_config: ThreadPoolConfig,
+    ) -> Result<Arc<Self>> {
+        Self::from_sqlite_pool_with_thread_pool_config(pool, thread_pool_config).await
+    }
+
+    async fn from_postgres_pool_with_thread_pool_config(
+        pool: PgPool,
+        thread_pool_config: ThreadPoolConfig,
+    ) -> Result<Arc<Self>> {
         let cipher = Arc::new(Cipher::new(FileKeySource::from_env_or_default()));
         let postgres = Arc::new(ArgusPostgres::new(pool));
         Self::from_repositories(
@@ -163,11 +180,15 @@ impl ServerCore {
             postgres.clone() as Arc<dyn AgentRunRepository>,
             postgres.clone() as Arc<dyn UserRepository>,
             cipher,
+            thread_pool_config,
         )
         .await
     }
 
-    async fn from_sqlite_pool(pool: SqlitePool) -> Result<Arc<Self>> {
+    async fn from_sqlite_pool_with_thread_pool_config(
+        pool: SqlitePool,
+        thread_pool_config: ThreadPoolConfig,
+    ) -> Result<Arc<Self>> {
         let cipher = Arc::new(Cipher::new(FileKeySource::from_env_or_default()));
         let sqlite = Arc::new(ArgusSqlite::new(pool));
         Self::from_repositories(
@@ -182,6 +203,7 @@ impl ServerCore {
             sqlite.clone() as Arc<dyn AgentRunRepository>,
             sqlite.clone() as Arc<dyn UserRepository>,
             cipher,
+            thread_pool_config,
         )
         .await
     }
@@ -199,6 +221,7 @@ impl ServerCore {
         agent_run_repo: Arc<dyn AgentRunRepository>,
         user_repo: Arc<dyn UserRepository>,
         cipher: Arc<Cipher>,
+        thread_pool_config: ThreadPoolConfig,
     ) -> Result<Arc<Self>> {
         let account_manager = Arc::new(AccountManager::new(account_repo.clone(), cipher.clone()));
         let provider_manager =
@@ -217,7 +240,7 @@ impl ServerCore {
 
         let provider_resolver: Arc<dyn ProviderResolver> =
             Arc::new(ProviderManagerResolver::new(Arc::clone(&provider_manager)));
-        let thread_pool = Arc::new(ThreadPool::new());
+        let thread_pool = Arc::new(ThreadPool::with_config(thread_pool_config));
 
         let job_manager = Arc::new(JobManager::new_with_repositories(
             Arc::clone(&thread_pool),
