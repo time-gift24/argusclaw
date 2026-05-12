@@ -177,6 +177,7 @@ async function chooseAgent(wrapper: ReturnType<typeof mount>, templateId: number
 afterEach(() => {
   resetApiClient();
   document.body.innerHTML = "";
+  window.history.replaceState({}, "", "/");
 });
 
 describe("ChatPage", () => {
@@ -366,6 +367,7 @@ describe("ChatPage", () => {
   it("uses one primary chat stream with composer and runtime activity as overlays", () => {
     const source = readFileSync("src/features/chat/ChatPage.vue", "utf8");
     const panelSource = readFileSync("src/features/chat/components/ChatConversationPanel.vue", "utf8");
+    const stageSource = readFileSync("src/features/chat/components/ChatMessageStage.vue", "utf8");
     const railSource = readFileSync("src/features/chat/components/RuntimeActivityRail.vue", "utf8");
 
     expect(source).toContain("chat-body-stream");
@@ -376,7 +378,10 @@ describe("ChatPage", () => {
     expect(source).toContain(".chat-page {");
     expect(source).toContain("overflow-y: auto;");
     expect(source).toContain(".chat-body-stream {");
+    expect(source).toContain("overflow-x: clip;");
     expect(source).toContain("overflow-y: visible;");
+    expect(stageSource).toContain(":deep(.tr-bubble-list)");
+    expect(stageSource).toContain("overflow-y: visible;");
     expect(source).not.toContain("scrollbar-width: none;");
     expect(source).not.toContain(".chat-body-stream::-webkit-scrollbar");
     expect(source).toContain("--chat-composer-width: 1120px;");
@@ -606,6 +611,31 @@ describe("ChatPage", () => {
     expect(source).toContain("background: var(--danger-bg);");
     expect(source).toContain("border: 1px solid var(--danger-border);");
     expect(source).not.toContain("var(--status-danger");
+  });
+
+  it("opens an explicit scheduler-created thread even when it is hidden from chat history", async () => {
+    window.history.replaceState({}, "", "/chat?session_id=scheduler-session&thread_id=scheduler-thread");
+    const listChatThreads = vi.fn().mockResolvedValue([
+      thread({ id: "scheduler-thread", title: "Scheduler run" }),
+    ]);
+    const listChatMessages = vi.fn().mockResolvedValue([
+      message("user", "scheduled prompt"),
+      message("assistant", "scheduled result"),
+    ]);
+    setApiClient(
+      makeApiClient({
+        listChatSessions: vi.fn().mockResolvedValue([]),
+        listChatThreads,
+        listChatMessages,
+      }),
+    );
+
+    const wrapper = mount(ChatPage);
+    await flushPromises();
+
+    expect(listChatThreads).toHaveBeenCalledWith("scheduler-session");
+    expect(listChatMessages).toHaveBeenCalledWith("scheduler-session", "scheduler-thread");
+    expect(wrapper.text()).toContain("scheduled result");
   });
 
   it("switches to the selected session thread from history and refreshes its messages", async () => {

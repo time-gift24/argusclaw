@@ -1255,12 +1255,60 @@ impl JobRepository for ArgusPostgres {
         rows.into_iter().map(|r| self.map_job_record(r)).collect()
     }
     async fn find_due_cron_jobs(&self, now: &str) -> DbResult<Vec<JobRecord>> {
-        let rows=sqlx::query("SELECT id,job_type,name,status,agent_id,context,prompt,thread_id,group_id,depends_on,cron_expr,scheduled_at,started_at,finished_at,parent_job_id,result FROM jobs WHERE job_type='cron' AND scheduled_at IS NOT NULL AND scheduled_at <= $1 ORDER BY scheduled_at ASC").bind(now).fetch_all(&self.pool).await.map_err(|e|DbError::QueryFailed{reason:e.to_string()})?;
+        let rows=sqlx::query("SELECT id,job_type,name,status,agent_id,context,prompt,thread_id,group_id,depends_on,cron_expr,scheduled_at,started_at,finished_at,parent_job_id,result FROM jobs WHERE job_type='cron' AND status='pending' AND scheduled_at IS NOT NULL AND scheduled_at <= $1 ORDER BY scheduled_at ASC").bind(now).fetch_all(&self.pool).await.map_err(|e|DbError::QueryFailed{reason:e.to_string()})?;
         rows.into_iter().map(|r| self.map_job_record(r)).collect()
     }
-    async fn update_scheduled_at(&self, id: &JobId, next: &str) -> DbResult<()> {
-        sqlx::query(
-            "UPDATE jobs SET scheduled_at=$1,updated_at=CURRENT_TIMESTAMP::TEXT WHERE id=$2",
+    async fn claim_cron_job(&self, id: &JobId, started_at: &str) -> DbResult<bool> {
+        let r=sqlx::query("UPDATE jobs SET status='running',started_at=$1,updated_at=CURRENT_TIMESTAMP::TEXT WHERE id=$2 AND job_type='cron' AND status='pending'").bind(started_at).bind(id.to_string()).execute(&self.pool).await.map_err(|e|DbError::QueryFailed{reason:e.to_string()})?;
+        Ok(r.rows_affected() == 1)
+    }
+    async fn update_cron_after_run(
+        &self,
+        id: &JobId,
+        status: JobStatus,
+        scheduled_at: Option<&str>,
+        finished_at: &str,
+        context: Option<&str>,
+    ) -> DbResult<bool> {
+        let result = sqlx::query("UPDATE jobs SET status=$1,scheduled_at=COALESCE($2,scheduled_at),finished_at=$3,context=COALESCE($4,context),updated_at=CURRENT_TIMESTAMP::TEXT WHERE id=$5 AND job_type='cron' AND status='running'").bind(status.as_str()).bind(scheduled_at).bind(finished_at).bind(context).bind(id.to_string()).execute(&self.pool).await.map_err(|e|DbError::QueryFailed{reason:e.to_string()})?;
+        Ok(result.rows_affected() == 1)
+    }
+    async fn update_cron_definition(
+        &self,
+        job: &JobRecord,
+        context: Option<&str>,
+    ) -> DbResult<bool> {
+        let result = sqlx::query("UPDATE jobs SET name=$1,status=$2,agent_id=$3,context=COALESCE($4,context),prompt=$5,cron_expr=$6,scheduled_at=$7,started_at=NULL,finished_at=NULL,result=NULL,updated_at=CURRENT_TIMESTAMP::TEXT WHERE id=$8 AND job_type='cron' AND status!='running'")
+            .bind(&job.name)
+            .bind(job.status.as_str())
+            .bind(job.agent_id.inner())
+            .bind(context)
+            .bind(&job.prompt)
+            .bind(&job.cron_expr)
+            .bind(&job.scheduled_at)
+            .bind(job.id.to_string())
+            .execute(&self.pool)
+            .await
+            .map_err(|e| DbError::QueryFailed { reason: e.to_string() })?;
+        Ok(result.rows_affected() == 1)
+    }
+    async fn list_cron_jobs(
+        &self,
+        include_paused: bool,
+        thread_id: Option<&ThreadId>,
+    ) -> DbResult<Vec<JobRecord>> {
+        let rows = match (include_paused, thread_id) {
+            (false, None) => sqlx::query("SELECT id,job_type,name,status,agent_id,context,prompt,thread_id,group_id,depends_on,cron_expr,scheduled_at,started_at,finished_at,parent_job_id,result FROM jobs WHERE job_type='cron' AND status='pending' ORDER BY scheduled_at IS NULL ASC,scheduled_at ASC,id ASC").fetch_all(&self.pool).await,
+            (false, Some(thread_id)) => sqlx::query("SELECT id,job_type,name,status,agent_id,context,prompt,thread_id,group_id,depends_on,cron_expr,scheduled_at,started_at,finished_at,parent_job_id,result FROM jobs WHERE job_type='cron' AND status='pending' AND thread_id=$1 ORDER BY scheduled_at IS NULL ASC,scheduled_at ASC,id ASC").bind(*thread_id.inner()).fetch_all(&self.pool).await,
+            (true, None) => sqlx::query("SELECT id,job_type,name,status,agent_id,context,prompt,thread_id,group_id,depends_on,cron_expr,scheduled_at,started_at,finished_at,parent_job_id,result FROM jobs WHERE job_type='cron' AND status IN ('pending','paused','running','succeeded','failed','cancelled') ORDER BY scheduled_at IS NULL ASC,scheduled_at ASC,id ASC").fetch_all(&self.pool).await,
+            (true, Some(thread_id)) => sqlx::query("SELECT id,job_type,name,status,agent_id,context,prompt,thread_id,group_id,depends_on,cron_expr,scheduled_at,started_at,finished_at,parent_job_id,result FROM jobs WHERE job_type='cron' AND status IN ('pending','paused','running','succeeded','failed','cancelled') AND thread_id=$1 ORDER BY scheduled_at IS NULL ASC,scheduled_at ASC,id ASC").bind(*thread_id.inner()).fetch_all(&self.pool).await,
+        }
+        .map_err(|e|DbError::QueryFailed{reason:e.to_string()})?;
+        rows.into_iter().map(|r| self.map_job_record(r)).collect()
+    }
+    async fn trigger_cron_job_now(&self, id: &JobId, next: &str) -> DbResult<bool> {
+        let result = sqlx::query(
+            "UPDATE jobs SET status='pending',scheduled_at=$1,updated_at=CURRENT_TIMESTAMP::TEXT WHERE id=$2 AND job_type='cron' AND status!='running'",
         )
         .bind(next)
         .bind(id.to_string())
@@ -1269,7 +1317,7 @@ impl JobRepository for ArgusPostgres {
         .map_err(|e| DbError::QueryFailed {
             reason: e.to_string(),
         })?;
-        Ok(())
+        Ok(result.rows_affected() == 1)
     }
     async fn list_by_group(&self, group_id: &str) -> DbResult<Vec<JobRecord>> {
         let rows=sqlx::query("SELECT id,job_type,name,status,agent_id,context,prompt,thread_id,group_id,depends_on,cron_expr,scheduled_at,started_at,finished_at,parent_job_id,result FROM jobs WHERE group_id=$1 ORDER BY created_at ASC").bind(group_id).fetch_all(&self.pool).await.map_err(|e|DbError::QueryFailed{reason:e.to_string()})?;

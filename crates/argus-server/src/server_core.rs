@@ -19,6 +19,9 @@ use argus_repository::traits::{
 };
 use argus_repository::types::{AgentDeleteReport, AgentRunId, AgentRunRecord, AgentRunStatus};
 use argus_repository::{ArgusPostgres, ArgusSqlite, connect_postgres, migrate_postgres};
+use argus_session::scheduled_messages::{
+    CreateScheduledMessageRequest, ScheduledMessageSummary, UpdateScheduledMessageRequest,
+};
 use argus_session::{SessionManager, SessionSummary, ThreadSummary};
 use argus_template::{TemplateDeleteOptions, TemplateManager};
 use argus_thread_pool::ThreadPool;
@@ -251,6 +254,7 @@ impl ServerCore {
             trace_dir,
             thread_pool,
             Arc::clone(&job_manager),
+            Some(Arc::clone(&job_repository)),
         ));
 
         Ok(Arc::new(Self {
@@ -551,6 +555,10 @@ impl ServerCore {
 
     async fn resolve_chat_user(&self, request_user: &RequestUser) -> Result<UserId> {
         Ok(self.resolve_request_user(request_user).await?.id)
+    }
+
+    pub async fn chat_user_id(&self, request_user: &RequestUser) -> Result<UserId> {
+        self.resolve_chat_user(request_user).await
     }
 
     pub async fn is_request_user_admin(&self, request_user: &RequestUser) -> Result<bool> {
@@ -890,6 +898,71 @@ impl ServerCore {
         let user_id = self.resolve_chat_user(request_user).await?;
         self.session_manager
             .cancel_thread_for_user(user_id, session_id, &thread_id)
+            .await
+    }
+
+    pub async fn list_scheduled_messages(
+        &self,
+        request_user: &RequestUser,
+    ) -> Result<Vec<ScheduledMessageSummary>> {
+        let user_id = self.resolve_chat_user(request_user).await?;
+        self.session_manager
+            .list_scheduled_messages_for_user(user_id)
+            .await
+    }
+
+    pub async fn create_scheduled_message(
+        &self,
+        request_user: &RequestUser,
+        mut request: CreateScheduledMessageRequest,
+    ) -> Result<ScheduledMessageSummary> {
+        let user_id = self.resolve_chat_user(request_user).await?;
+        request.owner_user_id = user_id;
+        self.session_manager.create_scheduled_message(request).await
+    }
+
+    pub async fn pause_scheduled_message(
+        &self,
+        request_user: &RequestUser,
+        job_id: &str,
+    ) -> Result<ScheduledMessageSummary> {
+        let user_id = self.resolve_chat_user(request_user).await?;
+        self.session_manager
+            .pause_scheduled_message_for_user(user_id, job_id)
+            .await
+    }
+
+    pub async fn update_scheduled_message(
+        &self,
+        request_user: &RequestUser,
+        job_id: &str,
+        request: UpdateScheduledMessageRequest,
+    ) -> Result<ScheduledMessageSummary> {
+        let user_id = self.resolve_chat_user(request_user).await?;
+        self.session_manager
+            .update_scheduled_message_for_user(user_id, job_id, request)
+            .await
+    }
+
+    pub async fn delete_scheduled_message(
+        &self,
+        request_user: &RequestUser,
+        job_id: &str,
+    ) -> Result<bool> {
+        let user_id = self.resolve_chat_user(request_user).await?;
+        self.session_manager
+            .delete_scheduled_message_for_user(user_id, job_id)
+            .await
+    }
+
+    pub async fn trigger_scheduled_message_now(
+        &self,
+        request_user: &RequestUser,
+        job_id: &str,
+    ) -> Result<ScheduledMessageSummary> {
+        let user_id = self.resolve_chat_user(request_user).await?;
+        self.session_manager
+            .trigger_scheduled_message_now_for_user(user_id, job_id)
             .await
     }
 

@@ -36,8 +36,35 @@ pub trait JobRepository: Send + Sync {
     /// Find cron jobs that are due for execution.
     async fn find_due_cron_jobs(&self, now: &str) -> Result<Vec<JobRecord>, DbError>;
 
-    /// Update the next scheduled time for a cron job.
-    async fn update_scheduled_at(&self, id: &JobId, next: &str) -> Result<(), DbError>;
+    /// Atomically claim a pending cron job for execution.
+    async fn claim_cron_job(&self, id: &JobId, started_at: &str) -> Result<bool, DbError>;
+
+    /// Update a cron job after a run completes. Returns false if the job is no longer running.
+    async fn update_cron_after_run(
+        &self,
+        id: &JobId,
+        status: JobStatus,
+        scheduled_at: Option<&str>,
+        finished_at: &str,
+        context: Option<&str>,
+    ) -> Result<bool, DbError>;
+
+    /// Update a cron job definition. Returns false if the job cannot be updated.
+    async fn update_cron_definition(
+        &self,
+        job: &JobRecord,
+        context: Option<&str>,
+    ) -> Result<bool, DbError>;
+
+    /// List cron jobs, optionally including paused and in-flight records.
+    async fn list_cron_jobs(
+        &self,
+        include_paused: bool,
+        thread_id: Option<&ThreadId>,
+    ) -> Result<Vec<JobRecord>, DbError>;
+
+    /// Mark a cron job due for immediate execution unless it is already running.
+    async fn trigger_cron_job_now(&self, id: &JobId, next: &str) -> Result<bool, DbError>;
 
     /// List all jobs in a group.
     async fn list_by_group(&self, group_id: &str) -> Result<Vec<JobRecord>, DbError>;

@@ -340,6 +340,51 @@ export interface ChatActionResponse {
   accepted: boolean;
 }
 
+export type ScheduledMessageStatus =
+  | "pending"
+  | "queued"
+  | "running"
+  | "succeeded"
+  | "failed"
+  | "cancelled"
+  | "paused";
+
+export interface ScheduledMessageSummary {
+  id: string;
+  name: string;
+  status: ScheduledMessageStatus;
+  template_id: number;
+  provider_id: number | null;
+  model: string | null;
+  last_session_id: string | null;
+  last_thread_id: string | null;
+  run_history: ScheduledMessageRunSummary[];
+  prompt: string;
+  cron_expr: string | null;
+  scheduled_at: string | null;
+  timezone: string | null;
+  last_error: string | null;
+}
+
+export interface ScheduledMessageRunSummary {
+  session_id: string;
+  thread_id: string;
+  created_at: string;
+}
+
+export interface CreateScheduledMessageRequest {
+  template_id: number;
+  provider_id?: number | null;
+  model?: string | null;
+  name: string;
+  prompt: string;
+  cron_expr?: string | null;
+  scheduled_at?: string | null;
+  timezone?: string | null;
+}
+
+export type UpdateScheduledMessageRequest = CreateScheduledMessageRequest;
+
 export type AgentRunStatus = "queued" | "running" | "completed" | "failed";
 
 export interface CreateAgentRunRequest {
@@ -508,6 +553,12 @@ export interface ApiClient {
   sendChatMessage?(sessionId: string, threadId: string, message: string): Promise<ChatActionResponse>;
   cancelChatThread?(sessionId: string, threadId: string): Promise<ChatActionResponse>;
   subscribeChatThread?(sessionId: string, threadId: string, handlers: ChatThreadEventHandlers): RuntimeEventSubscription;
+  listScheduledMessages?(): Promise<ScheduledMessageSummary[]>;
+  createScheduledMessage?(input: CreateScheduledMessageRequest): Promise<ScheduledMessageSummary>;
+  updateScheduledMessage?(id: string, input: UpdateScheduledMessageRequest): Promise<ScheduledMessageSummary>;
+  pauseScheduledMessage?(id: string): Promise<ScheduledMessageSummary>;
+  triggerScheduledMessage?(id: string): Promise<ScheduledMessageSummary>;
+  deleteScheduledMessage?(id: string): Promise<DeleteResponse>;
   createAgentRun?(input: CreateAgentRunRequest): Promise<AgentRunSummary>;
   getAgentRun?(runId: string): Promise<AgentRunDetail>;
 }
@@ -861,6 +912,58 @@ class HttpApiClient implements ApiClient {
         method: "POST",
       },
     );
+
+    return response.item;
+  }
+
+  listScheduledMessages(): Promise<ScheduledMessageSummary[]> {
+    return this.request("/scheduled-messages");
+  }
+
+  async createScheduledMessage(input: CreateScheduledMessageRequest): Promise<ScheduledMessageSummary> {
+    const response = await this.request<MutationResponse<ScheduledMessageSummary>>("/scheduled-messages", {
+      body: JSON.stringify(input),
+      headers: {
+        "Content-Type": "application/json",
+      },
+      method: "POST",
+    });
+
+    return response.item;
+  }
+
+  async updateScheduledMessage(id: string, input: UpdateScheduledMessageRequest): Promise<ScheduledMessageSummary> {
+    const response = await this.request<MutationResponse<ScheduledMessageSummary>>(`/scheduled-messages/${id}`, {
+      body: JSON.stringify(input),
+      headers: {
+        "Content-Type": "application/json",
+      },
+      method: "PUT",
+    });
+
+    return response.item;
+  }
+
+  async pauseScheduledMessage(id: string): Promise<ScheduledMessageSummary> {
+    const response = await this.request<MutationResponse<ScheduledMessageSummary>>(`/scheduled-messages/${id}/pause`, {
+      method: "POST",
+    });
+
+    return response.item;
+  }
+
+  async triggerScheduledMessage(id: string): Promise<ScheduledMessageSummary> {
+    const response = await this.request<MutationResponse<ScheduledMessageSummary>>(`/scheduled-messages/${id}/trigger`, {
+      method: "POST",
+    });
+
+    return response.item;
+  }
+
+  async deleteScheduledMessage(id: string): Promise<DeleteResponse> {
+    const response = await this.request<MutationResponse<DeleteResponse>>(`/scheduled-messages/${id}`, {
+      method: "DELETE",
+    });
 
     return response.item;
   }

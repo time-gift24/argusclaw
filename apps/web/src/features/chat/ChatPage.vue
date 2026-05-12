@@ -105,6 +105,13 @@ function scrollChatBodyToBottom() {
   }
 }
 
+function scheduledHistoryTarget() {
+  const params = new URLSearchParams(window.location.search);
+  const sessionId = params.get("session_id")?.trim() || undefined;
+  const threadId = params.get("thread_id")?.trim() || undefined;
+  return { sessionId, threadId };
+}
+
 function handleChatBodyScroll() {
   updateStickToBottom();
 }
@@ -152,7 +159,8 @@ async function loadInitialState() {
     }
 
     try {
-      await chatSessions.loadInitialState();
+      const target = scheduledHistoryTarget();
+      await chatSessions.loadInitialState(target.sessionId, target.threadId);
       if (chatSessions.activeSessionId.value && chatSessions.activeThreadId.value) {
         try {
           await syncActiveThreadBinding();
@@ -455,7 +463,7 @@ function applyPrompt(_event: MouseEvent, item: PromptProps) {
   height: auto;
   min-width: 0;
   min-height: 100%;
-  overflow-x: hidden;
+  overflow-x: clip;
   overflow-y: visible;
   padding: var(--space-6) var(--space-6) 0;
   overscroll-behavior: contain;

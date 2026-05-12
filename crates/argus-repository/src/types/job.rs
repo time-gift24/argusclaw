@@ -47,6 +47,7 @@ impl FromStr for JobId {
 
 /// The execution status of a job.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum JobStatus {
     /// Job is pending execution.
     Pending,
@@ -58,6 +59,8 @@ pub enum JobStatus {
     Succeeded,
     /// Job failed.
     Failed,
+    /// Job is paused.
+    Paused,
     /// Job was cancelled.
     Cancelled,
 }
@@ -72,6 +75,7 @@ impl JobStatus {
             Self::Running => "running",
             Self::Succeeded => "succeeded",
             Self::Failed => "failed",
+            Self::Paused => "paused",
             Self::Cancelled => "cancelled",
         }
     }
@@ -84,6 +88,7 @@ impl JobStatus {
             "running" => Ok(Self::Running),
             "succeeded" => Ok(Self::Succeeded),
             "failed" => Ok(Self::Failed),
+            "paused" => Ok(Self::Paused),
             "cancelled" => Ok(Self::Cancelled),
             _ => Err(format!("invalid job status: {s}")),
         }
@@ -101,6 +106,67 @@ impl TryFrom<&str> for JobStatus {
 
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         Self::parse_str(value)
+    }
+}
+
+/// Context for a scheduled message job.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScheduledMessageContext {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_user_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_thread_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub run_history: Vec<ScheduledMessageRunContext>,
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+}
+
+/// One chat conversation materialized by a scheduled message run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScheduledMessageRunContext {
+    pub session_id: String,
+    pub thread_id: String,
+    pub created_at: String,
+}
+
+fn default_enabled() -> bool {
+    true
+}
+
+impl ScheduledMessageContext {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            owner_user_id: None,
+            template_id: None,
+            provider_id: None,
+            model: None,
+            last_session_id: None,
+            last_thread_id: None,
+            run_history: Vec::new(),
+            enabled: default_enabled(),
+            timezone: None,
+            last_error: None,
+        }
+    }
+}
+
+impl Default for ScheduledMessageContext {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -228,6 +294,7 @@ mod tests {
         assert_eq!(JobStatus::Running.as_str(), "running");
         assert_eq!(JobStatus::Succeeded.as_str(), "succeeded");
         assert_eq!(JobStatus::Failed.as_str(), "failed");
+        assert_eq!(JobStatus::Paused.as_str(), "paused");
         assert_eq!(JobStatus::Cancelled.as_str(), "cancelled");
     }
 
@@ -241,10 +308,49 @@ mod tests {
             JobStatus::Succeeded
         );
         assert_eq!(JobStatus::parse_str("failed").unwrap(), JobStatus::Failed);
+        assert_eq!(JobStatus::parse_str("paused").unwrap(), JobStatus::Paused);
         assert_eq!(
             JobStatus::parse_str("cancelled").unwrap(),
             JobStatus::Cancelled
         );
+    }
+
+    #[test]
+    fn job_status_parses_paused() {
+        assert_eq!(JobStatus::parse_str("paused").unwrap(), JobStatus::Paused);
+        assert_eq!(JobStatus::Paused.as_str(), "paused");
+    }
+
+    #[test]
+    fn scheduled_message_context_round_trips() {
+        let context = ScheduledMessageContext {
+            owner_user_id: Some("user-1".to_string()),
+            template_id: Some(1),
+            provider_id: Some(2),
+            model: Some("alpha".to_string()),
+            last_session_id: None,
+            last_thread_id: None,
+            run_history: vec![ScheduledMessageRunContext {
+                session_id: "session-1".to_string(),
+                thread_id: "thread-1".to_string(),
+                created_at: "2026-05-09T01:00:00Z".to_string(),
+            }],
+            enabled: true,
+            timezone: Some("Asia/Shanghai".to_string()),
+            last_error: None,
+        };
+
+        let json = serde_json::to_string(&context).unwrap();
+        let restored: ScheduledMessageContext = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(restored.owner_user_id.as_deref(), Some("user-1"));
+        assert_eq!(restored.template_id, Some(1));
+        assert_eq!(restored.provider_id, Some(2));
+        assert_eq!(restored.model.as_deref(), Some("alpha"));
+        assert_eq!(restored.run_history.len(), 1);
+        assert_eq!(restored.run_history[0].thread_id, "thread-1");
+        assert!(restored.enabled);
+        assert_eq!(restored.timezone.as_deref(), Some("Asia/Shanghai"));
     }
 
     #[test]

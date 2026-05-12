@@ -185,6 +185,7 @@ impl ArgusWing {
             trace_dir,
             thread_pool,
             job_manager.clone(),
+            Some(arc_sqlite.clone() as Arc<dyn JobRepository>),
         ));
 
         let mcp_repo: Arc<dyn McpRepository> = arc_sqlite.clone();
@@ -264,6 +265,7 @@ impl ArgusWing {
             trace_dir,
             thread_pool,
             job_manager.clone(),
+            Some(arc_sqlite.clone() as Arc<dyn JobRepository>),
         ));
         let mcp_repo: Arc<dyn McpRepository> = arc_sqlite.clone();
 

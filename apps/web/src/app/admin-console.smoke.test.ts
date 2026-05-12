@@ -86,6 +86,7 @@ describe("admin console", () => {
     expect(wrapper.text()).toContain("智能体模板");
     expect(wrapper.text()).toContain("MCP 服务");
     expect(wrapper.text()).toContain("工具注册表");
+    expect(wrapper.text()).toContain("定时任务");
     expect(wrapper.text()).toContain("Agent Runs");
     expect(wrapper.text()).toContain("对话");
     expect(wrapper.text()).not.toContain("系统设置");

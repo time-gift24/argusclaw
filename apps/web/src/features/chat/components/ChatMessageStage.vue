@@ -157,6 +157,10 @@ onMounted(async () => {
   min-height: 100%;
 }
 
+.message-stage :deep(.tr-bubble-list) {
+  overflow-y: visible;
+}
+
 .prompt-panel {
   display: flex;
   flex-direction: column;

@@ -7,6 +7,7 @@ pub mod health;
 pub mod mcp;
 pub mod providers;
 pub mod runtime;
+pub mod scheduled_messages;
 pub mod templates;
 pub mod tools;
 
@@ -50,6 +51,24 @@ pub fn router() -> Router<AppState> {
             get(agent_runs::get_agent_run),
         )
         .route("/api/v1/chat/options", get(chat::get_chat_options))
+        .route(
+            "/api/v1/scheduled-messages",
+            get(scheduled_messages::list_scheduled_messages)
+                .post(scheduled_messages::create_scheduled_message),
+        )
+        .route(
+            "/api/v1/scheduled-messages/{job_id}/pause",
+            post(scheduled_messages::pause_scheduled_message),
+        )
+        .route(
+            "/api/v1/scheduled-messages/{job_id}/trigger",
+            post(scheduled_messages::trigger_scheduled_message),
+        )
+        .route(
+            "/api/v1/scheduled-messages/{job_id}",
+            axum::routing::delete(scheduled_messages::delete_scheduled_message)
+                .put(scheduled_messages::update_scheduled_message),
+        )
         .route(
             "/api/v1/chat/sessions",
             get(chat::list_sessions).post(chat::create_session),

@@ -77,12 +77,13 @@ export function useChatSessions() {
     threads: threads.value.length,
   }));
 
-  async function loadInitialState() {
+  async function loadInitialState(preferredSessionId?: string, preferredThreadId?: string) {
     loading.value = true;
     try {
       sessions.value = await callChatApi("listChatSessions");
-      if (sessions.value.length > 0) {
-        await selectSession(sessions.value[0].id);
+      const sessionId = preferredSessionId || sessions.value[0]?.id;
+      if (sessionId) {
+        await selectSession(sessionId, preferredThreadId);
       }
     } finally {
       loading.value = false;
