@@ -27,6 +27,7 @@ export interface UseChatComposerOptions {
   refreshStreamUntilSettled: (assistantCountBeforeSend: number) => Promise<void>;
   countAssistantMessages: () => number;
   clearPendingAssistant: () => void;
+  clearActiveThreadTransientState: () => void;
   streaming: Ref<boolean>;
   assistantCountAtStreamStart: Ref<number>;
   messages: Ref<import("@/lib/api").ChatMessageRecord[]>;
@@ -54,6 +55,7 @@ export function useChatComposer(options: UseChatComposerOptions) {
     refreshStreamUntilSettled,
     countAssistantMessages,
     clearPendingAssistant,
+    clearActiveThreadTransientState,
     streaming,
     assistantCountAtStreamStart,
     messages,
@@ -128,6 +130,7 @@ export function useChatComposer(options: UseChatComposerOptions) {
     error.value = "";
     closeThreadEvents();
     resetRuntimeActivity();
+    clearActiveThreadTransientState();
 
     const assistantCountBeforeSend = countAssistantMessages();
     assistantCountAtStreamStart.value = assistantCountBeforeSend;
@@ -151,7 +154,7 @@ export function useChatComposer(options: UseChatComposerOptions) {
         closeThreadEvents();
       }
       streaming.value = false;
-      clearPendingAssistant();
+      clearActiveThreadTransientState();
       setError(reason);
       actionMessage.value = "";
     } finally {
@@ -166,7 +169,7 @@ export function useChatComposer(options: UseChatComposerOptions) {
       closeThreadEvents();
       await api.cancelChatThread!(activeSessionId.value, activeThreadId.value);
       streaming.value = false;
-      clearPendingAssistant();
+      clearActiveThreadTransientState();
       actionMessage.value = "已请求停止当前对话。";
     } catch (reason) {
       setError(reason);

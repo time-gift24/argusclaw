@@ -999,6 +999,132 @@ describe("ChatPage", () => {
     expect(wrapper.find(".runtime-rail").exists()).toBe(false);
   });
 
+  it("restores an unfinished turn timeline after switching away and back", async () => {
+    const handlersByThread = new Map<string, ChatThreadEventHandlers>();
+    const subscribeChatThread = vi.fn((sessionId: string, threadId: string, nextHandlers) => {
+      handlersByThread.set(`${sessionId}:${threadId}`, nextHandlers);
+      return { close: vi.fn() } as RuntimeEventSubscription;
+    });
+    const listChatThreads = vi.fn().mockImplementation(async (sessionId: string) => {
+      if (sessionId === "session-1") return [thread({ id: "thread-1", title: "一号线程" })];
+      if (sessionId === "session-2") return [thread({ id: "thread-2", title: "二号线程" })];
+      return [];
+    });
+    const listChatMessages = vi.fn().mockImplementation(async (sessionId: string, threadId: string) => {
+      if (sessionId === "session-1" && threadId === "thread-1") {
+        return [message("user", "继续")];
+      }
+      if (sessionId === "session-2" && threadId === "thread-2") {
+        return [message("assistant", "二号回复")];
+      }
+      return [];
+    });
+
+    setApiClient(
+      makeApiClient({
+        listChatSessions: vi.fn().mockResolvedValue([
+          session({ id: "session-1", name: "一号会话" }),
+          session({ id: "session-2", name: "二号会话" }),
+        ]),
+        listChatThreads,
+        listChatMessages,
+        subscribeChatThread,
+      }),
+    );
+    const wrapper = mount(ChatPage);
+    await flushPromises();
+
+    await wrapper.get("[data-testid='chat-input']").setValue("继续");
+    await wrapper.get("[data-testid='chat-input']").trigger("keydown", { key: "Enter" });
+    await flushPromises();
+
+    const firstHandlers = handlersByThread.get("session-1:thread-1");
+    expect(firstHandlers).toBeDefined();
+    firstHandlers!.onEvent({
+      session_id: "session-1",
+      thread_id: "thread-1",
+      turn_number: null,
+      payload: {
+        type: "reasoning_delta",
+        delta: "先检查状态。",
+      },
+    });
+    firstHandlers!.onEvent({
+      session_id: "session-1",
+      thread_id: "thread-1",
+      turn_number: null,
+      payload: {
+        type: "tool_started",
+        tool_call_id: "call-shell",
+        tool_name: "shell",
+        arguments: { cmd: "pwd" },
+      },
+    });
+    await flushPromises();
+
+    const historyBtn = wrapper.findAll("button").find((button) => button.text().includes("历史"));
+    await historyBtn!.trigger("click");
+    await flushPromises();
+
+    const secondSession = Array.from(document.querySelectorAll(".history-dialog__session-item")).find((item) =>
+      item.textContent?.includes("二号会话"),
+    ) as HTMLElement | undefined;
+    secondSession!.click();
+    await flushPromises();
+
+    const secondThread = Array.from(document.querySelectorAll(".history-dialog__session-item")).find((item) =>
+      item.textContent?.includes("二号线程"),
+    ) as HTMLElement | undefined;
+    secondThread!.click();
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("二号回复");
+
+    await wrapper.findAll("button").find((button) => button.text().includes("历史"))!.trigger("click");
+    await flushPromises();
+
+    const firstSession = Array.from(document.querySelectorAll(".history-dialog__session-item")).find((item) =>
+      item.textContent?.includes("一号会话"),
+    ) as HTMLElement | undefined;
+    firstSession!.click();
+    await flushPromises();
+
+    const firstThread = Array.from(document.querySelectorAll(".history-dialog__session-item")).find((item) =>
+      item.textContent?.includes("一号线程"),
+    ) as HTMLElement | undefined;
+    firstThread!.click();
+    await flushPromises();
+
+    const panel = wrapper.getComponent(ChatConversationPanel);
+    const messages = panel.props("robotMessages") as Array<{
+      id?: string;
+      content?: unknown;
+    }>;
+    const pendingAssistant = messages.find((item) => item.id === "pending-assistant");
+    expect(pendingAssistant?.content).toEqual([
+      {
+        type: "argus-turn-timeline",
+        items: [
+          expect.objectContaining({
+            type: "reasoning",
+            text: "先检查状态。",
+          }),
+          expect.objectContaining({
+            type: "tool_call",
+            id: "call-shell",
+            status: "running",
+            inputPreview: "{\n  \"cmd\": \"pwd\"\n}",
+          }),
+        ],
+      },
+    ]);
+    expect(subscribeChatThread).toHaveBeenLastCalledWith(
+      "session-1",
+      "thread-1",
+      expect.any(Object),
+    );
+  });
+
   it("does not render a floating runtime activity list for pending tool calls", async () => {
     let handlers: ChatThreadEventHandlers | undefined;
 

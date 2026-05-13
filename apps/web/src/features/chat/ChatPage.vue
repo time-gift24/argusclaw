@@ -59,6 +59,7 @@ const chatComposer = useChatComposer({
   refreshStreamUntilSettled: chatThreadStream.refreshStreamUntilSettled,
   countAssistantMessages: chatThreadStream.countAssistantMessages,
   clearPendingAssistant: chatThreadStream.clearPendingAssistant,
+  clearActiveThreadTransientState: chatThreadStream.clearActiveThreadTransientState,
   streaming: chatThreadStream.streaming,
   assistantCountAtStreamStart: chatThreadStream.assistantCountAtStreamStart,
   messages: chatThreadStream.messages,
@@ -192,10 +193,9 @@ watch(
       !previousThreadId && Boolean(threadId) && chatComposer.sending.value;
 
     if (!preservingPendingFirstTurn) {
-      chatThreadStream.resetTransientState();
+      chatThreadStream.restoreActiveThreadTransientState();
     }
     if (threadId && chatSessions.activeSessionId.value) {
-      chatThreadStream.resetRuntimeActivity();
       chatThreadStream.openThreadEvents(chatSessions.activeSessionId.value, threadId);
     }
   },
@@ -212,6 +212,7 @@ watch(
 );
 
 async function handleSelectThreadFromDialog(sessionId: string, threadId: string) {
+  chatThreadStream.saveActiveThreadTransientState();
   chatThreadStream.closeThreadEvents();
   await chatSessions.selectSession(sessionId, threadId);
   await syncActiveThreadBinding();
@@ -234,6 +235,7 @@ async function handleDeleteSession(sessionId: string) {
   const api = getApiClient();
   try {
     chatThreadStream.closeThreadEvents();
+    chatThreadStream.clearActiveThreadTransientState();
     chatThreadStream.resetTransientState();
     chatThreadStream.resetRuntimeActivity();
     await api.deleteChatSession!(sessionId);
@@ -252,6 +254,7 @@ async function handleDeleteSession(sessionId: string) {
 }
 
 function handleNewChat() {
+  chatThreadStream.clearActiveThreadTransientState();
   chatThreadStream.closeThreadEvents();
   chatThreadStream.resetTransientState();
   chatSessions.startNewChatDraft();
@@ -288,7 +291,7 @@ async function handleTemplateChange(value: number | null) {
       model: selection.model || null,
     });
     chatThreadStream.closeThreadEvents();
-    chatThreadStream.resetTransientState();
+    chatThreadStream.clearActiveThreadTransientState();
     chatThreadStream.resetRuntimeActivity();
     chatThreadStream.messages.value = [];
     chatSessions.applyChatSessionPayload(payload);

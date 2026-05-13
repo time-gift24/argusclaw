@@ -39,9 +39,21 @@ export interface UseChatThreadStreamOptions {
   activeThreadId: Ref<string>;
 }
 
+interface ThreadTransientState {
+  streaming: boolean;
+  pendingAssistantContent: string;
+  pendingAssistantReasoning: string;
+  pendingTimeline: TurnTimelineItem[];
+  runtimeActivities: ToolActivity[];
+  runtimeNotice: string;
+  assistantCountAtStreamStart: number;
+  messages: ChatMessageRecord[];
+}
+
 export function useChatThreadStream(options: UseChatThreadStreamOptions) {
   const { activeSessionId, activeThreadId } = options;
   let refreshRequestId = 0;
+  const transientStateByThread = new Map<string, ThreadTransientState>();
 
   const messages: Ref<ChatMessageRecord[]> = ref<ChatMessageRecord[]>([]);
   const streaming = ref(false);
@@ -115,14 +127,17 @@ export function useChatThreadStream(options: UseChatThreadStreamOptions) {
       case "content_delta":
         streaming.value = true;
         pendingAssistantContent.value += payload.delta;
+        saveActiveThreadTransientState();
         break;
       case "reasoning_delta":
         streaming.value = true;
         pendingAssistantReasoning.value += payload.delta;
         appendPendingReasoning(payload.delta);
+        saveActiveThreadTransientState();
         break;
       case "retry_attempt":
         runtimeNotice.value = `正在重试第 ${payload.attempt}/${payload.max_retries} 次：${payload.error}`;
+        saveActiveThreadTransientState();
         break;
       case "tool_started":
         streaming.value = true;
@@ -143,6 +158,7 @@ export function useChatThreadStream(options: UseChatThreadStreamOptions) {
           inputPreview: previewValue(payload.arguments),
           outputPreview: "",
         });
+        saveActiveThreadTransientState();
         break;
       case "tool_completed":
         upsertToolActivity({
@@ -162,6 +178,7 @@ export function useChatThreadStream(options: UseChatThreadStreamOptions) {
           inputPreview: "",
           outputPreview: previewValue(payload.result),
         });
+        saveActiveThreadTransientState();
         break;
       case "job_dispatched":
         streaming.value = true;
@@ -179,6 +196,7 @@ export function useChatThreadStream(options: UseChatThreadStreamOptions) {
           inputPreview: typeof payload.prompt === "string" ? payload.prompt : "后台任务已派发",
           outputPreview: "",
         });
+        saveActiveThreadTransientState();
         break;
       case "job_runtime_queued":
         streaming.value = true;
@@ -187,6 +205,7 @@ export function useChatThreadStream(options: UseChatThreadStreamOptions) {
           argumentsPreview: "等待后台 Job runtime",
           resultPreview: "",
         });
+        saveActiveThreadTransientState();
         break;
       case "job_runtime_started":
         streaming.value = true;
@@ -195,6 +214,7 @@ export function useChatThreadStream(options: UseChatThreadStreamOptions) {
           argumentsPreview: "后台 Job runtime 已启动",
           resultPreview: "",
         });
+        saveActiveThreadTransientState();
         break;
       case "job_runtime_cooling":
       case "job_runtime_evicted":
@@ -203,6 +223,7 @@ export function useChatThreadStream(options: UseChatThreadStreamOptions) {
           argumentsPreview: "",
           resultPreview: "后台 Job runtime 已结束",
         });
+        saveActiveThreadTransientState();
         break;
       case "job_result":
         upsertJobActivity(payload.job_id, {
@@ -219,11 +240,12 @@ export function useChatThreadStream(options: UseChatThreadStreamOptions) {
           inputPreview: "",
           outputPreview: typeof payload.message === "string" ? payload.message : previewValue(payload),
         });
+        saveActiveThreadTransientState();
         break;
       case "turn_failed":
         streaming.value = false;
         runtimeNotice.value = `运行失败：${payload.error}`;
-        clearPendingAssistant();
+        clearActiveThreadTransientState();
         closeThreadEvents();
         void refreshActiveThread({ silent: true });
         break;
@@ -319,6 +341,7 @@ export function useChatThreadStream(options: UseChatThreadStreamOptions) {
   function resetRuntimeActivity() {
     runtimeActivities.value = [];
     runtimeNotice.value = "";
+    saveActiveThreadTransientState();
   }
 
   function resetTransientState() {
@@ -326,6 +349,78 @@ export function useChatThreadStream(options: UseChatThreadStreamOptions) {
     streaming.value = false;
     threadLoading.value = false;
     runtimeNotice.value = "";
+    clearPendingAssistant();
+  }
+
+  function activeThreadCacheKey() {
+    return threadCacheKey(activeSessionId.value, activeThreadId.value);
+  }
+
+  function threadCacheKey(sessionId: string, threadId: string) {
+    return sessionId && threadId ? `${sessionId}:${threadId}` : "";
+  }
+
+  function shouldCacheTransientState() {
+    return Boolean(
+      streaming.value ||
+        pendingAssistantContent.value ||
+        pendingAssistantReasoning.value ||
+        pendingTimeline.value.length > 0 ||
+        runtimeActivities.value.length > 0 ||
+        runtimeNotice.value ||
+        messages.value.length > 0,
+    );
+  }
+
+  function saveActiveThreadTransientState() {
+    const key = activeThreadCacheKey();
+    if (!key) return;
+    if (!shouldCacheTransientState()) {
+      transientStateByThread.delete(key);
+      return;
+    }
+    transientStateByThread.set(key, {
+      streaming: streaming.value,
+      pendingAssistantContent: pendingAssistantContent.value,
+      pendingAssistantReasoning: pendingAssistantReasoning.value,
+      pendingTimeline: pendingTimeline.value.map((item) => ({ ...item })),
+      runtimeActivities: runtimeActivities.value.map((item) => ({ ...item })),
+      runtimeNotice: runtimeNotice.value,
+      assistantCountAtStreamStart: assistantCountAtStreamStart.value,
+      messages: messages.value.map((item) => ({ ...item })),
+    });
+  }
+
+  function restoreActiveThreadTransientState() {
+    const cached = transientStateByThread.get(activeThreadCacheKey());
+    if (!cached) {
+      streaming.value = false;
+      threadLoading.value = false;
+      runtimeNotice.value = "";
+      runtimeActivities.value = [];
+      clearPendingAssistant();
+      messages.value = [];
+      assistantCountAtStreamStart.value = 0;
+      return;
+    }
+
+    streaming.value = cached.streaming;
+    threadLoading.value = false;
+    pendingAssistantContent.value = cached.pendingAssistantContent;
+    pendingAssistantReasoning.value = cached.pendingAssistantReasoning;
+    pendingTimeline.value = cached.pendingTimeline.map((item) => ({ ...item }));
+    runtimeActivities.value = cached.runtimeActivities.map((item) => ({ ...item }));
+    runtimeNotice.value = cached.runtimeNotice;
+    assistantCountAtStreamStart.value = cached.assistantCountAtStreamStart;
+    messages.value = cached.messages.map((item) => ({ ...item }));
+  }
+
+  function clearActiveThreadTransientState() {
+    const key = activeThreadCacheKey();
+    if (key) transientStateByThread.delete(key);
+    streaming.value = false;
+    runtimeNotice.value = "";
+    runtimeActivities.value = [];
     clearPendingAssistant();
   }
 
@@ -422,6 +517,11 @@ export function useChatThreadStream(options: UseChatThreadStreamOptions) {
         return;
       }
       messages.value = nextMessages.length > 0 ? nextMessages : snapshot.messages;
+      if (streaming.value && countAssistantMessages() > assistantCountAtStreamStart.value) {
+        clearActiveThreadTransientState();
+      } else {
+        saveActiveThreadTransientState();
+      }
     } catch (reason) {
       if (
         requestId !== refreshRequestId ||
@@ -454,6 +554,9 @@ export function useChatThreadStream(options: UseChatThreadStreamOptions) {
     refreshActiveThread,
     resetRuntimeActivity,
     resetTransientState,
+    saveActiveThreadTransientState,
+    restoreActiveThreadTransientState,
+    clearActiveThreadTransientState,
     countAssistantMessages,
     clearPendingAssistant,
     refreshStreamUntilSettled,
