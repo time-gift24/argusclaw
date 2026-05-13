@@ -11,6 +11,15 @@ import type { TurnTimelineItem } from "../composables/useChatThreadStream";
 import ToolCallDetailDialog from "./ToolCallDetailDialog.vue";
 import { statusLabel, toolIcon, toolKindLabel } from "./toolCallDisplay";
 
+type ToolTimelineItem = Extract<TurnTimelineItem, { type: "tool_call" }>;
+type TimelineEntry =
+  | TurnTimelineItem
+  | {
+      type: "tool_group";
+      id: string;
+      tools: ToolTimelineItem[];
+    };
+
 const props = defineProps<{
   message: ChatRobotMessage;
   contentIndex: number;
@@ -30,8 +39,38 @@ const items = computed(() => {
   return Array.isArray(timelineItem.value.items) ? timelineItem.value.items : [];
 });
 
-function openToolDetail(item: TurnTimelineItem) {
-  if (item.type !== "tool_call") return;
+const timelineEntries = computed<TimelineEntry[]>(() => {
+  const entries: TimelineEntry[] = [];
+  let pendingTools: ToolTimelineItem[] = [];
+
+  const flushPendingTools = () => {
+    if (pendingTools.length === 0) return;
+    if (pendingTools.length === 1) {
+      entries.push(pendingTools[0]);
+    } else {
+      entries.push({
+        type: "tool_group",
+        id: `tool-group-${pendingTools[0].id}-${pendingTools.length}`,
+        tools: pendingTools,
+      });
+    }
+    pendingTools = [];
+  };
+
+  for (const item of items.value) {
+    if (item.type === "tool_call") {
+      pendingTools.push(item);
+      continue;
+    }
+    flushPendingTools();
+    entries.push(item);
+  }
+  flushPendingTools();
+
+  return entries;
+});
+
+function openToolDetail(item: ToolTimelineItem) {
   const { id, kind, name, status, inputPreview, outputPreview } = item;
   activeTool.value = { id, kind, name, status, inputPreview, outputPreview };
 }
@@ -39,12 +78,30 @@ function openToolDetail(item: TurnTimelineItem) {
 function closeToolDetail() {
   activeTool.value = null;
 }
+
+function groupStatus(tools: ToolTimelineItem[]) {
+  if (tools.some((tool) => tool.status === "error")) return "error";
+  if (tools.some((tool) => tool.status === "running")) return "running";
+  return "success";
+}
+
+function groupKindLabel(tools: ToolTimelineItem[]) {
+  const firstKind = tools[0]?.kind;
+  if (firstKind && tools.every((tool) => tool.kind === firstKind)) {
+    return toolKindLabel(firstKind);
+  }
+  return "工具调用";
+}
+
+function toolPreview(tool: ToolTimelineItem) {
+  return tool.inputPreview.trim() || toolKindLabel(tool.kind);
+}
 </script>
 
 <template>
   <div class="turn-timeline" data-turn-timeline-content>
     <div
-      v-for="item in items"
+      v-for="item in timelineEntries"
       :key="item.id"
       class="turn-timeline__item"
       :class="`turn-timeline__item--${item.type}`"
@@ -57,6 +114,38 @@ function closeToolDetail() {
           <span class="turn-timeline__chevron" aria-hidden="true">›</span>
         </summary>
         <div class="turn-timeline__reasoning-body">{{ item.text }}</div>
+      </details>
+
+      <details v-else-if="item.type === 'tool_group'" class="turn-timeline__tool-group">
+        <summary class="turn-timeline__tool-group-summary">
+          <span class="turn-timeline__icon turn-timeline__tool-icon">
+            {{ toolIcon(item.tools[0]?.kind ?? "tool") }}
+          </span>
+          <strong>{{ groupKindLabel(item.tools) }} ×{{ item.tools.length }}，{{ statusLabel(groupStatus(item.tools)) }}</strong>
+          <span class="turn-timeline__tool-group-preview">
+            {{ item.tools.map((tool) => tool.name).join(" / ") }}
+          </span>
+          <span class="turn-timeline__chevron" aria-hidden="true">›</span>
+        </summary>
+        <div class="turn-timeline__tool-group-body">
+          <button
+            v-for="tool in item.tools"
+            :key="tool.id"
+            type="button"
+            class="turn-timeline__tool turn-timeline__tool--grouped"
+            :class="`turn-timeline__tool--${tool.status}`"
+            @click="openToolDetail(tool)"
+          >
+            <span class="turn-timeline__icon turn-timeline__tool-icon">{{ toolIcon(tool.kind) }}</span>
+            <span class="turn-timeline__tool-meta">
+              <strong>{{ tool.name }}</strong>
+              <small>{{ toolPreview(tool) }}</small>
+            </span>
+            <span class="turn-timeline__tool-status" :class="`turn-timeline__tool-status--${tool.status}`">
+              {{ statusLabel(tool.status) }}
+            </span>
+          </button>
+        </div>
       </details>
 
       <button
@@ -99,7 +188,8 @@ function closeToolDetail() {
   background: color-mix(in srgb, var(--accent-subtle) 58%, var(--surface-raised));
 }
 
-.turn-timeline__reasoning-summary {
+.turn-timeline__reasoning-summary,
+.turn-timeline__tool-group-summary {
   display: grid;
   grid-template-columns: 22px auto minmax(0, 1fr) 18px;
   align-items: center;
@@ -113,11 +203,13 @@ function closeToolDetail() {
   list-style: none;
 }
 
-.turn-timeline__reasoning-summary::-webkit-details-marker {
+.turn-timeline__reasoning-summary::-webkit-details-marker,
+.turn-timeline__tool-group-summary::-webkit-details-marker {
   display: none;
 }
 
 .turn-timeline__reasoning-summary strong,
+.turn-timeline__tool-group-summary strong,
 .turn-timeline__tool-meta strong {
   min-width: 0;
   color: var(--text-primary);
@@ -127,7 +219,8 @@ function closeToolDetail() {
   white-space: nowrap;
 }
 
-.turn-timeline__preview {
+.turn-timeline__preview,
+.turn-timeline__tool-group-preview {
   min-width: 0;
   overflow: hidden;
   color: var(--text-secondary);
@@ -146,7 +239,8 @@ function closeToolDetail() {
   transition: transform 0.18s ease;
 }
 
-.turn-timeline__reasoning[open] .turn-timeline__chevron {
+.turn-timeline__reasoning[open] .turn-timeline__chevron,
+.turn-timeline__tool-group[open] .turn-timeline__chevron {
   transform: rotate(90deg);
 }
 
@@ -176,6 +270,29 @@ function closeToolDetail() {
   word-break: break-word;
 }
 
+.turn-timeline__tool-group {
+  overflow: hidden;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  background: color-mix(in srgb, var(--surface-overlay) 52%, var(--surface-raised));
+}
+
+.turn-timeline__tool-group-summary {
+  border-bottom: 1px solid transparent;
+  background: color-mix(in srgb, var(--surface-overlay) 72%, var(--surface-raised));
+}
+
+.turn-timeline__tool-group[open] .turn-timeline__tool-group-summary {
+  border-bottom-color: var(--border-subtle);
+}
+
+.turn-timeline__tool-group-body {
+  display: grid;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  background: color-mix(in srgb, var(--surface-raised) 82%, transparent);
+}
+
 .turn-timeline__tool {
   display: grid;
   grid-template-columns: 22px auto minmax(0, 1fr) auto 18px;
@@ -199,6 +316,16 @@ function closeToolDetail() {
 .turn-timeline__tool:hover {
   border-color: color-mix(in srgb, var(--accent) 42%, var(--border-default));
   background: color-mix(in srgb, var(--surface-overlay) 62%, var(--surface-raised));
+}
+
+.turn-timeline__tool--grouped {
+  grid-template-columns: 22px auto minmax(0, 1fr) auto;
+  border-color: transparent;
+  background: transparent;
+}
+
+.turn-timeline__tool--grouped:hover {
+  border-color: var(--border-subtle);
 }
 
 .turn-timeline__tool--running {

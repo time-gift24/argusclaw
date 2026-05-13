@@ -270,6 +270,10 @@ function handlePromptClick(event: MouseEvent, item: PromptProps) {
   line-height: 1.85;
 }
 
+:deep(.tr-bubble__box[data-role="assistant"] .tr-bubble__markdown) {
+  overflow-x: auto;
+}
+
 :deep(.tr-bubble__box[data-role="assistant"] .detail-content),
 :deep(.tr-bubble__box[data-role="assistant"] .tr-bubble__markdown p),
 :deep(.tr-bubble__box[data-role="assistant"] .tr-bubble__markdown ul),
@@ -334,26 +338,37 @@ function handlePromptClick(event: MouseEvent, item: PromptProps) {
 }
 
 :deep(.tr-bubble__box[data-role="assistant"] .tr-bubble__markdown table) {
-  display: block;
-  width: 100%;
-  overflow-x: auto;
+  display: inline-table;
+  width: auto;
+  max-width: 100%;
+  overflow: hidden;
   margin: var(--space-3) 0;
-  border-collapse: collapse;
-  border: 1px solid var(--border-subtle);
+  border-collapse: separate;
+  border-spacing: 0;
+  border: 1px solid var(--border-default);
   border-radius: 10px;
 }
 
 :deep(.tr-bubble__box[data-role="assistant"] .tr-bubble__markdown th),
 :deep(.tr-bubble__box[data-role="assistant"] .tr-bubble__markdown td) {
   padding: 8px 12px;
-  border: 1px solid var(--border-subtle);
+  border-right: 1px solid var(--border-default);
+  border-bottom: 1px solid var(--border-default);
   text-align: left;
   vertical-align: top;
 }
 
+:deep(.tr-bubble__box[data-role="assistant"] .tr-bubble__markdown tr > :last-child) {
+  border-right: 0;
+}
+
+:deep(.tr-bubble__box[data-role="assistant"] .tr-bubble__markdown tbody tr:last-child > td) {
+  border-bottom: 0;
+}
+
 :deep(.tr-bubble__box[data-role="assistant"] .tr-bubble__markdown th) {
-  background: color-mix(in srgb, var(--surface-muted) 82%, transparent);
-  color: var(--text-secondary);
+  background: color-mix(in srgb, var(--surface-overlay) 72%, var(--surface-raised));
+  color: var(--text-primary);
   font-weight: 650;
 }
 

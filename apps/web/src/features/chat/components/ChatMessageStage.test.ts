@@ -101,4 +101,36 @@ describe("ChatMessageStage", () => {
       typographer: true,
     });
   });
+
+  it("uses design tokens for markdown table header backgrounds", () => {
+    const source = readFileSync("src/features/chat/components/ChatMessageStage.vue", "utf8");
+
+    expect(source).toContain(".tr-bubble__markdown th");
+    expect(source).toContain("background: color-mix(in srgb, var(--surface-overlay) 72%, var(--surface-raised));");
+    expect(source).toContain("color: var(--text-primary);");
+  });
+
+  it("lets markdown tables size to their content instead of filling the chat body", () => {
+    const source = readFileSync("src/features/chat/components/ChatMessageStage.vue", "utf8");
+    const tableBlock = source.match(/\.tr-bubble__markdown table\)[\s\S]*?\n}/)?.[0] ?? "";
+
+    expect(tableBlock).toContain("display: inline-table;");
+    expect(tableBlock).toContain("width: auto;");
+    expect(tableBlock).toContain("max-width: 100%;");
+    expect(source).toContain("overflow-x: auto;");
+    expect(tableBlock).not.toMatch(/(^|\n)\s*width:\s*100%;/);
+  });
+
+  it("uses visible rounded borders for markdown tables", () => {
+    const source = readFileSync("src/features/chat/components/ChatMessageStage.vue", "utf8");
+    const tableBlock = source.match(/\.tr-bubble__markdown table\)[\s\S]*?\n}/)?.[0] ?? "";
+
+    expect(tableBlock).toContain("overflow: hidden;");
+    expect(tableBlock).toContain("border-collapse: separate;");
+    expect(tableBlock).toContain("border-spacing: 0;");
+    expect(tableBlock).toContain("border: 1px solid var(--border-default);");
+    expect(tableBlock).toContain("border-radius: 10px;");
+    expect(source).toContain("border-right: 1px solid var(--border-default);");
+    expect(source).toContain("border-bottom: 1px solid var(--border-default);");
+  });
 });
