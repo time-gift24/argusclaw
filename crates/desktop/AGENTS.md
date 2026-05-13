@@ -56,7 +56,7 @@ pnpm tauri build
 ## Chat 交互不变量
 
 - 用户消息发送后必须先在前端可见，不能等后端 snapshot 刷新
-- 同一 turn 的 reasoning / tool artifacts 统一成一组渲染，不拆成多段“思考完成 + 工具调用”
+- 同一 turn 仍聚合为一条 assistant runtime message，但 reasoning / tool artifacts 必须按事件顺序分段渲染为 timeline
 - `pendingAssistant`、`pendingUserMessage` 这类前端临时态必须在成功 refresh 或失败收口时被清理，避免跨 thread/session 泄漏
 - 修改 chat 行为时，至少同时检查 `lib/chat-store.ts`、`lib/chat-runtime.ts`、`components/assistant-ui/thread.tsx` 和对应 `tests/`
 - 改动 chat 行为时同步补 `tests/`，优先覆盖 store/runtime 的根因，而不是只测样式

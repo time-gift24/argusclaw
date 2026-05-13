@@ -83,6 +83,7 @@ function createComposer(options: CreateComposerOptions = {}) {
   const refreshStreamUntilSettled = vi.fn().mockResolvedValue(undefined);
   const countAssistantMessages = vi.fn(() => messages.value.filter((message) => message.role === "assistant").length);
   const clearPendingAssistant = vi.fn();
+  const clearActiveThreadTransientState = vi.fn();
 
   setApiClient({
     getHealth: vi.fn().mockResolvedValue({ status: "ok" }),
@@ -127,6 +128,7 @@ function createComposer(options: CreateComposerOptions = {}) {
     refreshStreamUntilSettled,
     countAssistantMessages,
     clearPendingAssistant,
+    clearActiveThreadTransientState,
     streaming,
     assistantCountAtStreamStart,
     messages,
@@ -140,6 +142,7 @@ function createComposer(options: CreateComposerOptions = {}) {
     streaming,
     refreshStreamUntilSettled,
     clearPendingAssistant,
+    clearActiveThreadTransientState,
   };
 }
 
@@ -219,7 +222,7 @@ describe("useChatComposer", () => {
 
   it("clears local streaming state after requesting cancellation", async () => {
     const cancelChatThread = vi.fn().mockResolvedValue({ accepted: true });
-    const { composer, streaming, clearPendingAssistant } = createComposer({
+    const { composer, streaming, clearActiveThreadTransientState } = createComposer({
       apiOverrides: {
         cancelChatThread,
       },
@@ -230,7 +233,7 @@ describe("useChatComposer", () => {
 
     expect(cancelChatThread).toHaveBeenCalledWith("session-1", "thread-1");
     expect(streaming.value).toBe(false);
-    expect(clearPendingAssistant).toHaveBeenCalled();
+    expect(clearActiveThreadTransientState).toHaveBeenCalled();
     expect(composer.actionMessage.value).toBe("已请求停止当前对话。");
   });
 });

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { ChatMessageRecord } from "@/lib/api";
 import {
+  TURN_TIMELINE_CONTENT_TYPE,
   createStarterPrompts,
   draftMessageForPrompt,
   toRobotMessages,
@@ -34,6 +35,7 @@ describe("useChatPresentation", () => {
       pendingAssistantContent: "正在回答",
       pendingAssistantReasoning: "",
       runtimeActivities: [],
+      pendingTimeline: [],
     });
 
     expect(messages).toHaveLength(2);
@@ -54,6 +56,7 @@ describe("useChatPresentation", () => {
       pendingAssistantContent: "",
       pendingAssistantReasoning: "",
       runtimeActivities: [],
+      pendingTimeline: [],
     });
 
     expect(messages[1]).toMatchObject({
@@ -64,7 +67,7 @@ describe("useChatPresentation", () => {
     });
   });
 
-  it("preserves assistant reasoning content for settled and streaming messages", () => {
+  it("renders assistant reasoning as ordered timeline items for settled and streaming messages", () => {
     const messages = toRobotMessages({
       messages: [
         message("assistant", "最终答案", {
@@ -76,23 +79,52 @@ describe("useChatPresentation", () => {
       pendingAssistantContent: "流式回复",
       pendingAssistantReasoning: "正在推理当前问题。",
       runtimeActivities: [],
+      pendingTimeline: [],
     });
 
     expect(messages).toHaveLength(2);
     expect(messages[0]).toMatchObject({
       id: "message-assistant-0",
       role: "assistant",
-      content: "最终答案",
-      reasoning_content: "先分析上下文，再组织回答。",
     });
+    expect(messages[0].content).toEqual([
+      {
+        type: TURN_TIMELINE_CONTENT_TYPE,
+        items: [
+          {
+            type: "reasoning",
+            id: "reasoning-0-0",
+            text: "先分析上下文，再组织回答。",
+          },
+        ],
+      },
+      {
+        type: "text",
+        text: "最终答案",
+      },
+    ]);
     expect(messages[1]).toMatchObject({
       role: "assistant",
-      content: "流式回复",
-      reasoning_content: "正在推理当前问题。",
     });
+    expect(messages[1].content).toEqual([
+      {
+        type: TURN_TIMELINE_CONTENT_TYPE,
+        items: [
+          {
+            type: "reasoning",
+            id: "pending-reasoning",
+            text: "正在推理当前问题。",
+          },
+        ],
+      },
+      {
+        type: "text",
+        text: "流式回复",
+      },
+    ]);
   });
 
-  it("renders empty assistant tool-call messages as readable summaries", () => {
+  it("renders empty assistant tool-call messages as inline turn timeline items", () => {
     const messages = toRobotMessages({
       messages: [
         message("assistant", "", {
@@ -104,13 +136,15 @@ describe("useChatPresentation", () => {
       pendingAssistantContent: "",
       pendingAssistantReasoning: "",
       runtimeActivities: [],
+      pendingTimeline: [],
     });
 
     expect(messages[0].content).toEqual([
       {
-        type: "argus-tool-summary",
-        toolDetails: [
+        type: TURN_TIMELINE_CONTENT_TYPE,
+        items: [
           {
+            type: "tool_call",
             id: "tool-call-shell-0",
             kind: "shell",
             name: "shell",
@@ -119,6 +153,7 @@ describe("useChatPresentation", () => {
             outputPreview: "",
           },
           {
+            type: "tool_call",
             id: "tool-call-mcp.search-1",
             kind: "mcp",
             name: "mcp.search",
@@ -130,30 +165,13 @@ describe("useChatPresentation", () => {
       },
     ]);
     expect(messages).toHaveLength(1);
-    expect((messages[0].state as { toolDetails?: unknown[] } | undefined)?.toolDetails).toEqual([
-      {
-        id: "tool-call-shell-0",
-        kind: "shell",
-        name: "shell",
-        status: "running",
-        inputPreview: "",
-        outputPreview: "",
-      },
-      {
-        id: "tool-call-mcp.search-1",
-        kind: "mcp",
-        name: "mcp.search",
-        status: "running",
-        inputPreview: "",
-        outputPreview: "",
-      },
-    ]);
   });
 
-  it("merges assistant tool calls with matching tool results into a single dialog-ready summary", () => {
+  it("merges assistant tool calls with matching tool results into an inline timeline", () => {
     const messages = toRobotMessages({
       messages: [
         message("assistant", "", {
+          reasoning_content: "先查看目录。",
           tool_calls: [
             { id: "call-shell", name: "shell", arguments: { cmd: "pwd" } },
             { id: "call-search", name: "mcp.search", arguments: { q: "runtime" } },
@@ -173,15 +191,22 @@ describe("useChatPresentation", () => {
       pendingAssistantContent: "",
       pendingAssistantReasoning: "",
       runtimeActivities: [],
+      pendingTimeline: [],
     });
 
     expect(messages).toHaveLength(1);
     expect(messages[0].role).toBe("assistant");
     expect(messages[0].content).toEqual([
       {
-        type: "argus-tool-summary",
-        toolDetails: [
+        type: TURN_TIMELINE_CONTENT_TYPE,
+        items: [
           {
+            type: "reasoning",
+            id: "reasoning-0-0",
+            text: "先查看目录。",
+          },
+          {
+            type: "tool_call",
             id: "call-shell",
             kind: "shell",
             name: "shell",
@@ -190,6 +215,7 @@ describe("useChatPresentation", () => {
             outputPreview: "/workspace/project",
           },
           {
+            type: "tool_call",
             id: "call-search",
             kind: "mcp",
             name: "mcp.search",
@@ -200,27 +226,57 @@ describe("useChatPresentation", () => {
         ],
       },
     ]);
-    expect((messages[0].state as { toolDetails?: unknown[] } | undefined)?.toolDetails).toEqual([
+  });
+
+  it("preserves settled assistant tool cycles inside one ordered turn timeline", () => {
+    const messages = toRobotMessages({
+      messages: [
+        message("user", "做检查"),
+        message("assistant", "", {
+          reasoning_content: "先搜信息。",
+          tool_calls: [{ id: "call-search", name: "mcp.search", arguments: { q: "runtime" } }],
+        }),
+        message("tool", "{\"hits\":2}", {
+          tool_call_id: "call-search",
+          name: "mcp.search",
+        }),
+        message("assistant", "", {
+          reasoning_content: "再看文件。",
+          tool_calls: [{ id: "call-file", name: "file.read", arguments: { path: "README.md" } }],
+        }),
+        message("tool", "README", {
+          tool_call_id: "call-file",
+          name: "file.read",
+        }),
+        message("assistant", "完成。"),
+      ],
+      streaming: false,
+      hasActiveThread: true,
+      pendingAssistantContent: "",
+      pendingAssistantReasoning: "",
+      runtimeActivities: [],
+      pendingTimeline: [],
+    });
+
+    expect(messages).toHaveLength(2);
+    expect(messages[1].content).toEqual([
       {
-        id: "call-shell",
-        kind: "shell",
-        name: "shell",
-        status: "success",
-        inputPreview: "{\n  \"cmd\": \"pwd\"\n}",
-        outputPreview: "/workspace/project",
+        type: TURN_TIMELINE_CONTENT_TYPE,
+        items: [
+          expect.objectContaining({ type: "reasoning", text: "先搜信息。" }),
+          expect.objectContaining({ type: "tool_call", id: "call-search", status: "success" }),
+          expect.objectContaining({ type: "reasoning", text: "再看文件。" }),
+          expect.objectContaining({ type: "tool_call", id: "call-file", status: "success" }),
+        ],
       },
       {
-        id: "call-search",
-        kind: "mcp",
-        name: "mcp.search",
-        status: "success",
-        inputPreview: "{\n  \"q\": \"runtime\"\n}",
-        outputPreview: "{\"hits\":2}",
+        type: "text",
+        text: "完成。",
       },
     ]);
   });
 
-  it("exposes streaming runtime activities as clickable tool summaries before text arrives", () => {
+  it("exposes streaming runtime activities as inline timeline items before text arrives", () => {
     const messages = toRobotMessages({
       messages: [message("user", "继续")],
       streaming: true,
@@ -236,14 +292,26 @@ describe("useChatPresentation", () => {
           resultPreview: "",
         },
       ],
+      pendingTimeline: [
+        {
+          type: "tool_call",
+          id: "call-shell",
+          kind: "shell",
+          name: "shell",
+          status: "running",
+          inputPreview: "{\n  \"cmd\": \"pwd\"\n}",
+          outputPreview: "",
+        },
+      ],
     });
 
     expect(messages[1].loading).toBe(false);
     expect(messages[1].content).toEqual([
       {
-        type: "argus-tool-summary",
-        toolDetails: [
+        type: TURN_TIMELINE_CONTENT_TYPE,
+        items: [
           {
+            type: "tool_call",
             id: "call-shell",
             kind: "shell",
             name: "shell",
@@ -252,16 +320,6 @@ describe("useChatPresentation", () => {
             outputPreview: "",
           },
         ],
-      },
-    ]);
-    expect((messages[1].state as { toolDetails?: unknown[] } | undefined)?.toolDetails).toEqual([
-      {
-        id: "call-shell",
-        kind: "shell",
-        name: "shell",
-        status: "running",
-        inputPreview: "{\n  \"cmd\": \"pwd\"\n}",
-        outputPreview: "",
       },
     ]);
   });
@@ -283,13 +341,25 @@ describe("useChatPresentation", () => {
           resultPreview: "",
         },
       ],
+      pendingTimeline: [
+        {
+          type: "tool_call",
+          id: "job-42",
+          kind: "job",
+          name: "后台 Job job-42",
+          status: "running",
+          inputPreview: "正在执行后台任务",
+          outputPreview: "",
+        },
+      ],
     });
 
     expect(messages[0].content).toEqual([
       {
-        type: "argus-tool-summary",
-        toolDetails: [
+        type: TURN_TIMELINE_CONTENT_TYPE,
+        items: [
           expect.objectContaining({
+            type: "tool_call",
             id: "job-42",
             kind: "job",
             name: "后台 Job job-42",

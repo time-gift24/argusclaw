@@ -1,4 +1,4 @@
-import { flushPromises, mount } from "@vue/test-utils";
+import { mount } from "@vue/test-utils";
 import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 
@@ -15,7 +15,7 @@ function createMessages(count: number) {
 }
 
 describe("ChatMessageStage", () => {
-  it("sticks to the bottom when new messages arrive and the user is near the bottom", async () => {
+  it("does not own vertical autoscroll because the chat page is the scroll container", async () => {
     const wrapper = mount(ChatMessageStage, {
       props: {
         loading: false,
@@ -27,39 +27,9 @@ describe("ChatMessageStage", () => {
 
     const stage = wrapper.get(".message-stage").element as HTMLDivElement;
     const scrollTo = vi.fn();
-    Object.defineProperty(stage, "clientHeight", { configurable: true, value: 240 });
-    Object.defineProperty(stage, "scrollHeight", { configurable: true, value: 600 });
-    Object.defineProperty(stage, "scrollTop", { configurable: true, writable: true, value: 360 });
     stage.scrollTo = scrollTo;
 
     await wrapper.setProps({ messages: createMessages(3) });
-    await flushPromises();
-
-    expect(scrollTo).toHaveBeenCalledWith({ top: 600, behavior: "auto" });
-  });
-
-  it("does not force scroll when the user has scrolled away from the bottom", async () => {
-    const wrapper = mount(ChatMessageStage, {
-      props: {
-        loading: false,
-        messages: createMessages(2),
-        bubbleRoles: {},
-        starterPrompts: [],
-      },
-    });
-
-    const stage = wrapper.get(".message-stage").element as HTMLDivElement;
-    const scrollTo = vi.fn();
-    Object.defineProperty(stage, "clientHeight", { configurable: true, value: 240 });
-    Object.defineProperty(stage, "scrollHeight", { configurable: true, value: 600 });
-    Object.defineProperty(stage, "scrollTop", { configurable: true, writable: true, value: 40 });
-    stage.scrollTo = scrollTo;
-    await flushPromises();
-    scrollTo.mockClear();
-
-    await wrapper.trigger("scroll");
-    await wrapper.setProps({ messages: createMessages(3) });
-    await flushPromises();
 
     expect(scrollTo).not.toHaveBeenCalled();
   });
@@ -92,6 +62,20 @@ describe("ChatMessageStage", () => {
     expect(source).not.toContain("calc(var(--assistant-readable-width) + 44px)");
   });
 
+  it("keeps vertical scroll ownership on the chat page instead of nested message scrollers", () => {
+    const stageSource = readFileSync("src/features/chat/components/ChatMessageStage.vue", "utf8");
+    const timelineSource = readFileSync("src/features/chat/components/TurnTimelineContent.vue", "utf8");
+
+    expect(stageSource).not.toContain("auto-scroll");
+    expect(stageSource).not.toContain("scrollStageToBottom");
+    expect(stageSource).not.toMatch(/\.message-stage\s*\{[^}]*overscroll-behavior:\s*contain;/);
+    expect(stageSource).toContain(":deep(.tr-bubble-list)");
+    expect(stageSource).toContain("overflow-y: visible");
+    expect(stageSource).toContain("overflow: visible !important;");
+    expect(timelineSource).not.toContain("max-height: 220px");
+    expect(timelineSource).not.toMatch(/overflow:\s*auto/);
+  });
+
   it("configures TinyRobot markdown rendering for richer assistant output", () => {
     const wrapper = mount(ChatMessageStage, {
       props: {
@@ -116,5 +100,37 @@ describe("ChatMessageStage", () => {
       linkify: true,
       typographer: true,
     });
+  });
+
+  it("uses design tokens for markdown table header backgrounds", () => {
+    const source = readFileSync("src/features/chat/components/ChatMessageStage.vue", "utf8");
+
+    expect(source).toContain(".tr-bubble__markdown th");
+    expect(source).toContain("background: color-mix(in srgb, var(--surface-overlay) 72%, var(--surface-raised));");
+    expect(source).toContain("color: var(--text-primary);");
+  });
+
+  it("lets markdown tables size to their content instead of filling the chat body", () => {
+    const source = readFileSync("src/features/chat/components/ChatMessageStage.vue", "utf8");
+    const tableBlock = source.match(/\.tr-bubble__markdown table\)[\s\S]*?\n}/)?.[0] ?? "";
+
+    expect(tableBlock).toContain("display: inline-table;");
+    expect(tableBlock).toContain("width: auto;");
+    expect(tableBlock).toContain("max-width: 100%;");
+    expect(source).toContain("overflow-x: auto;");
+    expect(tableBlock).not.toMatch(/(^|\n)\s*width:\s*100%;/);
+  });
+
+  it("uses visible rounded borders for markdown tables", () => {
+    const source = readFileSync("src/features/chat/components/ChatMessageStage.vue", "utf8");
+    const tableBlock = source.match(/\.tr-bubble__markdown table\)[\s\S]*?\n}/)?.[0] ?? "";
+
+    expect(tableBlock).toContain("overflow: hidden;");
+    expect(tableBlock).toContain("border-collapse: separate;");
+    expect(tableBlock).toContain("border-spacing: 0;");
+    expect(tableBlock).toContain("border: 1px solid var(--border-default);");
+    expect(tableBlock).toContain("border-radius: 10px;");
+    expect(source).toContain("border-right: 1px solid var(--border-default);");
+    expect(source).toContain("border-bottom: 1px solid var(--border-default);");
   });
 });

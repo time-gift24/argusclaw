@@ -7,9 +7,14 @@ import type {
 } from "@opentiny/tiny-robot";
 
 import type { ChatMessageRecord } from "@/lib/api";
-import type { ToolActivity, ToolActivityStatus } from "./useChatThreadStream";
+import type {
+  ToolActivity,
+  ToolActivityStatus,
+  TurnTimelineItem,
+} from "./useChatThreadStream";
 
 export const TOOL_SUMMARY_CONTENT_TYPE = "argus-tool-summary";
+export const TURN_TIMELINE_CONTENT_TYPE = "argus-turn-timeline";
 
 export interface ToolCallDetail {
   id: string;
@@ -25,12 +30,20 @@ export interface ToolSummaryContentItem extends ChatMessageContentItem {
   toolDetails: ToolCallDetail[];
 }
 
+export interface TurnTimelineContentItem extends ChatMessageContentItem {
+  type: typeof TURN_TIMELINE_CONTENT_TYPE;
+  items: TurnTimelineItem[];
+}
+
 export interface TextContentItem extends ChatMessageContentItem {
   type: "text";
   text: string;
 }
 
-export type ChatRobotContentItem = ToolSummaryContentItem | TextContentItem;
+export type ChatRobotContentItem =
+  | ToolSummaryContentItem
+  | TurnTimelineContentItem
+  | TextContentItem;
 
 export interface ChatRobotMessageState extends Record<string, unknown> {
   thinking?: boolean;
@@ -54,48 +67,30 @@ export interface RobotMessageOptions {
   pendingAssistantContent: string;
   pendingAssistantReasoning: string;
   runtimeActivities: ToolActivity[];
+  pendingTimeline: TurnTimelineItem[];
 }
 
 export function toRobotMessages(options: RobotMessageOptions): ChatRobotMessage[] {
-  const assistantToolCallIds = collectAssistantToolCallIds(options.messages);
   const toolResultsById = indexToolResults(options.messages);
-  const msgs: ChatRobotMessage[] = options.messages
-    .filter((message) => shouldRenderMessage(message, assistantToolCallIds))
-    .map((message, index): ChatRobotMessage => {
-      const toolDetails = buildMessageToolDetails(message, toolResultsById);
-      const content = buildRobotContent(displayMessageText(message, toolDetails), toolDetails);
-
-      return {
-        id: settledMessageId(message, index),
-        role: message.role,
-        content,
-        reasoning_content: message.reasoning_content?.trim() ? message.reasoning_content : undefined,
-        state: buildMessageState({
-          reasoningContent: message.reasoning_content,
-          thinking: false,
-          toolDetails,
-        }),
-      };
-    });
+  const msgs = buildSettledRobotMessages(options.messages, toolResultsById);
 
   if (options.streaming && (options.hasActiveThread || msgs.length > 0)) {
-    const pendingToolDetails = buildPendingToolDetails(options.runtimeActivities);
+    const pendingTimeline =
+      options.pendingTimeline.length > 0
+        ? options.pendingTimeline
+        : buildPendingTimelineItems(options.pendingAssistantReasoning, options.runtimeActivities);
     const hasVisiblePendingContent = Boolean(
-      options.pendingAssistantContent.trim()
-        || options.pendingAssistantReasoning.trim()
-        || pendingToolDetails.length > 0,
+      options.pendingAssistantContent.trim() || pendingTimeline.length > 0,
     );
 
     msgs.push({
       id: "pending-assistant",
       role: "assistant",
-      content: buildRobotContent(options.pendingAssistantContent || "", pendingToolDetails),
-      reasoning_content: options.pendingAssistantReasoning || undefined,
+      content: buildRobotContent(options.pendingAssistantContent || "", pendingTimeline),
       loading: !hasVisiblePendingContent,
       state: buildMessageState({
-        reasoningContent: options.pendingAssistantReasoning,
         thinking: true,
-        toolDetails: pendingToolDetails,
+        timelineItems: pendingTimeline,
       }),
     });
   }
@@ -140,13 +135,13 @@ export function draftMessageForPrompt(promptId: string | number | undefined) {
 
 function displayMessageText(
   message: ChatMessageRecord,
-  toolDetails: ToolCallDetail[],
+  timelineItems: TurnTimelineItem[],
 ) {
   const content = message.content?.trim();
   if (content) return message.content;
 
   if (message.role === "assistant") {
-    if (toolDetails.length > 0) return "";
+    if (timelineItems.length > 0) return "";
     const names = toolCallNames(message.tool_calls);
     if (names.length > 0) return "";
     if (message.reasoning_content?.trim()) return "助手正在思考，等待可见回复。";
@@ -160,17 +155,20 @@ function displayMessageText(
   return "消息内容为空。";
 }
 
-function buildRobotContent(text: string, toolDetails: ToolCallDetail[]): ChatMessageContent {
+function buildRobotContent(
+  text: string,
+  timelineItems: TurnTimelineItem[],
+): ChatMessageContent {
   const normalizedText = text.trim();
 
-  if (toolDetails.length === 0) {
+  if (timelineItems.length === 0) {
     return normalizedText ? text : "";
   }
 
   const content: ChatRobotContentItem[] = [
     {
-      type: TOOL_SUMMARY_CONTENT_TYPE,
-      toolDetails,
+      type: TURN_TIMELINE_CONTENT_TYPE,
+      items: timelineItems,
     },
   ];
 
@@ -185,19 +183,22 @@ function buildRobotContent(text: string, toolDetails: ToolCallDetail[]): ChatMes
 }
 
 function buildMessageState(options: {
-  reasoningContent: string | null | undefined;
   thinking: boolean;
-  toolDetails: ToolCallDetail[];
+  timelineItems: TurnTimelineItem[];
 }) {
   const state: ChatRobotMessageState = {};
 
-  if (options.reasoningContent?.trim()) {
+  if (options.timelineItems.some((item) => item.type === "reasoning")) {
     state.thinking = options.thinking;
     state.open = true;
   }
 
-  if (options.toolDetails.length > 0) {
-    state.toolDetails = options.toolDetails;
+  const toolDetails = options.timelineItems.filter(
+    (item): item is TurnTimelineItem & { type: "tool_call" } =>
+      item.type === "tool_call",
+  );
+  if (toolDetails.length > 0) {
+    state.toolDetails = toolDetails;
   }
 
   return Object.keys(state).length > 0 ? state : undefined;
@@ -214,30 +215,6 @@ function toolCallNames(toolCalls: unknown[] | null | undefined): string[] {
     .filter((name) => name.length > 0);
 }
 
-function settledMessageId(message: ChatMessageRecord, index: number) {
-  if (message.tool_call_id?.trim()) return `tool-call-${message.tool_call_id}`;
-  if (message.role === "tool" && message.name?.trim()) return `tool-${message.name}-${index}`;
-  return `message-${message.role}-${index}`;
-}
-
-function shouldRenderMessage(message: ChatMessageRecord, assistantToolCallIds: Set<string>) {
-  if (message.role === "system") return false;
-  if (message.role !== "tool") return true;
-  if (!message.tool_call_id?.trim()) return true;
-  return !assistantToolCallIds.has(message.tool_call_id);
-}
-
-function collectAssistantToolCallIds(messages: ChatMessageRecord[]) {
-  const ids = new Set<string>();
-  for (const message of messages) {
-    if (message.role !== "assistant") continue;
-    for (const toolCall of normalizeToolCalls(message.tool_calls)) {
-      if (toolCall.id) ids.add(toolCall.id);
-    }
-  }
-  return ids;
-}
-
 function indexToolResults(messages: ChatMessageRecord[]) {
   const results = new Map<string, ChatMessageRecord>();
   for (const message of messages) {
@@ -248,34 +225,125 @@ function indexToolResults(messages: ChatMessageRecord[]) {
   return results;
 }
 
-function buildMessageToolDetails(
-  message: ChatMessageRecord,
+function buildSettledRobotMessages(
+  messages: ChatMessageRecord[],
   toolResultsById: Map<string, ChatMessageRecord>,
-): ToolCallDetail[] {
-  if (message.role !== "assistant") return [];
+): ChatRobotMessage[] {
+  const robotMessages: ChatRobotMessage[] = [];
 
-  return normalizeToolCalls(message.tool_calls).map((toolCall, index) => {
-    const resultMessage = toolCall.id ? toolResultsById.get(toolCall.id) : undefined;
-    return {
-      id: toolCall.id || `tool-call-${toolCall.name}-${index}`,
-      kind: toolKind(toolCall.name),
-      name: toolCall.name,
-      status: resultMessage ? "success" : "running",
-      inputPreview: previewValue(toolCall.arguments),
-      outputPreview: resultMessage?.content ?? "",
-    };
-  });
+  for (let index = 0; index < messages.length; index += 1) {
+    const message = messages[index];
+    if (message.role === "system") continue;
+
+    if (message.role === "assistant") {
+      const groupStart = index;
+      const turnMessages: ChatMessageRecord[] = [];
+
+      while (
+        index < messages.length &&
+        (messages[index].role === "assistant" || messages[index].role === "tool")
+      ) {
+        turnMessages.push(messages[index]);
+        index += 1;
+      }
+      index -= 1;
+
+      robotMessages.push(buildAssistantTurnMessage(turnMessages, groupStart, toolResultsById));
+      continue;
+    }
+
+    if (message.role === "tool" && message.tool_call_id?.trim()) continue;
+
+    const timelineItems: TurnTimelineItem[] = [];
+    robotMessages.push({
+      id: settledMessageId(message, index),
+      role: message.role,
+      content: buildRobotContent(displayMessageText(message, timelineItems), timelineItems),
+    });
+  }
+
+  return robotMessages;
 }
 
-function buildPendingToolDetails(runtimeActivities: ToolActivity[]): ToolCallDetail[] {
-  return runtimeActivities.map((activity) => ({
-    id: activity.id,
-    kind: activity.kind === "job" ? "job" : toolKind(activity.name),
-    name: activity.name,
-    status: activity.status,
-    inputPreview: activity.argumentsPreview,
-    outputPreview: activity.resultPreview,
-  }));
+function buildAssistantTurnMessage(
+  messages: ChatMessageRecord[],
+  startIndex: number,
+  toolResultsById: Map<string, ChatMessageRecord>,
+): ChatRobotMessage {
+  const timelineItems: TurnTimelineItem[] = [];
+  let finalText = "";
+
+  for (const message of messages) {
+    if (message.role !== "assistant") continue;
+
+    if (message.content?.trim()) {
+      finalText = message.content;
+    }
+
+    if (message.reasoning_content?.trim()) {
+      timelineItems.push({
+        type: "reasoning",
+        id: `reasoning-${startIndex}-${timelineItems.length}`,
+        text: message.reasoning_content,
+      });
+    }
+
+    for (const toolCall of normalizeToolCalls(message.tool_calls)) {
+      const resultMessage = toolCall.id ? toolResultsById.get(toolCall.id) : undefined;
+      timelineItems.push({
+        type: "tool_call",
+        id: toolCall.id || `tool-call-${toolCall.name}-${timelineItems.length}`,
+        kind: toolKind(toolCall.name),
+        name: toolCall.name,
+        status: resultMessage ? "success" : "running",
+        inputPreview: previewValue(toolCall.arguments),
+        outputPreview: resultMessage?.content ?? "",
+      });
+    }
+  }
+
+  return {
+    id: `message-assistant-${startIndex}`,
+    role: "assistant",
+    content: buildRobotContent(
+      timelineItems.length > 0
+        ? finalText
+        : displayMessageText(messages[messages.length - 1], timelineItems),
+      timelineItems,
+    ),
+    state: buildMessageState({
+      thinking: false,
+      timelineItems,
+    }),
+  };
+}
+
+function buildPendingTimelineItems(
+  pendingAssistantReasoning: string,
+  runtimeActivities: ToolActivity[],
+): TurnTimelineItem[] {
+  const items: TurnTimelineItem[] = [];
+  if (pendingAssistantReasoning.trim()) {
+    items.push({
+      type: "reasoning",
+      id: "pending-reasoning",
+      text: pendingAssistantReasoning,
+    });
+  }
+
+  items.push(
+    ...runtimeActivities.map((activity) => ({
+      type: "tool_call" as const,
+      id: activity.id,
+      kind: activity.kind === "job" ? ("job" as const) : toolKind(activity.name),
+      name: activity.name,
+      status: activity.status,
+      inputPreview: activity.argumentsPreview,
+      outputPreview: activity.resultPreview,
+    })),
+  );
+
+  return items;
 }
 
 function normalizeToolCalls(toolCalls: unknown[] | null | undefined): Array<{
@@ -314,6 +382,12 @@ function previewValue(value: unknown): string {
   } catch {
     return String(value);
   }
+}
+
+function settledMessageId(message: ChatMessageRecord, index: number) {
+  if (message.tool_call_id?.trim()) return `tool-call-${message.tool_call_id}`;
+  if (message.role === "tool" && message.name?.trim()) return `tool-${message.name}-${index}`;
+  return `message-${message.role}-${index}`;
 }
 
 function toolKind(name: string): ToolCallDetail["kind"] {

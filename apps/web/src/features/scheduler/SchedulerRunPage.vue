@@ -32,6 +32,7 @@ const robotMessages = computed(() =>
     pendingAssistantContent: "",
     pendingAssistantReasoning: "",
     runtimeActivities: [],
+    pendingTimeline: [],
   }),
 );
 

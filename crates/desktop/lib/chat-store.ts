@@ -1,7 +1,14 @@
 import { create } from "zustand";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
-import { agents, chat, jobRuntime, providers, sessions, threadPool } from "@/lib/tauri";
+import {
+  agents,
+  chat,
+  jobRuntime,
+  providers,
+  sessions,
+  threadPool,
+} from "@/lib/tauri";
 import type {
   JobRuntimeSnapshot,
   JobRuntimeSummary,
@@ -21,14 +28,28 @@ import type {
 import type { PlanItem } from "@/lib/types/plan";
 import type { SessionSummary, ThreadSummary } from "@/lib/tauri";
 
+type PendingToolCallStatus = "streaming" | "running" | "completed";
+
 export interface PendingToolCall {
   tool_call_id: string;
   tool_name: string;
   arguments_text: string;
   result?: unknown;
   is_error: boolean;
-  status: "streaming" | "running" | "completed";
+  status: PendingToolCallStatus;
 }
+
+export type PendingTurnArtifact =
+  | {
+      type: "reasoning";
+      id: string;
+      text: string;
+    }
+  | ({
+      type: "tool_call";
+      id: string;
+      index: number;
+    } & PendingToolCall);
 
 const toErrorMessage = (error: unknown) =>
   error instanceof Error ? error.message : String(error);
@@ -250,9 +271,74 @@ const createPendingAssistant = (): PendingAssistantState => ({
   content: "",
   reasoning: "",
   toolCalls: [],
+  timeline: [],
   plan: null,
   retry: null,
 });
+
+function appendPendingReasoningArtifact(
+  pendingAssistant: PendingAssistantState,
+  delta: string,
+): PendingAssistantState {
+  if (delta.length === 0) return pendingAssistant;
+
+  const timeline = [...pendingAssistant.timeline];
+  const lastItem = timeline[timeline.length - 1];
+
+  if (lastItem?.type === "reasoning") {
+    timeline[timeline.length - 1] = {
+      ...lastItem,
+      text: lastItem.text + delta,
+    };
+  } else {
+    timeline.push({
+      type: "reasoning",
+      id: `pending-reasoning-${timeline.length}`,
+      text: delta,
+    });
+  }
+
+  return {
+    ...pendingAssistant,
+    reasoning: pendingAssistant.reasoning + delta,
+    timeline,
+  };
+}
+
+function upsertPendingToolTimelineItem(
+  pendingAssistant: PendingAssistantState,
+  toolCall: PendingToolCall,
+  index: number,
+): PendingAssistantState {
+  const timeline = [...pendingAssistant.timeline];
+  const existingIndex = timeline.findIndex(
+    (item) =>
+      item.type === "tool_call" &&
+      ((toolCall.tool_call_id.length > 0 &&
+        item.tool_call_id === toolCall.tool_call_id) ||
+        item.index === index),
+  );
+  const nextItem: PendingTurnArtifact = {
+    type: "tool_call",
+    id:
+      toolCall.tool_call_id.length > 0
+        ? toolCall.tool_call_id
+        : `pending-tool-${index}`,
+    index,
+    ...toolCall,
+  };
+
+  if (existingIndex >= 0) {
+    timeline[existingIndex] = nextItem;
+  } else {
+    timeline.push(nextItem);
+  }
+
+  return {
+    ...pendingAssistant,
+    timeline,
+  };
+}
 
 const ensurePendingAssistantSession = (
   session: ChatSessionState,
@@ -289,6 +375,7 @@ export interface ChatSessionState {
     content: string;
     reasoning: string;
     toolCalls: PendingToolCall[];
+    timeline: PendingTurnArtifact[];
     plan: PlanItem[] | null;
     retry: {
       attempt: number;
@@ -421,7 +508,8 @@ function mergeMonitorSnapshot(
   if (!chatSnapshot) return { ...jobSnapshot! };
   if (!jobSnapshot) return chatSnapshot;
 
-  const activeThreads = chatSnapshot.active_threads + jobSnapshot.active_threads;
+  const activeThreads =
+    chatSnapshot.active_threads + jobSnapshot.active_threads;
   const estimatedMemoryBytes =
     chatSnapshot.estimated_memory_bytes + jobSnapshot.estimated_memory_bytes;
   const residentThreadCount =
@@ -552,13 +640,13 @@ function findSessionKeyForEnvelope(
         ? envelope.payload.job_id
         : envelope.payload.type === "job_runtime_updated"
           ? envelope.payload.runtime.job_id
-        : envelope.payload.type === "job_dispatched" ||
-            envelope.payload.type === "job_result"
-          ? envelope.payload.job_id
-          : envelope.payload.type === "mailbox_message_queued" &&
-              envelope.payload.message.message_type.type === "job_result"
-            ? envelope.payload.message.message_type.job_id
-        : null;
+          : envelope.payload.type === "job_dispatched" ||
+              envelope.payload.type === "job_result"
+            ? envelope.payload.job_id
+            : envelope.payload.type === "mailbox_message_queued" &&
+                envelope.payload.message.message_type.type === "job_result"
+              ? envelope.payload.message.message_type.job_id
+              : null;
 
   if (!jobId) return null;
 
@@ -1027,6 +1115,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             content: "",
             reasoning: "",
             toolCalls: [],
+            timeline: [],
             plan: null,
             retry: null,
           },
@@ -1084,26 +1173,24 @@ export const useChatStore = create<ChatStore>((set, get) => ({
               threadPoolSnapshot: mergedSnapshot,
               threadPoolSnapshotLoading: false,
               threadPoolError: null,
-              threadPoolThreads: sortThreadPoolThreads(
-                [
-                  ...poolState.runtimes.map((runtime) =>
-                    mapChatRuntimeSummaryToThreadState(
-                      runtime,
-                      state.threadPoolThreads.find(
-                        (thread) => thread.threadId === runtime.thread_id,
-                      ),
+              threadPoolThreads: sortThreadPoolThreads([
+                ...poolState.runtimes.map((runtime) =>
+                  mapChatRuntimeSummaryToThreadState(
+                    runtime,
+                    state.threadPoolThreads.find(
+                      (thread) => thread.threadId === runtime.thread_id,
                     ),
                   ),
-                  ...jobState.runtimes.map((runtime) =>
-                    mapJobRuntimeSummaryToThreadState(
-                      runtime,
-                      state.threadPoolThreads.find(
-                        (thread) => thread.threadId === runtime.thread_id,
-                      ),
+                ),
+                ...jobState.runtimes.map((runtime) =>
+                  mapJobRuntimeSummaryToThreadState(
+                    runtime,
+                    state.threadPoolThreads.find(
+                      (thread) => thread.threadId === runtime.thread_id,
                     ),
                   ),
-                ],
-              ),
+                ),
+              ]),
             }
           : {}),
       }));
@@ -1385,7 +1472,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
                 },
                 state.threadPoolSnapshot,
               ),
-              ...(nextSessionsByKey ? { sessionsByKey: nextSessionsByKey } : {}),
+              ...(nextSessionsByKey
+                ? { sessionsByKey: nextSessionsByKey }
+                : {}),
             };
           }
           case "job_runtime_started": {
@@ -1409,7 +1498,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
                 },
                 state.threadPoolSnapshot,
               ),
-              ...(nextSessionsByKey ? { sessionsByKey: nextSessionsByKey } : {}),
+              ...(nextSessionsByKey
+                ? { sessionsByKey: nextSessionsByKey }
+                : {}),
             };
           }
           case "job_runtime_cooling": {
@@ -1433,7 +1524,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
                 },
                 state.threadPoolSnapshot,
               ),
-              ...(nextSessionsByKey ? { sessionsByKey: nextSessionsByKey } : {}),
+              ...(nextSessionsByKey
+                ? { sessionsByKey: nextSessionsByKey }
+                : {}),
             };
           }
           case "job_runtime_evicted": {
@@ -1463,7 +1556,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
                 },
                 state.threadPoolSnapshot,
               ),
-              ...(nextSessionsByKey ? { sessionsByKey: nextSessionsByKey } : {}),
+              ...(nextSessionsByKey
+                ? { sessionsByKey: nextSessionsByKey }
+                : {}),
             };
           }
           case "job_runtime_updated":
@@ -1534,15 +1629,17 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           const session = state.sessionsByKey[sessionKey];
           if (!session) return {};
           const sessionWithPending = ensurePendingAssistantSession(session);
+          const pendingAssistant = appendPendingReasoningArtifact(
+            sessionWithPending.pendingAssistant,
+            payload.delta,
+          );
           return {
             sessionsByKey: {
               ...state.sessionsByKey,
               [sessionKey]: {
                 ...sessionWithPending,
                 pendingAssistant: {
-                  ...sessionWithPending.pendingAssistant,
-                  reasoning:
-                    sessionWithPending.pendingAssistant.reasoning + payload.delta,
+                  ...pendingAssistant,
                   retry: null,
                 },
               },
@@ -1602,14 +1699,21 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             tc.arguments_text += payload.arguments_delta;
           }
           toolCalls[payload.index] = tc;
+          const pendingAssistant = upsertPendingToolTimelineItem(
+            {
+              ...sessionWithPending.pendingAssistant,
+              toolCalls,
+            },
+            tc,
+            payload.index,
+          );
           return {
             sessionsByKey: {
               ...state.sessionsByKey,
               [sessionKey]: {
                 ...sessionWithPending,
                 pendingAssistant: {
-                  ...sessionWithPending.pendingAssistant,
-                  toolCalls,
+                  ...pendingAssistant,
                   retry: null,
                 },
               },
@@ -1624,10 +1728,13 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           const session = state.sessionsByKey[sessionKey];
           if (!session) return {};
           const sessionWithPending = ensurePendingAssistantSession(session);
-          const existingIndex = sessionWithPending.pendingAssistant.toolCalls.findIndex(
-            (tc) => tc.tool_call_id === payload.tool_call_id,
-          );
+          const existingIndex =
+            sessionWithPending.pendingAssistant.toolCalls.findIndex(
+              (tc) => tc.tool_call_id === payload.tool_call_id,
+            );
           const toolCalls = [...sessionWithPending.pendingAssistant.toolCalls];
+          const nextIndex =
+            existingIndex >= 0 ? existingIndex : toolCalls.length;
           if (existingIndex >= 0) {
             toolCalls[existingIndex] = {
               ...toolCalls[existingIndex],
@@ -1642,10 +1749,17 @@ export const useChatStore = create<ChatStore>((set, get) => ({
               status: "running",
             });
           }
-          const updates: Partial<ChatSessionState> = {
-            pendingAssistant: {
+          const pendingAssistant = upsertPendingToolTimelineItem(
+            {
               ...sessionWithPending.pendingAssistant,
               toolCalls,
+            },
+            toolCalls[nextIndex]!,
+            nextIndex,
+          );
+          const updates: Partial<ChatSessionState> = {
+            pendingAssistant: {
+              ...pendingAssistant,
               retry: null,
             },
           };
@@ -1676,9 +1790,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           const session = state.sessionsByKey[sessionKey];
           if (!session) return {};
           const sessionWithPending = ensurePendingAssistantSession(session);
-          const existingIndex = sessionWithPending.pendingAssistant.toolCalls.findIndex(
-            (tc) => tc.tool_call_id === payload.tool_call_id,
-          );
+          const existingIndex =
+            sessionWithPending.pendingAssistant.toolCalls.findIndex(
+              (tc) => tc.tool_call_id === payload.tool_call_id,
+            );
           if (existingIndex < 0) return {};
           const toolCalls = [...sessionWithPending.pendingAssistant.toolCalls];
           toolCalls[existingIndex] = {
@@ -1688,10 +1803,17 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             is_error: payload.is_error,
             status: "completed",
           };
-          const updates: Partial<ChatSessionState> = {
-            pendingAssistant: {
+          const pendingAssistant = upsertPendingToolTimelineItem(
+            {
               ...sessionWithPending.pendingAssistant,
               toolCalls,
+            },
+            toolCalls[existingIndex]!,
+            existingIndex,
+          );
+          const updates: Partial<ChatSessionState> = {
+            pendingAssistant: {
+              ...pendingAssistant,
               retry: null,
             },
           };
