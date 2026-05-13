@@ -17,7 +17,11 @@ import { ChatStatusBanner } from "@/components/chat/chat-status-banner";
 import { PlanPanel } from "@/components/chat/plan-panel";
 import { useActiveChatSession } from "@/hooks/use-active-chat-session";
 import { useChatStore } from "@/lib/chat-store";
-import type { ChatStore, PendingToolCall } from "@/lib/chat-store";
+import type {
+  ChatStore,
+  PendingToolCall,
+  PendingTurnArtifact,
+} from "@/lib/chat-store";
 import { providers } from "@/lib/tauri";
 import { Badge } from "@/components/ui/badge";
 import type { ChatMessagePayload, JobLifecycleStatus } from "@/lib/types/chat";
@@ -179,6 +183,8 @@ type ToolCallDisplayStatus =
   | { type: "incomplete"; reason: "cancelled" | "error"; error?: unknown };
 
 type RenderableToolCall = {
+  type: "tool_call";
+  id: string;
   toolCallId: string;
   toolName: string;
   argsText: string;
@@ -186,9 +192,16 @@ type RenderableToolCall = {
   status: ToolCallDisplayStatus;
 };
 
+type RenderableReasoningArtifact = {
+  type: "reasoning";
+  id: string;
+  text: string;
+};
+
+type RenderableTurnArtifact = RenderableReasoningArtifact | RenderableToolCall;
+
 type RenderableTurnArtifacts = {
-  reasoning: string;
-  toolCalls: readonly RenderableToolCall[];
+  items: readonly RenderableTurnArtifact[];
 };
 
 const ManualToolFallback = ToolFallbackImpl as (props: {
@@ -206,18 +219,21 @@ const toManualToolStatus = (
 ): ToolCallDisplayStatus =>
   status === "completed"
     ? ({ type: "complete" } as const)
-    : status === "running"
-      ? ({ type: "running" } as const)
-      : ({ type: "incomplete", reason: "cancelled" } as const);
+    : ({ type: "running" } as const);
 
-const toSettledToolStatus = (value: Record<string, unknown>): ToolCallDisplayStatus =>
+const toSettledToolStatus = (
+  value: Record<string, unknown>,
+): ToolCallDisplayStatus =>
   value.isError === true
     ? ({ type: "incomplete", reason: "error", error: value.result } as const)
     : ({ type: "complete" } as const);
 
 const toRenderablePendingToolCall = (
   toolCall: PendingToolCall,
+  index = 0,
 ): RenderableToolCall => ({
+  type: "tool_call",
+  id: toolCall.tool_call_id || `pending-tool-${index}`,
   toolCallId: toolCall.tool_call_id,
   toolName: toolCall.tool_name,
   argsText: toolCall.arguments_text,
@@ -230,6 +246,7 @@ const toRenderableStoredToolCall = (
 ): RenderableToolCall | null => {
   if (!isRecord(value)) return null;
   if (
+    value.type !== "tool_call" ||
     typeof value.toolCallId !== "string" ||
     typeof value.toolName !== "string" ||
     typeof value.argsText !== "string"
@@ -238,6 +255,11 @@ const toRenderableStoredToolCall = (
   }
 
   return {
+    type: "tool_call",
+    id:
+      typeof value.id === "string"
+        ? value.id
+        : `stored-tool-${value.toolCallId}`,
     toolCallId: value.toolCallId,
     toolName: value.toolName,
     argsText: value.argsText,
@@ -246,39 +268,82 @@ const toRenderableStoredToolCall = (
   };
 };
 
+const toRenderableStoredArtifact = (
+  value: unknown,
+): RenderableTurnArtifact | null => {
+  if (!isRecord(value)) return null;
+
+  if (value.type === "reasoning") {
+    const text = typeof value.text === "string" ? value.text : "";
+    if (text.trim().length === 0) return null;
+    return {
+      type: "reasoning",
+      id: typeof value.id === "string" ? value.id : "stored-reasoning",
+      text,
+    };
+  }
+
+  return toRenderableStoredToolCall(value);
+};
+
 const readTurnArtifacts = (value: unknown): RenderableTurnArtifacts | null => {
   if (!isRecord(value)) return null;
 
-  const reasoning = typeof value.reasoning === "string" ? value.reasoning : "";
-  const toolCalls = Array.isArray(value.toolCalls)
-    ? value.toolCalls
-        .map((toolCall) => toRenderableStoredToolCall(toolCall))
-        .filter((toolCall): toolCall is RenderableToolCall => toolCall !== null)
+  const items = Array.isArray(value.items)
+    ? value.items
+        .map((item) => toRenderableStoredArtifact(item))
+        .filter((item): item is RenderableTurnArtifact => item !== null)
     : [];
 
-  if (reasoning.trim().length === 0 && toolCalls.length === 0) return null;
+  if (items.length === 0) return null;
 
   return {
-    reasoning,
-    toolCalls,
+    items,
   };
 };
 
+const toRenderablePendingArtifact = (
+  item: PendingTurnArtifact,
+): RenderableTurnArtifact | null => {
+  if (item.type === "reasoning") {
+    if (item.text.trim().length === 0) return null;
+    return item;
+  }
+
+  return toRenderablePendingToolCall(item, item.index);
+};
+
 const buildPendingTurnArtifacts = (
-  pendingAssistant: NonNullable<ReturnType<typeof useActiveChatSession>>["pendingAssistant"],
+  pendingAssistant: NonNullable<
+    ReturnType<typeof useActiveChatSession>
+  >["pendingAssistant"],
 ): RenderableTurnArtifacts | null => {
   if (!pendingAssistant) return null;
 
-  const reasoning = pendingAssistant.reasoning;
-  const toolCalls = pendingAssistant.toolCalls.map((toolCall) =>
-    toRenderablePendingToolCall(toolCall),
-  );
+  const items =
+    pendingAssistant.timeline.length > 0
+      ? pendingAssistant.timeline
+          .map((item) => toRenderablePendingArtifact(item))
+          .filter((item): item is RenderableTurnArtifact => item !== null)
+      : [
+          ...(pendingAssistant.reasoning.trim().length > 0
+            ? [
+                {
+                  type: "reasoning" as const,
+                  id: "pending-reasoning-fallback",
+                  text: pendingAssistant.reasoning,
+                },
+              ]
+            : []),
+          ...pendingAssistant.toolCalls.map((toolCall, index) =>
+            toRenderablePendingToolCall(toolCall, index),
+          ),
+        ];
 
-  if (reasoning.trim().length === 0 && toolCalls.length === 0) return null;
+  if (items.length === 0) return null;
 
   return {
-    reasoning,
-    toolCalls,
+    items,
   };
 };
 
@@ -417,45 +482,6 @@ const MessageError: FC = () => {
   );
 };
 
-const ToolCallList = ({
-  toolCalls,
-}: {
-  toolCalls: readonly RenderableToolCall[];
-}) => {
-  if (toolCalls.length === 0) return null;
-
-  const hasRunningTool = toolCalls.some(
-    (toolCall) => toolCall.status.type === "running",
-  );
-
-  return (
-    <div className="rounded-xl border border-muted/40 bg-muted/20 px-3 py-2.5">
-      <div className="flex items-center gap-2.5 text-muted-foreground">
-        <div className="rounded-lg bg-primary/10 p-1.5 text-primary">
-          <Wrench className="size-3.5" />
-        </div>
-        <span className="text-[11px] font-bold uppercase tracking-widest">
-          工具调用
-        </span>
-        {hasRunningTool && (
-          <Loader2 className="ml-auto size-3 animate-spin text-primary" />
-        )}
-      </div>
-      <div className="mt-2 flex max-h-[min(18rem,35vh)] flex-col gap-1 overflow-y-auto custom-scrollbar border-l-2 border-muted/30 pl-4 pr-1 ml-4">
-        {toolCalls.map((toolCall) => (
-          <ManualToolFallback
-            key={toolCall.toolCallId}
-            toolName={toolCall.toolName}
-            argsText={toolCall.argsText}
-            result={toolCall.result}
-            status={toolCall.status}
-          />
-        ))}
-      </div>
-    </div>
-  );
-};
-
 const TurnReasoningBlock = ({
   reasoning,
   isRunning,
@@ -489,7 +515,7 @@ const TurnReasoningBlock = ({
   if (reasoning.trim().length === 0) return null;
 
   return (
-    <div className="aui-reasoning-block mb-4 text-sm animate-in fade-in slide-in-from-top-1 duration-300">
+    <div className="aui-reasoning-block text-sm animate-in fade-in slide-in-from-top-1 duration-300">
       <details className="group w-full" open>
         <summary className="flex w-full cursor-pointer list-none items-center gap-2.5 rounded-xl bg-muted/30 px-3 py-2 text-muted-foreground transition-all hover:bg-muted/50 [&::-webkit-details-marker]:hidden border border-muted/40">
           {isRunning ? (
@@ -520,7 +546,7 @@ const TurnReasoningBlock = ({
   );
 };
 
-const TurnArtifactsPanel = ({
+const TurnTimelinePanel = ({
   turnArtifacts,
   isRunning = false,
 }: {
@@ -530,12 +556,46 @@ const TurnArtifactsPanel = ({
   if (!turnArtifacts) return null;
 
   return (
-    <div className="flex flex-col gap-3">
-      <TurnReasoningBlock
-        reasoning={turnArtifacts.reasoning}
-        isRunning={isRunning}
-      />
-      <ToolCallList toolCalls={turnArtifacts.toolCalls} />
+    <div className="flex max-h-[min(24rem,45vh)] flex-col gap-3 overflow-y-auto custom-scrollbar pr-1">
+      {turnArtifacts.items.map((item) => {
+        if (item.type === "reasoning") {
+          return (
+            <TurnReasoningBlock
+              key={item.id}
+              reasoning={item.text}
+              isRunning={isRunning}
+            />
+          );
+        }
+
+        if (item.type === "tool_call")
+          return (
+            <div
+              key={item.id}
+              className="rounded-xl border border-muted/40 bg-muted/20 px-3 py-2.5"
+            >
+              <div className="mb-2 flex items-center gap-2.5 text-muted-foreground">
+                <div className="rounded-lg bg-primary/10 p-1.5 text-primary">
+                  <Wrench className="size-3.5" />
+                </div>
+                <span className="text-[11px] font-bold uppercase tracking-widest">
+                  工具调用
+                </span>
+                {item.status.type === "running" && (
+                  <Loader2 className="ml-auto size-3 animate-spin text-primary" />
+                )}
+              </div>
+              <ManualToolFallback
+                toolName={item.toolName}
+                argsText={item.argsText}
+                result={item.result}
+                status={item.status}
+              />
+            </div>
+          );
+
+        return null;
+      })}
     </div>
   );
 };
@@ -553,7 +613,7 @@ const AssistantTurnArtifacts: FC = () => {
   if (!turnArtifacts) return null;
 
   return (
-    <TurnArtifactsPanel turnArtifacts={turnArtifacts} isRunning={isRunning} />
+    <TurnTimelinePanel turnArtifacts={turnArtifacts} isRunning={isRunning} />
   );
 };
 
@@ -595,7 +655,7 @@ const PendingAssistantArtifacts: FC = () => {
         </div>
       )}
       {hasPlan && <PlanPanel plan={pendingAssistant.plan!} />}
-      <TurnArtifactsPanel turnArtifacts={turnArtifacts} isRunning />
+      <TurnTimelinePanel turnArtifacts={turnArtifacts} isRunning />
     </div>
   );
 };
@@ -728,30 +788,30 @@ const JobStatusArtifacts: FC = () => {
                   ? "正在停止"
                   : uiStatus === "loading"
                     ? "加载中"
-                  : uiStatus === "queued"
-                    ? "排队中"
-                    : uiStatus === "running"
-                      ? "运行中"
-                      : uiStatus === "cancelled"
-                        ? "已取消"
-                      : uiStatus === "failed"
-                        ? "失败"
-                        : "已完成";
+                    : uiStatus === "queued"
+                      ? "排队中"
+                      : uiStatus === "running"
+                        ? "运行中"
+                        : uiStatus === "cancelled"
+                          ? "已取消"
+                          : uiStatus === "failed"
+                            ? "失败"
+                            : "已完成";
 
               const statusBadgeClass =
                 uiStatus === "stopping"
                   ? "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300"
                   : uiStatus === "loading"
                     ? "border-muted-foreground/30 bg-muted/40 text-muted-foreground"
-                  : uiStatus === "queued"
-                    ? "border-cyan-500/30 bg-cyan-500/10 text-cyan-700 dark:text-cyan-300"
-                    : uiStatus === "running"
-                      ? "border-sky-500/30 bg-sky-500/10 text-sky-700 dark:text-sky-300"
-                      : uiStatus === "cancelled"
-                        ? "border-muted-foreground/30 bg-muted/40 text-muted-foreground"
-                      : uiStatus === "failed"
-                        ? "border-destructive/30 bg-destructive/10 text-destructive"
-                        : "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300";
+                    : uiStatus === "queued"
+                      ? "border-cyan-500/30 bg-cyan-500/10 text-cyan-700 dark:text-cyan-300"
+                      : uiStatus === "running"
+                        ? "border-sky-500/30 bg-sky-500/10 text-sky-700 dark:text-sky-300"
+                        : uiStatus === "cancelled"
+                          ? "border-muted-foreground/30 bg-muted/40 text-muted-foreground"
+                          : uiStatus === "failed"
+                            ? "border-destructive/30 bg-destructive/10 text-destructive"
+                            : "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300";
 
               return (
                 <div

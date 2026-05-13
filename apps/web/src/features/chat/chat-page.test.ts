@@ -364,14 +364,14 @@ describe("ChatPage", () => {
     expect(scrollTo).not.toHaveBeenCalled();
   });
 
-  it("uses one primary chat stream with composer and runtime activity as overlays", () => {
+  it("uses one primary chat stream with composer and inline runtime timeline", () => {
     const source = readFileSync("src/features/chat/ChatPage.vue", "utf8");
     const panelSource = readFileSync("src/features/chat/components/ChatConversationPanel.vue", "utf8");
     const stageSource = readFileSync("src/features/chat/components/ChatMessageStage.vue", "utf8");
-    const railSource = readFileSync("src/features/chat/components/RuntimeActivityRail.vue", "utf8");
 
     expect(source).toContain("chat-body-stream");
-    expect(source).toContain("chat-runtime-floating-layer");
+    expect(source).not.toContain("chat-runtime-floating-layer");
+    expect(source).not.toContain("RuntimeActivityRail");
     expect(source).toContain(".chat-page.chat-page--immersive");
     expect(source).toContain("ref=\"chatBodyStreamRef\"");
     expect(source).toContain("@scroll.passive=\"handleChatBodyScroll\"");
@@ -380,7 +380,8 @@ describe("ChatPage", () => {
     expect(source).toContain(".chat-body-stream {");
     expect(source).toContain("overflow-x: clip;");
     expect(source).toContain("overflow-y: visible;");
-    expect(stageSource).toContain(":deep(.tr-bubble-list)");
+    expect(source).not.toMatch(/\.chat-body-stream\s*\{[^}]*overscroll-behavior:\s*contain;/);
+    expect(stageSource).toContain(".message-stage :deep(.tr-bubble-list)");
     expect(stageSource).toContain("overflow-y: visible;");
     expect(source).not.toContain("scrollbar-width: none;");
     expect(source).not.toContain(".chat-body-stream::-webkit-scrollbar");
@@ -393,7 +394,6 @@ describe("ChatPage", () => {
     expect(source).toContain("padding: var(--space-6) var(--space-6) 0;");
     expect(source).toContain("width: min(100%, var(--chat-composer-width));");
     expect(source).not.toContain("calc((100% - var(--chat-message-width)) / 2)");
-    expect(source).toContain("position: absolute;");
     expect(source).not.toContain("chat-workspace");
     expect(source).not.toContain("chat-main-column");
     expect(source).not.toContain("--chat-sidecar-width");
@@ -403,10 +403,8 @@ describe("ChatPage", () => {
     expect(panelSource).toContain("min-height: 100%;");
     expect(panelSource).not.toMatch(/(^|\n)\s*height: 100%;/);
 
-    expect(railSource).toContain("grid-template-rows: auto minmax(0, 1fr);");
-    expect(railSource).toContain(".runtime-rail__list");
-    expect(railSource).toContain("overflow: auto;");
-    expect(railSource).not.toContain("position: sticky;");
+    expect(stageSource).toContain("TURN_TIMELINE_CONTENT_TYPE");
+    expect(stageSource).toContain("TurnTimelineContent");
   });
 
   it("creates a new session and shows a notice when switching agents from an existing conversation", async () => {
@@ -856,8 +854,27 @@ describe("ChatPage", () => {
     expect(provider.exists()).toBe(true);
     expect(provider.attributes("data-fallback-content-renderer")).toBe("set");
 
-    const assistantBubble = wrapper.find(".tr-bubble-stub[data-role='assistant']");
-    expect(assistantBubble.attributes("data-reasoning")).toContain("先整理问题");
+    const panel = wrapper.getComponent(ChatConversationPanel);
+    const messages = panel.props("robotMessages") as Array<{
+      role: string;
+      content?: unknown;
+    }>;
+    const assistantMessage = messages.find((item) => item.role === "assistant");
+    expect(assistantMessage?.content).toEqual([
+      {
+        type: "argus-turn-timeline",
+        items: [
+          expect.objectContaining({
+            type: "reasoning",
+            text: "先整理问题，再输出 markdown 答案。",
+          }),
+        ],
+      },
+      {
+        type: "text",
+        text: "# 标题",
+      },
+    ]);
   });
 
   it("uses the immersive chat layout without the conversation header chrome", async () => {
@@ -898,7 +915,7 @@ describe("ChatPage", () => {
     expect(wrapper.text()).not.toContain("消息已提交，正在等待流式结果。");
   });
 
-  it("routes runtime tool activity into the right rail instead of the assistant message", async () => {
+  it("routes runtime tool activity into the pending assistant turn timeline", async () => {
     let handlers: ChatThreadEventHandlers | undefined;
 
     setApiClient(
@@ -933,8 +950,7 @@ describe("ChatPage", () => {
     await flushPromises();
 
     expect(wrapper.text()).not.toContain("本轮运行活动");
-    expect(wrapper.find(".runtime-rail").exists()).toBe(true);
-    expect(wrapper.find(".runtime-rail").text()).toContain("shell");
+    expect(wrapper.find(".runtime-rail").exists()).toBe(false);
 
     handlers!.onEvent({
       session_id: "session-1",
@@ -954,15 +970,36 @@ describe("ChatPage", () => {
     const messages = panel.props("robotMessages") as Array<{
       id?: string;
       role: string;
+      content?: unknown;
       state?: { toolDetails?: unknown[] };
     }>;
     const pendingAssistant = messages.find((item) => item.id === "pending-assistant");
     expect(pendingAssistant?.role).toBe("assistant");
-    expect(pendingAssistant?.state?.toolDetails).toBeUndefined();
-    expect(wrapper.find(".runtime-rail").text()).toContain("完成");
+    expect(pendingAssistant?.content).toEqual([
+      {
+        type: "argus-turn-timeline",
+        items: [
+          expect.objectContaining({
+            type: "tool_call",
+            id: "call-shell",
+            name: "shell",
+            status: "success",
+            inputPreview: "{\n  \"cmd\": \"pwd\"\n}",
+            outputPreview: "/workspace/project",
+          }),
+        ],
+      },
+    ]);
+    expect(pendingAssistant?.state?.toolDetails).toEqual([
+      expect.objectContaining({
+        id: "call-shell",
+        status: "success",
+      }),
+    ]);
+    expect(wrapper.find(".runtime-rail").exists()).toBe(false);
   });
 
-  it("collapses and expands the floating runtime activity list without removing its summary", async () => {
+  it("does not render a floating runtime activity list for pending tool calls", async () => {
     let handlers: ChatThreadEventHandlers | undefined;
 
     setApiClient(
@@ -996,25 +1033,26 @@ describe("ChatPage", () => {
     });
     await flushPromises();
 
-    const toggle = wrapper.get(".runtime-rail__toggle");
-    expect(toggle.attributes("aria-expanded")).toBe("true");
-    expect(wrapper.findAll(".runtime-rail__item")).toHaveLength(1);
-
-    await toggle.trigger("click");
-    await flushPromises();
-
-    expect(wrapper.get(".runtime-rail").classes()).toContain("runtime-rail--collapsed");
-    expect(wrapper.get(".runtime-rail__toggle").attributes("aria-expanded")).toBe("false");
-    expect(wrapper.get(".runtime-rail__list").attributes("style")).toContain("display: none");
-    expect(wrapper.get(".runtime-rail").text()).toContain("当前运行");
-    expect(wrapper.get(".runtime-rail").text()).toContain("1");
-
-    await wrapper.get(".runtime-rail__toggle").trigger("click");
-    await flushPromises();
-
-    expect(wrapper.get(".runtime-rail__toggle").attributes("aria-expanded")).toBe("true");
-    expect(wrapper.get(".runtime-rail__list").attributes("style") ?? "").not.toContain("display: none");
-    expect(wrapper.findAll(".runtime-rail__item")).toHaveLength(1);
+    expect(wrapper.find(".runtime-rail").exists()).toBe(false);
+    const panel = wrapper.getComponent(ChatConversationPanel);
+    const messages = panel.props("robotMessages") as Array<{
+      id?: string;
+      content?: unknown;
+    }>;
+    const pendingAssistant = messages.find((item) => item.id === "pending-assistant");
+    expect(pendingAssistant?.content).toEqual([
+      {
+        type: "argus-turn-timeline",
+        items: [
+          expect.objectContaining({
+            type: "tool_call",
+            id: "call-shell",
+            name: "shell",
+            status: "running",
+          }),
+        ],
+      },
+    ]);
   });
 
   it("keeps runtime activity ordered from first started to latest while updating in place", async () => {
@@ -1073,12 +1111,32 @@ describe("ChatPage", () => {
     });
     await flushPromises();
 
-    const rows = wrapper.findAll(".runtime-rail__item");
-    expect(rows).toHaveLength(2);
-    expect(rows[0]!.text()).toContain("shell");
-    expect(rows[0]!.text()).toContain("完成");
-    expect(rows[1]!.text()).toContain("后台 Job job-2");
-    expect(rows[1]!.text()).toContain("运行中");
+    expect(wrapper.find(".runtime-rail").exists()).toBe(false);
+    const panel = wrapper.getComponent(ChatConversationPanel);
+    const messages = panel.props("robotMessages") as Array<{
+      id?: string;
+      content?: unknown;
+    }>;
+    const pendingAssistant = messages.find((item) => item.id === "pending-assistant");
+    expect(pendingAssistant?.content).toEqual([
+      {
+        type: "argus-turn-timeline",
+        items: [
+          expect.objectContaining({
+            type: "tool_call",
+            id: "call-shell",
+            name: "shell",
+            status: "success",
+          }),
+          expect.objectContaining({
+            type: "tool_call",
+            id: "job-2",
+            name: "后台 Job job-2",
+            status: "running",
+          }),
+        ],
+      },
+    ]);
   });
 
   it("starts a new chat draft when clicking the new chat button", async () => {

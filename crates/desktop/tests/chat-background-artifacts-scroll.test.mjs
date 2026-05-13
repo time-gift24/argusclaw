@@ -18,10 +18,10 @@ test("background job artifacts stay scrollable inside the detached composer area
   );
 });
 
-test("pending tool artifacts stay scrollable inside the detached composer area", () => {
+test("pending timeline artifacts stay scrollable inside the detached composer area", () => {
   assert.match(
     threadSource,
-    /<div className="mt-2 flex max-h-\[[^\"]+\] flex-col gap-1 overflow-y-auto custom-scrollbar border-l-2 border-muted\/30 pl-4 pr-1 ml-4">/,
+    /<div className="flex max-h-\[[^\"]+\] flex-col gap-3 overflow-y-auto custom-scrollbar/,
   );
 });
 

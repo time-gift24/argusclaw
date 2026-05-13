@@ -2,7 +2,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
-const storeSource = readFileSync(new URL("../lib/chat-store.ts", import.meta.url), "utf8");
+const storeSource = readFileSync(
+  new URL("../lib/chat-store.ts", import.meta.url),
+  "utf8",
+);
 const typesSource = readFileSync(
   new URL("../lib/types/chat.ts", import.meta.url),
   "utf8",
@@ -11,20 +14,32 @@ const typesSource = readFileSync(
 test("chat store keeps sessions keyed by template and provider preference", () => {
   assert.match(storeSource, /errorMessage:\s*string \| null/);
   assert.match(storeSource, /activeSessionKey:\s*string \| null/);
-  assert.match(storeSource, /sessionsByKey:\s*Record<string,\s*ChatSessionState>/);
+  assert.match(
+    storeSource,
+    /sessionsByKey:\s*Record<string,\s*ChatSessionState>/,
+  );
   assert.match(storeSource, /selectedProviderPreferenceId:\s*number \| null/);
-  assert.match(storeSource, /chatThreadPoolSnapshot:\s*ThreadPoolSnapshot \| null/);
+  assert.match(
+    storeSource,
+    /chatThreadPoolSnapshot:\s*ThreadPoolSnapshot \| null/,
+  );
   assert.match(storeSource, /jobRuntimeSnapshot:\s*JobRuntimeSnapshot \| null/);
   assert.match(storeSource, /threadPoolSnapshot:\s*ThreadPoolSnapshot \| null/);
   assert.match(storeSource, /threadPoolSnapshotLoading:\s*boolean/);
   assert.match(storeSource, /threadPoolError:\s*string \| null/);
   assert.match(storeSource, /threadPoolThreads:\s*ThreadPoolThreadState\[\]/);
-  assert.match(storeSource, /refreshThreadPoolSnapshot:\s*\(\)\s*=>\s*Promise<void>/);
+  assert.match(
+    storeSource,
+    /refreshThreadPoolSnapshot:\s*\(\)\s*=>\s*Promise<void>/,
+  );
   assert.match(storeSource, /ThreadPoolRuntimeSummary/);
   assert.match(storeSource, /JobRuntimeSummary/);
   assert.match(storeSource, /threadPool\.getState\(/);
   assert.match(storeSource, /jobRuntime\.getState\(/);
-  assert.match(storeSource, /const \[poolState,\s*jobState\] = await Promise\.all\(\[/);
+  assert.match(
+    storeSource,
+    /const \[poolState,\s*jobState\] = await Promise\.all\(\[/,
+  );
   assert.match(storeSource, /mapChatRuntimeSummaryToThreadState/);
   assert.match(storeSource, /mapJobRuntimeSummaryToThreadState/);
   assert.match(storeSource, /mergeMonitorSnapshot/);
@@ -63,7 +78,10 @@ test("chat store keeps sessions keyed by template and provider preference", () =
   assert.doesNotMatch(storeSource, /payload\.kind/);
   assert.doesNotMatch(storeSource, /runtime\.runtime/);
   assert.doesNotMatch(typesSource, /interface ThreadPoolRuntimeRef/);
-  assert.match(storeSource, /threadPoolThreads:\s*state\.threadPoolThreads\.map\(/);
+  assert.match(
+    storeSource,
+    /threadPoolThreads:\s*state\.threadPoolThreads\.map\(/,
+  );
   assert.match(storeSource, /void get\(\)\.refreshThreadPoolSnapshot\(\);/);
   assert.match(storeSource, /await get\(\)\.activateSession\(/);
   assert.match(storeSource, /chat\.createChatSession\(/);
@@ -100,11 +118,25 @@ test("chat store guards thread-event listener registration against concurrent in
 test("chat store tracks pending reasoning alongside streamed assistant text", () => {
   assert.match(
     storeSource,
-    /pendingAssistant:[\s\S]*content:\s*string;[\s\S]*reasoning:\s*string;[\s\S]*toolCalls:\s*PendingToolCall\[\];[\s\S]*plan:\s*PlanItem\[\]\s*\|\s*null[\s\S]*retry:[\s\S]*attempt:\s*number;[\s\S]*maxRetries:\s*number;[\s\S]*error:\s*string[\s\S]*\|\s*null[\s\S]*\}\s*\|\s*null/,
+    /pendingAssistant:[\s\S]*content:\s*string;[\s\S]*reasoning:\s*string;[\s\S]*toolCalls:\s*PendingToolCall\[\];[\s\S]*timeline:\s*PendingTurnArtifact\[\];[\s\S]*plan:\s*PlanItem\[\]\s*\|\s*null[\s\S]*retry:[\s\S]*attempt:\s*number;[\s\S]*maxRetries:\s*number;[\s\S]*error:\s*string[\s\S]*\|\s*null[\s\S]*\}\s*\|\s*null/,
   );
   assert.match(
     storeSource,
-    /case "reasoning_delta":[\s\S]*?ensurePendingAssistantSession\(session\)[\s\S]*?pendingAssistant:[\s\S]*?reasoning:\s*sessionWithPending\.pendingAssistant\.reasoning \+ payload\.delta/,
+    /case "reasoning_delta":[\s\S]*?appendPendingReasoningArtifact\(\s*sessionWithPending\.pendingAssistant,\s*payload\.delta[\s\S]*?\)/,
+  );
+});
+
+test("chat store keeps pending turn artifacts in streaming order", () => {
+  assert.match(storeSource, /type PendingTurnArtifact =/);
+  assert.match(storeSource, /appendPendingReasoningArtifact/);
+  assert.match(storeSource, /upsertPendingToolTimelineItem/);
+  assert.match(
+    storeSource,
+    /case "tool_started":[\s\S]*upsertPendingToolTimelineItem/,
+  );
+  assert.match(
+    storeSource,
+    /case "tool_completed":[\s\S]*upsertPendingToolTimelineItem/,
   );
 });
 
@@ -142,10 +174,7 @@ test("chat store bootstraps pending assistant state for mailbox-triggered wakeup
 });
 
 test("chat store keeps an optimistic pending user message until the persisted snapshot catches up", () => {
-  assert.match(
-    storeSource,
-    /pendingUserMessage:\s*string \| null/,
-  );
+  assert.match(storeSource, /pendingUserMessage:\s*string \| null/);
   assert.match(
     storeSource,
     /async sendMessage\(content: string\) \{[\s\S]*?pendingUserMessage:\s*trimmedContent/,
@@ -165,18 +194,9 @@ test("chat store surfaces retry attempts on the pending assistant and clears the
     storeSource,
     /case "retry_attempt":[\s\S]*?pendingAssistant:[\s\S]*?retry:\s*\{[\s\S]*attempt:\s*payload\.attempt,[\s\S]*maxRetries:\s*payload\.max_retries,[\s\S]*error:\s*payload\.error[\s\S]*\}/,
   );
-  assert.match(
-    storeSource,
-    /case "content_delta":[\s\S]*?retry:\s*null/,
-  );
-  assert.match(
-    storeSource,
-    /case "reasoning_delta":[\s\S]*?retry:\s*null/,
-  );
-  assert.match(
-    storeSource,
-    /case "tool_call_delta":[\s\S]*?retry:\s*null/,
-  );
+  assert.match(storeSource, /case "content_delta":[\s\S]*?retry:\s*null/);
+  assert.match(storeSource, /case "reasoning_delta":[\s\S]*?retry:\s*null/);
+  assert.match(storeSource, /case "tool_call_delta":[\s\S]*?retry:\s*null/);
 });
 
 test("chat store tracks ephemeral job status outside the transcript", () => {
@@ -238,7 +258,10 @@ test("chat store waits for idle before refreshing the persisted snapshot", () =>
   const turnCompletedBranch = storeSource.match(
     /case "turn_completed":(?<branch>[\s\S]*?)break;/,
   );
-  assert.ok(turnCompletedBranch, "turn_completed branch should still exist for status handling");
+  assert.ok(
+    turnCompletedBranch,
+    "turn_completed branch should still exist for status handling",
+  );
   assert.doesNotMatch(
     turnCompletedBranch.groups?.branch ?? "",
     /refreshSnapshot\(sessionKey\)/,
@@ -260,10 +283,7 @@ test("chat store updates token count from llm usage and final turn usage", () =>
     storeSource,
     /case "turn_completed":[\s\S]*?tokenCount:\s*payload\.total_tokens/,
   );
-  assert.doesNotMatch(
-    storeSource,
-    /context_token_count/,
-  );
+  assert.doesNotMatch(storeSource, /context_token_count/);
 });
 
 test("failed update_plan completions clear any optimistic pending plan", () => {
@@ -322,7 +342,10 @@ test("store keeps new-session selection as a draft until the first send", () => 
   const providerBranch = storeSource.match(
     /async selectProviderPreference\(providerId: number \| null\) \{(?<branch>[\s\S]*?)\n  \},/,
   );
-  assert.ok(providerBranch?.groups?.branch, "selectProviderPreference branch should exist");
+  assert.ok(
+    providerBranch?.groups?.branch,
+    "selectProviderPreference branch should exist",
+  );
   assert.doesNotMatch(
     providerBranch.groups.branch,
     /activateSession\(/,
@@ -332,7 +355,10 @@ test("store keeps new-session selection as a draft until the first send", () => 
   const modelBranch = storeSource.match(
     /async selectModelOverride\(model: string \| null\) \{(?<branch>[\s\S]*?)\n  \},/,
   );
-  assert.ok(modelBranch?.groups?.branch, "selectModelOverride branch should exist");
+  assert.ok(
+    modelBranch?.groups?.branch,
+    "selectModelOverride branch should exist",
+  );
   assert.doesNotMatch(
     modelBranch.groups.branch,
     /activateSession\(/,

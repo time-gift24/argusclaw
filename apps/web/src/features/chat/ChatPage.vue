@@ -22,7 +22,6 @@ import {
 import ChatComposerBar from "./components/ChatComposerBar.vue";
 import ChatConversationPanel from "./components/ChatConversationPanel.vue";
 import ChatHistoryDialog from "./components/ChatHistoryDialog.vue";
-import RuntimeActivityRail from "./components/RuntimeActivityRail.vue";
 
 const chatSessions = useChatSessions();
 const chatThreadStream = useChatThreadStream({
@@ -78,7 +77,8 @@ const robotMessages = computed(() => toRobotMessages({
   hasActiveThread: hasActiveThread.value,
   pendingAssistantContent: chatThreadStream.pendingAssistantContent.value,
   pendingAssistantReasoning: chatThreadStream.pendingAssistantReasoning.value,
-  runtimeActivities: [],
+  runtimeActivities: chatThreadStream.runtimeActivities.value,
+  pendingTimeline: chatThreadStream.pendingTimeline.value,
 }));
 const bubbleRoles = createBubbleRoles();
 const starterPrompts = createStarterPrompts();
@@ -380,10 +380,6 @@ function applyPrompt(_event: MouseEvent, item: PromptProps) {
       />
     </div>
 
-    <div class="chat-runtime-floating-layer">
-      <RuntimeActivityRail :activities="chatThreadStream.runtimeActivities.value" />
-    </div>
-
     <div class="chat-page__composer-dock">
       <div class="chat-page__composer-shell">
         <div
@@ -431,7 +427,6 @@ function applyPrompt(_event: MouseEvent, item: PromptProps) {
 <style scoped>
 .chat-page {
   --chat-composer-width: 1120px;
-  --chat-rail-width: 320px;
   --chat-layout-gap: var(--space-5);
   --chat-dock-clearance: 132px;
   height: 100vh;
@@ -466,32 +461,11 @@ function applyPrompt(_event: MouseEvent, item: PromptProps) {
   overflow-x: clip;
   overflow-y: visible;
   padding: var(--space-6) var(--space-6) 0;
-  overscroll-behavior: contain;
 }
 
 .chat-body-stream::after {
   content: "";
   flex: 0 0 calc(var(--chat-dock-clearance, 132px) + var(--space-6));
-}
-
-.chat-runtime-floating-layer {
-  position: absolute;
-  top: var(--space-6);
-  right: var(--space-6);
-  z-index: 25;
-  width: var(--chat-rail-width);
-  max-width: calc(100vw - 260px - var(--space-6) - var(--space-6));
-  pointer-events: none;
-}
-
-.chat-runtime-floating-layer :deep(.runtime-rail) {
-  width: 100%;
-  pointer-events: auto;
-}
-
-.chat-runtime-floating-layer :deep(.runtime-rail--collapsed) {
-  width: min(100%, 188px);
-  margin-left: auto;
 }
 
 .chat-page__composer-dock {
@@ -543,19 +517,6 @@ function applyPrompt(_event: MouseEvent, item: PromptProps) {
 }
 
 @media (max-width: 1280px) {
-  .chat-runtime-floating-layer {
-    position: absolute;
-    top: var(--space-4);
-    right: var(--space-4);
-    width: min(100%, var(--chat-composer-width));
-    max-width: none;
-    pointer-events: auto;
-  }
-
-  .chat-runtime-floating-layer :deep(.runtime-rail--collapsed) {
-    width: 100%;
-  }
-
   .chat-page__composer-shell {
     width: min(100%, var(--chat-composer-width));
   }

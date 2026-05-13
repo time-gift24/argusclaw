@@ -21,6 +21,7 @@ type AssistantUiMessagePart = {
 };
 
 type TurnToolCall = {
+  readonly type: "tool_call";
   readonly toolCallId: string;
   readonly toolName: string;
   readonly args?: JsonObject;
@@ -29,9 +30,16 @@ type TurnToolCall = {
   readonly isError?: boolean;
 };
 
+type TurnReasoningArtifact = {
+  readonly type: "reasoning";
+  readonly id: string;
+  readonly text: string;
+};
+
+type TurnArtifactItem = TurnReasoningArtifact | TurnToolCall;
+
 type TurnArtifacts = {
-  readonly reasoning: string;
-  readonly toolCalls: readonly TurnToolCall[];
+  readonly items: readonly TurnArtifactItem[];
 };
 
 type AssistantUiMessage = {
@@ -50,7 +58,9 @@ type AssistantUiMessage = {
   };
 };
 
-const createEmptyAssistantMetadata = (): NonNullable<AssistantUiMessage["metadata"]> => ({
+const createEmptyAssistantMetadata = (): NonNullable<
+  AssistantUiMessage["metadata"]
+> => ({
   unstable_state: null,
   unstable_annotations: [],
   unstable_data: [],
@@ -77,7 +87,10 @@ const toReadonlyJsonValue = (value: unknown): JsonValue => {
 
   if (isRecord(value)) {
     return Object.fromEntries(
-      Object.entries(value).map(([key, item]) => [key, toReadonlyJsonValue(item)]),
+      Object.entries(value).map(([key, item]) => [
+        key,
+        toReadonlyJsonValue(item),
+      ]),
     );
   }
 
@@ -88,7 +101,10 @@ const toReadonlyJsonObject = (value: unknown): JsonObject | undefined => {
   if (!isRecord(value)) return undefined;
 
   return Object.fromEntries(
-    Object.entries(value).map(([key, item]) => [key, toReadonlyJsonValue(item)]),
+    Object.entries(value).map(([key, item]) => [
+      key,
+      toReadonlyJsonValue(item),
+    ]),
   ) as JsonObject;
 };
 
@@ -109,18 +125,15 @@ const parseMessageContent = (content: string): unknown => {
 const isFoldedCompactionMessage = (message: ChatMessagePayload) =>
   !!message.metadata?.synthetic &&
   !!message.metadata?.collapsed_by_default &&
-  [
-    "compaction_prompt",
-    "compaction_summary",
-    "compaction_replay",
-  ].includes(message.metadata.mode ?? "");
+  ["compaction_prompt", "compaction_summary", "compaction_replay"].includes(
+    message.metadata.mode ?? "",
+  );
 
 type AssistantTurnAccumulator = {
   readonly startedAtIndex: number;
   finalContent: string;
   messageMetadata: ChatMessagePayload["metadata"] | null | undefined;
-  reasoningSegments: string[];
-  toolCalls: TurnToolCall[];
+  items: TurnArtifactItem[];
   toolCallIndexById: Map<string, number>;
 };
 
@@ -169,8 +182,7 @@ function createAssistantTurnAccumulator(
     startedAtIndex: index,
     finalContent: "",
     messageMetadata: msg.metadata ?? null,
-    reasoningSegments: [],
-    toolCalls: [],
+    items: [],
     toolCallIndexById: new Map(),
   };
 
@@ -187,12 +199,17 @@ function appendAssistantMessageToTurn(
   }
 
   if ((msg.reasoning_content ?? "").trim().length > 0) {
-    turn.reasoningSegments.push(msg.reasoning_content ?? "");
+    turn.items.push({
+      type: "reasoning",
+      id: `reasoning-${turn.startedAtIndex}-${turn.items.length}`,
+      text: msg.reasoning_content ?? "",
+    });
   }
 
   for (const toolCall of msg.tool_calls ?? []) {
     const existingIndex = turn.toolCallIndexById.get(toolCall.id);
     const nextToolCall: TurnToolCall = {
+      type: "tool_call",
       toolCallId: toolCall.id,
       toolName: toolCall.name,
       args: toReadonlyJsonObject(toolCall.arguments),
@@ -200,13 +217,16 @@ function appendAssistantMessageToTurn(
     };
 
     if (existingIndex === undefined) {
-      turn.toolCallIndexById.set(toolCall.id, turn.toolCalls.length);
-      turn.toolCalls.push(nextToolCall);
+      turn.toolCallIndexById.set(toolCall.id, turn.items.length);
+      turn.items.push(nextToolCall);
       continue;
     }
 
-    turn.toolCalls[existingIndex] = {
-      ...turn.toolCalls[existingIndex]!,
+    const existingItem = turn.items[existingIndex];
+    if (!existingItem || existingItem.type !== "tool_call") continue;
+
+    turn.items[existingIndex] = {
+      ...existingItem,
       ...nextToolCall,
     };
   }
@@ -225,17 +245,19 @@ function attachToolResultToTurn(
   const toolCallIndex = turn.toolCallIndexById.get(msg.tool_call_id);
   if (toolCallIndex === undefined) return;
 
-  turn.toolCalls[toolCallIndex] = {
-    ...turn.toolCalls[toolCallIndex]!,
-    toolName: msg.name ?? turn.toolCalls[toolCallIndex]!.toolName,
+  const existingItem = turn.items[toolCallIndex];
+  if (!existingItem || existingItem.type !== "tool_call") return;
+
+  turn.items[toolCallIndex] = {
+    ...existingItem,
+    toolName: msg.name ?? existingItem.toolName,
     result: parseMessageContent(msg.content),
   };
 }
 
 function buildTurnArtifacts(turn: AssistantTurnAccumulator): TurnArtifacts {
   return {
-    reasoning: turn.reasoningSegments.join("\n\n").trim(),
-    toolCalls: turn.toolCalls,
+    items: turn.items,
   };
 }
 
@@ -247,8 +269,7 @@ function flushAssistantTurn(
 
   const turnArtifacts = buildTurnArtifacts(turn);
   const hasText = turn.finalContent.trim().length > 0;
-  const hasArtifacts =
-    turnArtifacts.reasoning.length > 0 || turnArtifacts.toolCalls.length > 0;
+  const hasArtifacts = turnArtifacts.items.length > 0;
 
   if (!hasText && !hasArtifacts) return null;
 
@@ -335,7 +356,10 @@ function buildAggregatedAssistantMessages(
 
   activeAssistantTurn = flushAssistantTurn(messages, activeAssistantTurn);
 
-  const pendingUserMessage = buildPendingUserMessage(session, messages.length + 1);
+  const pendingUserMessage = buildPendingUserMessage(
+    session,
+    messages.length + 1,
+  );
   if (pendingUserMessage) {
     messages.push(pendingUserMessage);
   }
@@ -355,10 +379,7 @@ function buildAggregatedAssistantMessages(
 }
 
 function extractUserText(
-  content:
-    | string
-    | { text?: string }
-    | ReadonlyArray<unknown>,
+  content: string | { text?: string } | ReadonlyArray<unknown>,
 ): string {
   if (typeof content === "string") return content;
   if (Array.isArray(content)) {
@@ -376,16 +397,23 @@ function extractUserText(
   return "";
 }
 
-export function useChatRuntime(): ReturnType<typeof useExternalStoreRuntime<AssistantUiMessage>> {
+export function useChatRuntime(): ReturnType<
+  typeof useExternalStoreRuntime<AssistantUiMessage>
+> {
   const sendMessage = useChatStore((state) => state.sendMessage);
   const session = useActiveChatSession();
   const messages = React.useMemo(
     () => buildAggregatedAssistantMessages(session),
     [session],
   );
-  const convertMessage = React.useCallback((message: AssistantUiMessage) => message, []);
+  const convertMessage = React.useCallback(
+    (message: AssistantUiMessage) => message,
+    [],
+  );
   const onNew = React.useCallback(
-    async (message: { content: string | { text?: string } | ReadonlyArray<unknown> }) => {
+    async (message: {
+      content: string | { text?: string } | ReadonlyArray<unknown>;
+    }) => {
       await sendMessage(extractUserText(message.content));
     },
     [sendMessage],

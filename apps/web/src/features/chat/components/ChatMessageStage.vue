@@ -1,5 +1,4 @@
 <script setup lang="ts">
-import { nextTick, onMounted, ref, watch } from "vue";
 import {
   type BubbleContentRendererMatch,
   type BubbleMessage,
@@ -13,7 +12,9 @@ import {
 } from "@opentiny/tiny-robot";
 
 import ToolCallSummaryContent from "./ToolCallSummaryContent.vue";
+import TurnTimelineContent from "./TurnTimelineContent.vue";
 import {
+  TURN_TIMELINE_CONTENT_TYPE,
   TOOL_SUMMARY_CONTENT_TYPE,
   type ChatRobotMessage,
 } from "../composables/useChatPresentation";
@@ -29,11 +30,8 @@ interface Emits {
   (e: "prompt", event: MouseEvent, item: PromptProps): void;
 }
 
-const props = defineProps<Props>();
+defineProps<Props>();
 const emit = defineEmits<Emits>();
-const stageRef = ref<HTMLDivElement | null>(null);
-const shouldStickToBottom = ref(true);
-const AUTO_SCROLL_THRESHOLD = 72;
 const bubbleStore = {
   mdConfig: {
     html: false,
@@ -47,63 +45,20 @@ const contentRendererMatches: BubbleContentRendererMatch[] = [
       content?.type === TOOL_SUMMARY_CONTENT_TYPE,
     renderer: ToolCallSummaryContent,
   },
+  {
+    find: (_message: BubbleMessage, content: ChatMessageContentItem) =>
+      content?.type === TURN_TIMELINE_CONTENT_TYPE,
+    renderer: TurnTimelineContent,
+  },
 ];
 
 function handlePromptClick(event: MouseEvent, item: PromptProps) {
   emit("prompt", event, item);
 }
-
-function getDistanceFromBottom(element: HTMLDivElement) {
-  return element.scrollHeight - element.clientHeight - element.scrollTop;
-}
-
-function updateStickToBottom() {
-  const stage = stageRef.value;
-  if (!stage) return;
-  shouldStickToBottom.value = getDistanceFromBottom(stage) <= AUTO_SCROLL_THRESHOLD;
-}
-
-function scrollStageToBottom() {
-  const stage = stageRef.value;
-  if (!stage) return;
-
-  const top = stage.scrollHeight;
-  if (typeof stage.scrollTo === "function") {
-    stage.scrollTo({ top, behavior: "auto" });
-  } else {
-    stage.scrollTop = top;
-  }
-}
-
-function handleStageScroll() {
-  updateStickToBottom();
-}
-
-watch(
-  () => props.messages,
-  async (messages) => {
-    if (messages.length === 0 || !shouldStickToBottom.value) return;
-    await nextTick();
-    scrollStageToBottom();
-  },
-  { deep: true },
-);
-
-onMounted(async () => {
-  await nextTick();
-  updateStickToBottom();
-  if (props.messages.length > 0) {
-    scrollStageToBottom();
-  }
-});
 </script>
 
 <template>
-  <div
-    ref="stageRef"
-    class="message-stage message-stage--flat message-stage--centered-assistant"
-    @scroll.passive="handleStageScroll"
-  >
+  <div class="message-stage message-stage--flat message-stage--centered-assistant">
     <div v-if="loading && messages.length === 0" class="empty-state">
       正在刷新消息…
     </div>
@@ -119,7 +74,6 @@ onMounted(async () => {
         :messages="messages"
         :role-configs="bubbleRoles"
         content-render-mode="split"
-        auto-scroll
         group-strategy="divider"
       />
     </TrBubbleProvider>
@@ -137,7 +91,6 @@ onMounted(async () => {
   height: auto;
   overflow: visible;
   padding: var(--space-2) 0 calc(var(--chat-dock-clearance, 132px) + var(--space-5));
-  overscroll-behavior: contain;
   --assistant-readable-width: 100%;
 }
 
@@ -224,6 +177,7 @@ onMounted(async () => {
 
 :deep(.tr-bubble__box[data-role="assistant"]) {
   width: 100%;
+  overflow: visible !important;
   max-width: none !important;
   background: transparent !important;
   border: none !important;

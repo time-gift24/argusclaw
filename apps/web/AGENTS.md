@@ -16,7 +16,7 @@
 - Phase 5：新增独立 `/chat` 页面，基于 server REST/SSE API，不使用 desktop chat store。
 - Phase 6：修正首发对话可用性，包括草稿会话名、空名称兜底、工具调用摘要和失败回滚。
 - Phase 7：在 Web 对话中展示当前 turn 的工具、重试、失败等运行活动。
-- Phase 8：将对话展示映射、运行活动、消息舞台、对话面板拆出组件/composable，避免 `ChatPage` 继续膨胀。
+- Phase 8：将对话展示映射、turn timeline、消息舞台、对话面板拆出组件/composable，避免 `ChatPage` 继续膨胀。
 - Phase 9：新增 `/agent-runs` 页面，调用 server-only agent run REST API 触发指定智能体运行并查询最近一次状态。
 
 ## 核心职责
@@ -35,7 +35,7 @@
 - 页面文字保持中文优先，术语与 `DESIGN.md` 保持一致。
 - 管理页面采用读写分离：列表/详情页负责读取与快速操作，新增/编辑/导入走独立路由并使用面包屑。
 - MCP 创建入口优先 JSON 导入；手动配置和 JSON 导入应共享创建/测试配置能力，不复制业务逻辑。
-- Chat SSE 只用于 live delta 和运行活动展示；settled 后必须刷新 REST snapshot/messages。
+- Chat SSE 只用于 live delta 和当前 turn timeline 展示；settled 后必须刷新 REST snapshot/messages。
 - 发送失败时必须回滚未落库的乐观消息；切换 session/thread 时必须清理 pending stream/activity 状态。
 - OpenTiny `Select` 的 model value 避免传入会触发运行时警告的裸数字，必要时在组件边界做 string 转换。
 
@@ -44,6 +44,7 @@
 - 默认浅色，支持深色主题切换；主题状态由根元素 class 和 localStorage 管理。
 - 保持传统管理台布局：左侧导航 + 右侧内容区，移动端折叠为单列/顶部导航。
 - 对话页参考 opencode desktop / Codex 对话风格：轻量上下文入口、主消息舞台、底部 composer、单个 pending assistant bubble 流式累积。
+- 同一 turn 聚合为一条 assistant message；reasoning 与工具调用必须在该消息内按事件顺序分段渲染，不再使用右侧工具活动区。
 - 空状态、加载、错误、保存成功、测试失败等都必须有中文反馈，不能让 404/502 等错误变成未处理 rejection。
 
 ## 验证

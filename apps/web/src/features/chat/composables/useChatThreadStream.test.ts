@@ -136,4 +136,93 @@ describe("useChatThreadStream", () => {
       }),
     ]);
   });
+
+  it("keeps pending turn timeline ordered across reasoning and tool events", () => {
+    const activeSessionId = ref("session-1");
+    const activeThreadId = ref("thread-1");
+    const stream = useChatThreadStream({ activeSessionId, activeThreadId });
+
+    stream.handleThreadEvent({
+      session_id: "session-1",
+      thread_id: "thread-1",
+      turn_number: null,
+      payload: {
+        type: "reasoning_delta",
+        delta: "先查看目录。",
+      },
+    });
+    stream.handleThreadEvent({
+      session_id: "session-1",
+      thread_id: "thread-1",
+      turn_number: null,
+      payload: {
+        type: "tool_started",
+        tool_call_id: "call-shell",
+        tool_name: "shell",
+        arguments: { cmd: "pwd" },
+      },
+    });
+    stream.handleThreadEvent({
+      session_id: "session-1",
+      thread_id: "thread-1",
+      turn_number: null,
+      payload: {
+        type: "tool_completed",
+        tool_call_id: "call-shell",
+        tool_name: "shell",
+        result: "/workspace/project",
+        is_error: false,
+      },
+    });
+    stream.handleThreadEvent({
+      session_id: "session-1",
+      thread_id: "thread-1",
+      turn_number: null,
+      payload: {
+        type: "reasoning_delta",
+        delta: "再搜索 runtime。",
+      },
+    });
+    stream.handleThreadEvent({
+      session_id: "session-1",
+      thread_id: "thread-1",
+      turn_number: null,
+      payload: {
+        type: "tool_started",
+        tool_call_id: "call-search",
+        tool_name: "mcp.search",
+        arguments: { q: "runtime" },
+      },
+    });
+
+    expect(stream.pendingTimeline.value).toEqual([
+      {
+        type: "reasoning",
+        id: "pending-reasoning-0",
+        text: "先查看目录。",
+      },
+      expect.objectContaining({
+        type: "tool_call",
+        id: "call-shell",
+        status: "success",
+        inputPreview: "{\n  \"cmd\": \"pwd\"\n}",
+        outputPreview: "/workspace/project",
+      }),
+      {
+        type: "reasoning",
+        id: "pending-reasoning-2",
+        text: "再搜索 runtime。",
+      },
+      expect.objectContaining({
+        type: "tool_call",
+        id: "call-search",
+        status: "running",
+        inputPreview: "{\n  \"q\": \"runtime\"\n}",
+      }),
+    ]);
+
+    stream.clearPendingAssistant();
+
+    expect(stream.pendingTimeline.value).toEqual([]);
+  });
 });

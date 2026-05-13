@@ -38,7 +38,10 @@ test("chat screen wires assistant-ui runtime into the thread UI", () => {
   assert.match(chatRuntimeSource, /turnArtifacts/);
   assert.match(chatRuntimeSource, /pending-user-/);
   assert.match(chatRuntimeSource, /createEmptyAssistantMetadata/);
-  assert.match(chatRuntimeSource, /const onNew = React\.useCallback|const onNew = useCallback|onNew:/);
+  assert.match(
+    chatRuntimeSource,
+    /const onNew = React\.useCallback|const onNew = useCallback|onNew:/,
+  );
   assert.match(chatScreenSource, /AssistantRuntimeProvider/);
   assert.match(chatScreenSource, /useChatRuntime\(\)/);
   assert.match(chatScreenSource, /TabsTrigger value="chat"/);
@@ -64,14 +67,17 @@ test("chat screen wires assistant-ui runtime into the thread UI", () => {
   );
   assert.match(threadSource, /ChatStatusBanner/);
   assert.match(threadSource, /jobStatuses|JobStatus/);
-  assert.match(threadSource, /whitespace-pre-wrap break-words[\s\S]*job\.message/);
+  assert.match(
+    threadSource,
+    /whitespace-pre-wrap break-words[\s\S]*job\.message/,
+  );
   assert.match(threadSource, /SubagentJobDetailsDrawer/);
   assert.match(threadSource, /openJobDetails/);
   assert.match(threadSource, /查看详情/);
   assert.match(threadSource, /AssistantTurnArtifacts/);
-  assert.match(threadSource, /TurnArtifactsPanel/);
-  assert.match(threadSource, /ToolCallList/);
+  assert.match(threadSource, /TurnTimelinePanel/);
   assert.match(threadSource, /pendingAssistant\.reasoning/);
+  assert.match(threadSource, /pendingAssistant\.timeline/);
   assert.match(threadSource, /pendingAssistant\.retry/);
   assert.match(threadSource, /正在重试请求/);
   assert.match(pageSource, /<ChatScreen \/>/);

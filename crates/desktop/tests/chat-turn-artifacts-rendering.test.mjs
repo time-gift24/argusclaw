@@ -11,21 +11,29 @@ const threadSource = readFileSync(
   "utf8",
 );
 
-test("settled assistant turns aggregate reasoning and tool artifacts into message metadata", () => {
+test("settled assistant turns preserve ordered reasoning and tool artifacts in message metadata", () => {
   assert.match(chatRuntimeSource, /type TurnArtifacts = \{/);
+  assert.match(chatRuntimeSource, /items:\s*readonly TurnArtifactItem\[\]/);
+  assert.match(chatRuntimeSource, /type:\s*"reasoning"/);
+  assert.match(chatRuntimeSource, /type:\s*"tool_call"/);
   assert.match(chatRuntimeSource, /turnArtifacts/);
   assert.match(chatRuntimeSource, /buildAggregatedAssistantMessages/);
+  assert.doesNotMatch(chatRuntimeSource, /reasoningSegments\.join/);
 });
 
 test("assistant messages render turn artifacts outside inline assistant-ui parts", () => {
   assert.match(threadSource, /const AssistantTurnArtifacts: FC = \(\) => \{/);
-  assert.match(threadSource, /const TurnArtifactsPanel = \(\{/);
+  assert.match(threadSource, /const TurnTimelinePanel = \(\{/);
   assert.doesNotMatch(threadSource, /Reasoning:\s*ReasoningBlock/);
-  assert.doesNotMatch(threadSource, /tools:\s*\{\s*Fallback:\s*ToolFallback\s*\}/);
+  assert.doesNotMatch(
+    threadSource,
+    /tools:\s*\{\s*Fallback:\s*ToolFallback\s*\}/,
+  );
 });
 
-test("tool artifacts are rendered as a per-turn row list instead of a count summary", () => {
-  assert.match(threadSource, /const ToolCallList = \(\{/);
-  assert.match(threadSource, /toolCalls\.map\(\(toolCall\)/);
+test("tool artifacts are rendered inline as timeline items instead of a separate tool list", () => {
+  assert.match(threadSource, /turnArtifacts\.items\.map\(\(item\)/);
+  assert.match(threadSource, /item\.type === "tool_call"/);
+  assert.doesNotMatch(threadSource, /const ToolCallList = \(\{/);
   assert.doesNotMatch(threadSource, /调用了 \{toolCalls\.length\} 个工具/);
 });
