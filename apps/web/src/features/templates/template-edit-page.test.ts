@@ -148,6 +148,56 @@ describe("TemplateEditPage", () => {
     }));
   });
 
+  it("places the system prompt after the template options with a larger editor", async () => {
+    setApiClient(makeApiClient());
+
+    router.push("/templates/new");
+    await router.isReady();
+
+    const wrapper = mount(TemplateEditPage, {
+      global: {
+        plugins: [router],
+      },
+    });
+    await flushPromises();
+
+    const html = wrapper.html();
+    expect(html.indexOf('data-testid="template-system-prompt"')).toBeGreaterThan(
+      html.indexOf('data-testid="template-thinking"'),
+    );
+    expect(wrapper.get('[data-testid="template-system-prompt"]').attributes("rows")).toBe("12");
+  });
+
+  it("renders a safe markdown preview below the system prompt editor", async () => {
+    setApiClient(makeApiClient());
+
+    router.push("/templates/new");
+    await router.isReady();
+
+    const wrapper = mount(TemplateEditPage, {
+      global: {
+        plugins: [router],
+      },
+    });
+    await flushPromises();
+
+    await wrapper.get('[data-testid="template-system-prompt"]').setValue([
+      "# 角色",
+      "- 保持简洁",
+      "```",
+      "cargo test",
+      "```",
+      "<script>alert('xss')</script>",
+    ].join("\n"));
+
+    const preview = wrapper.get('[data-testid="template-system-prompt-preview"]');
+    expect(preview.find("h1").text()).toBe("角色");
+    expect(preview.find("li").text()).toBe("保持简洁");
+    expect(preview.find("pre code").text()).toBe("cargo test");
+    expect(preview.find("script").exists()).toBe(false);
+    expect(preview.text()).toContain("<script>alert('xss')</script>");
+  });
+
   it("loads an existing template and saves edits", async () => {
     const template = templateRecord({ id: 7, display_name: "Planner", system_prompt: "Plan well" });
     const saveTemplate = vi.fn(async (input: AgentRecord) => input);

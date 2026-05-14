@@ -43,6 +43,8 @@ interface TemplateFormState {
 
 const templateForm = ref<TemplateFormState>(createDefaultTemplateForm());
 
+const systemPromptPreviewHtml = computed(() => renderMarkdownPreview(templateForm.value.system_prompt));
+
 const selectedProviderModels = computed(() => {
   const providerId = Number(templateForm.value.provider_id);
   const provider = providers.value.find((item) => item.id === providerId);
@@ -92,6 +94,94 @@ function createDefaultTemplateForm(): TemplateFormState {
     thinking_enabled: false,
     clear_thinking: true,
   };
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function renderInlineMarkdown(value: string): string {
+  return escapeHtml(value).replace(/`([^`]+)`/g, "<code>$1</code>");
+}
+
+function renderMarkdownPreview(markdown: string): string {
+  const lines = markdown.split(/\r?\n/);
+  const html: string[] = [];
+  let inCodeBlock = false;
+  let codeLines: string[] = [];
+  let listItems: string[] = [];
+
+  const flushList = () => {
+    if (listItems.length === 0) {
+      return;
+    }
+    html.push(`<ul>${listItems.map((item) => `<li>${item}</li>`).join("")}</ul>`);
+    listItems = [];
+  };
+
+  const flushCode = () => {
+    html.push(`<pre><code>${escapeHtml(codeLines.join("\n"))}</code></pre>`);
+    codeLines = [];
+  };
+
+  for (const line of lines) {
+    if (line.trim().startsWith("```")) {
+      if (inCodeBlock) {
+        flushCode();
+        inCodeBlock = false;
+      } else {
+        flushList();
+        inCodeBlock = true;
+      }
+      continue;
+    }
+
+    if (inCodeBlock) {
+      codeLines.push(line);
+      continue;
+    }
+
+    const trimmed = line.trim();
+    if (!trimmed) {
+      flushList();
+      continue;
+    }
+
+    const headingMatch = /^(#{1,3})\s+(.+)$/.exec(trimmed);
+    if (headingMatch) {
+      flushList();
+      const level = headingMatch[1].length;
+      html.push(`<h${level}>${renderInlineMarkdown(headingMatch[2])}</h${level}>`);
+      continue;
+    }
+
+    const listMatch = /^[-*]\s+(.+)$/.exec(trimmed);
+    if (listMatch) {
+      listItems.push(renderInlineMarkdown(listMatch[1]));
+      continue;
+    }
+
+    if (trimmed.startsWith("> ")) {
+      flushList();
+      html.push(`<blockquote>${renderInlineMarkdown(trimmed.slice(2))}</blockquote>`);
+      continue;
+    }
+
+    flushList();
+    html.push(`<p>${renderInlineMarkdown(trimmed)}</p>`);
+  }
+
+  flushList();
+  if (inCodeBlock) {
+    flushCode();
+  }
+
+  return html.join("");
 }
 
 async function loadData() {
@@ -358,17 +448,6 @@ watch(
           </label>
         </div>
 
-        <label class="full-field">
-          <span>系统提示词</span>
-          <TinyInput
-            v-model="templateForm.system_prompt"
-            data-testid="template-system-prompt"
-            type="textarea"
-            :rows="5"
-            placeholder="描述智能体身份、边界和工作方式"
-          />
-        </label>
-
         <div class="template-form-grid">
           <label>
             <span>工具列表</span>
@@ -449,6 +528,36 @@ watch(
           </label>
         </div>
 
+        <label class="full-field system-prompt-field">
+          <span>系统提示词</span>
+          <TinyInput
+            v-model="templateForm.system_prompt"
+            data-testid="template-system-prompt"
+            type="textarea"
+            :rows="12"
+            placeholder="描述智能体身份、边界和工作方式"
+          />
+        </label>
+
+        <section class="markdown-preview" aria-label="系统提示词 Markdown 预览">
+          <div class="markdown-preview-heading">
+            <span>Markdown 预览</span>
+          </div>
+          <div
+            v-if="systemPromptPreviewHtml"
+            class="markdown-preview-body"
+            data-testid="template-system-prompt-preview"
+            v-html="systemPromptPreviewHtml"
+          />
+          <p
+            v-else
+            class="markdown-preview-empty"
+            data-testid="template-system-prompt-preview"
+          >
+            系统提示词预览会显示在这里。
+          </p>
+        </section>
+
         <div class="form-actions">
           <TinyButton
             data-testid="save-template"
@@ -522,6 +631,108 @@ watch(
 
 .full-field {
   grid-column: 1 / -1;
+}
+
+.system-prompt-field {
+  margin-top: var(--space-2);
+}
+
+:deep([data-testid="template-system-prompt"] textarea),
+:deep(textarea[data-testid="template-system-prompt"]) {
+  min-height: 280px;
+  resize: vertical;
+}
+
+.markdown-preview {
+  display: grid;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  background: var(--surface-muted);
+}
+
+.markdown-preview-heading {
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  font-weight: 650;
+}
+
+.markdown-preview-body,
+.markdown-preview-empty {
+  color: var(--text-primary);
+  font-size: var(--text-sm);
+  line-height: 1.65;
+}
+
+.markdown-preview-empty {
+  margin: 0;
+  color: var(--text-muted);
+}
+
+:deep(.markdown-preview-body > :first-child) {
+  margin-top: 0;
+}
+
+:deep(.markdown-preview-body > :last-child) {
+  margin-bottom: 0;
+}
+
+:deep(.markdown-preview-body h1),
+:deep(.markdown-preview-body h2),
+:deep(.markdown-preview-body h3) {
+  margin: var(--space-3) 0 var(--space-2);
+  color: var(--text-primary);
+  font-weight: 650;
+}
+
+:deep(.markdown-preview-body h1) {
+  font-size: var(--text-lg);
+}
+
+:deep(.markdown-preview-body h2) {
+  font-size: var(--text-base);
+}
+
+:deep(.markdown-preview-body h3) {
+  font-size: var(--text-sm);
+}
+
+:deep(.markdown-preview-body p),
+:deep(.markdown-preview-body ul),
+:deep(.markdown-preview-body blockquote) {
+  margin: 0 0 var(--space-3);
+}
+
+:deep(.markdown-preview-body ul) {
+  padding-left: var(--space-5);
+}
+
+:deep(.markdown-preview-body blockquote) {
+  padding-left: var(--space-3);
+  color: var(--text-secondary);
+  border-left: 3px solid var(--border-strong);
+}
+
+:deep(.markdown-preview-body pre) {
+  overflow-x: auto;
+  margin: 0 0 var(--space-3);
+  padding: var(--space-3);
+  border-radius: var(--radius-sm);
+  background: var(--surface-base);
+  border: 1px solid var(--border-default);
+}
+
+:deep(.markdown-preview-body code) {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+}
+
+:deep(.markdown-preview-body :not(pre) > code) {
+  padding: 0.1rem 0.3rem;
+  border-radius: var(--radius-sm);
+  background: var(--surface-base);
+  border: 1px solid var(--border-default);
 }
 
 .config-row {
